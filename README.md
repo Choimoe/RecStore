@@ -34,7 +34,7 @@ Enter the container.
 **We provide a script for one-click environment initialization**. Simply run the following command **in the docker** to set up the environment:
 
 	(inside docker) cd dockerfiles
-	(inside docker) bash init_env_inside_docker.sh > init_env.log 2>&1
+	(inside docker) bash init_env_inside_docker.sh
 
 
 ## Build RecStore

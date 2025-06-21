@@ -1,3 +1,14 @@
+#!/bin/bash
+s=" |/-\\"; COUNTER_FILE="/tmp/p_c_$$"; echo 0 > "$COUNTER_FILE" && trap 'rm -f "$COUNTER_FILE"' EXIT
+exec 3>"$(pwd)/init_env.log" 4>&1 1>&3 2>&1
+update_progress_bar(){ local C; read -r C < "$COUNTER_FILE"; C=$((C+1)); echo $C > "$COUNTER_FILE"; printf "\r[%s] Step %d" "${s:C%${#s}:1}" "$C" >&4; }
+PS4='$(update_progress_bar)+ Line ${LINENO}: '
+BASH_XTRACEFD=3
+
+
+
+
+
 cd "$(dirname "$0")"
 set -x
 set -e
@@ -92,7 +103,7 @@ sudo apt install -y -V libarrow-dev libparquet-dev
 
 # find /usr -name "libparquet.so"
 # find /usr -name "properties.h" | grep "parquet/properties.h"
-cd ${PROJECT_PATH}/third_party/HugeCTR && rm -rf _build && mkdir -p _build && cd _build && \
+cd ${PROJECT_PATH}/third_party/HugeCTR && sudo rm -rf _build && mkdir -p _build && cd _build && \
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_TESTING=OFF \
       -DENABLE_SAMPLES=OFF \
@@ -102,7 +113,7 @@ cmake -DCMAKE_BUILD_TYPE=Release \
       -DPARQUET_INCLUDE_DIR=/usr/include \
       ${CMAKE_REQUIRE} \
       ..
-make embedding -j20
+make embedding -j
 sudo find . -name "*.so" -exec cp {} /usr/local/hugectr/lib/ \;
 make clean
 
