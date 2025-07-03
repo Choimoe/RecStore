@@ -42,3 +42,12 @@ add_test(
             "$<TARGET_FILE:recstore_torch_ops>"
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python_client
 )
+
+add_test(
+    NAME dist_emb_unittest
+    COMMAND ${Python_EXECUTABLE} -m unittest recstore.test_dist_emb
+)
+
+set_tests_properties(dist_emb_unittest PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/pytorch
+)
