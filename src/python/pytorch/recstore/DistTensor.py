@@ -2,15 +2,7 @@ import torch
 from .KVClient import get_kv_client
 
 class DistTensor:
-    """
-    A Python-level representation of a distributed tensor.
-    It interacts with the backend key-value store through a RecStoreClient.
-    """
     def __init__(self, shape: tuple, dtype: torch.dtype, name: str, init_func=None):
-        """
-        Initializes a DistTensor. If a tensor with the given name does not
-        exist in the RecStoreClient, it will be created and initialized.
-        """
         if not isinstance(name, str) or not name:
             raise ValueError("DistTensor must have a valid name.")
 
@@ -19,11 +11,9 @@ class DistTensor:
         self._name = name
         self._kv_client = get_kv_client()
 
-        # Initialize the data in the backend if it doesn't already exist.
         if self._name not in self._kv_client.data_name_list():
             self._kv_client.init_data(self._name, self._shape, self._dtype, init_func)
         else:
-            # Verify that the existing tensor has matching shape and dtype.
             existing_dtype, existing_shape = self._kv_client.get_data_meta(self._name)
             if self._shape != existing_shape or self._dtype != existing_dtype:
                 raise TypeError(
@@ -31,10 +21,6 @@ class DistTensor:
                 )
 
     def __getitem__(self, ids: torch.Tensor) -> torch.Tensor:
-        """
-        Pulls embeddings for the given IDs from the backend KV store.
-        This corresponds to a 'pull' operation.
-        """
         if not isinstance(ids, torch.Tensor):
             ids = torch.tensor(ids, dtype=torch.int64)
         if ids.dtype != torch.int64:
@@ -43,10 +29,6 @@ class DistTensor:
         return self._kv_client.pull(self._name, ids)
 
     def __setitem__(self, ids: torch.Tensor, data: torch.Tensor):
-        """
-        Pushes data (values or gradients) for the given IDs to the backend.
-        This corresponds to a 'push' operation.
-        """
         if not isinstance(ids, torch.Tensor):
             ids = torch.tensor(ids, dtype=torch.int64)
         if ids.dtype != torch.int64:
