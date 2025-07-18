@@ -10,6 +10,8 @@
 // Assuming InitStrategyType is defined in base/tensor.h
 #include "base/tensor.h" 
 
+#include "framework/shm_kv_store/shm_kv_store.h"
+
 namespace recstore {
 namespace framework {
 
@@ -126,16 +128,29 @@ private:
     int64_t embedding_dim_;
 };
 
-// **FIX**: Replaced the previous singleton implementation with the robust std::call_once pattern.
-// This guarantees that the KVClientOp instance is created exactly once, regardless of
-// build environment complexities.
 std::shared_ptr<CommonOp> GetKVClientOp() {
-    static std::shared_ptr<CommonOp> instance;
-    static std::once_flag once_flag;
-    std::call_once(once_flag, []() {
-        instance = std::make_shared<KVClientOp>();
-    });
-    return instance;
+    const char* backend_type_str = std::getenv("RECSTORE_BACKEND_TYPE");
+    std::string backend_type = backend_type_str ? std::string(backend_type_str) : "DEFAULT";
+
+    if (backend_type == "SHM") {
+        static std::shared_ptr<CommonOp> instance;
+        static std::once_flag once_flag;
+        std::call_once(once_flag, []() {
+            std::cout << "Factory: Initializing SharedMemoryKVStore Backend..." << std::endl;
+            const char* shm_name = "recstore_shm_segment";
+            size_t shm_size = 1024 * 1024 * 1024; // 1 GB
+            instance = std::make_shared<SharedMemoryKVStore>(shm_name, shm_size);
+        });
+        return instance;
+    } else {
+        static std::shared_ptr<CommonOp> instance;
+        static std::once_flag once_flag;
+        std::call_once(once_flag, []() {
+            std::cout << "Factory: Initializing In-Process Memory Backend (Default)..." << std::endl;
+            instance = std::make_shared<KVClientOp>();
+        });
+        return instance;
+    }
 }
 
 } // namespace framework
