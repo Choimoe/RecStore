@@ -1,6 +1,7 @@
 #pragma once
 
 #include "framework/op.h"
+#include "ucc_context.h"
 #include <string>
 
 #include <boost/interprocess/managed_shared_memory.hpp>
@@ -52,7 +53,7 @@ public:
 
 private:
     void initialize_shm();
-    bool is_master_process();
+    // bool is_master_process();
 
     std::string shm_name_;
     bip::managed_shared_memory segment_;
@@ -62,6 +63,8 @@ private:
     int64_t* embedding_dim_ = nullptr;
     
     float learning_rate_;
+
+    UCCContext* ucc_context_ = nullptr;
 };
 
 } // namespace framework

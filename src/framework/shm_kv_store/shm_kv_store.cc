@@ -4,75 +4,76 @@
 #include <vector>
 #include <cstdlib> // For std::getenv
 #include <unistd.h> // For sleep
+#include "ucc_context.h"
 
 namespace recstore {
 namespace framework {
 
 SharedMemoryKVStore::SharedMemoryKVStore(const char* shm_name, size_t shm_size)
     : shm_name_(shm_name), learning_rate_(0.01f) {
+    ucc_context_ = &UCCContext::GetInstance();
+
     try {
-        if (is_master_process()) {
-            // master process: remove the old segment if it exists, then create a new segment
+        if (ucc_context_->GetRank() == 0) {
             bip::shared_memory_object::remove(shm_name_.c_str());
-            std::cout << "Master process: Creating shared memory segment '" << shm_name_ << "' with size " << shm_size << " bytes." << std::endl;
+            std::cout << "Master process (rank 0): Creating shared memory segment '" << shm_name_ << "'." << std::endl;
             segment_ = bip::managed_shared_memory(bip::create_only, shm_name_.c_str(), shm_size);
-        } else {
-            // slave process: wait for the master process to create the segment, then open it
-            // Note: the sleep here is a temporary, non-robust synchronization method.
-            // When UCC is introduced in the second phase, it should be replaced with UCC_Barrier.
-            std::cout << "Slave process: Waiting for shared memory segment '" << shm_name_ << "'..." << std::endl;
-            sleep(1); 
-            segment_ = bip::managed_shared_memory(bip::open_only, shm_name_.c_str());
-            std::cout << "Slave process: Attached to shared memory segment." << std::endl;
         }
-        // initialize the data structures in shared memory
+
+        ucc_context_->Barrier();
+
+        if (ucc_context_->GetRank() != 0) {
+            std::cout << "Slave process (rank " << ucc_context_->GetRank() << "): Attaching to shared memory segment." << std::endl;
+            segment_ = bip::managed_shared_memory(bip::open_only, shm_name_.c_str());
+        }
+
         initialize_shm();
+
+        ucc_context_->Barrier();
+
     } catch (const bip::interprocess_exception& ex) {
-        std::cerr << "Boost Interprocess Exception: " << ex.what() << std::endl;
+        std::cerr << "Rank " << ucc_context_->GetRank() << " Boost Interprocess Exception: " << ex.what() << std::endl;
         throw;
     }
 }
 
 SharedMemoryKVStore::~SharedMemoryKVStore() {
-    if (is_master_process()) {
-        std::cout << "Master process: Tearing down shared memory segment '" << shm_name_ << "'." << std::endl;
+    ucc_context_->Barrier();
+    if (ucc_context_->GetRank() == 0) {
+        std::cout << "Master process (rank 0): Tearing down shared memory segment '" << shm_name_ << "'." << std::endl;
         bip::shared_memory_object::remove(shm_name_.c_str());
     }
 }
 
 void SharedMemoryKVStore::initialize_shm() {
-    if (is_master_process()) {
-        // master process: construct objects in shared memory
+    if (ucc_context_->GetRank() == 0) {
         ShmPairAllocator alloc_inst(segment_.get_segment_manager());
         store_ = segment_.construct<ShmUnorderedMap>("KVStore")(alloc_inst);
         mtx_ = segment_.construct<bip::interprocess_mutex>("KVStoreMutex")();
         embedding_dim_ = segment_.construct<int64_t>("EmbeddingDim")(-1);
-        std::cout << "Master process: Constructed map, mutex, and embedding_dim in shared memory." << std::endl;
     } else {
-        // slave process: find objects in shared memory
         store_ = segment_.find<ShmUnorderedMap>("KVStore").first;
         mtx_ = segment_.find<bip::interprocess_mutex>("KVStoreMutex").first;
         embedding_dim_ = segment_.find<int64_t>("EmbeddingDim").first;
         if (!store_ || !mtx_ || !embedding_dim_) {
-            throw std::runtime_error("Slave process could not find essential objects in shared memory. Is the master process running and initialized?");
+            throw std::runtime_error("Slave process could not find essential objects in shared memory.");
         }
-        std::cout << "Slave process: Found map, mutex, and embedding_dim in shared memory." << std::endl;
     }
 }
 
-bool SharedMemoryKVStore::is_master_process() {
-    // Using MPI/UCC to determine the rank of the process.
-    // If the environment variable does not exist, it is assumed to be a single process mode, that is, the master process.
-    const char* rank_str = std::getenv("OMPI_COMM_WORLD_RANK");
-    if (rank_str == nullptr) {
-        rank_str = std::getenv("PMI_RANK"); // For other launchers like SLURM
-    }
+// bool SharedMemoryKVStore::is_master_process() {
+//     // Using MPI/UCC to determine the rank of the process.
+//     // If the environment variable does not exist, it is assumed to be a single process mode, that is, the master process.
+//     const char* rank_str = std::getenv("OMPI_COMM_WORLD_RANK");
+//     if (rank_str == nullptr) {
+//         rank_str = std::getenv("PMI_RANK"); // For other launchers like SLURM
+//     }
     
-    if (rank_str == nullptr) {
-        return true; // cannot determine the rank, assume it is the master process.
-    }
-    return std::stoi(rank_str) == 0;
-}
+//     if (rank_str == nullptr) {
+//         return true; // cannot determine the rank, assume it is the master process.
+//     }
+//     return std::stoi(rank_str) == 0;
+// }
 
 void SharedMemoryKVStore::EmbRead(const RecTensor& keys, RecTensor& values) {
     bip::scoped_lock<bip::interprocess_mutex> lock(*mtx_);
