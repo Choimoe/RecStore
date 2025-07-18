@@ -60,7 +60,7 @@ public:
     virtual void EmbUpdate(const RecTensor& keys, const RecTensor& grads) = 0; // not urgent
 
     // Prefetch & write (async)
-    virtual uint64_t EmbPrefetch(const RecTensor& keys) = 0; // async prefetch, returns a unique ID to track the prefetch status.
+    virtual uint64_t EmbPrefetch(const RecTensor& keys, const RecTensor& values) = 0; // async prefetch, returns a unique ID to track the prefetch status.
     virtual bool IsPrefetchDone(uint64_t prefetch_id) = 0;  // returns true if the prefetch identified by prefetch_id is complete.
     virtual void WaitForPrefetch(uint64_t prefetch_id) = 0;  // blocks until the prefetch identified by prefetch_id is complete.
 
