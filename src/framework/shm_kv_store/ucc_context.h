@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ucc/api/ucc.h>
+#include <mpi.h>
 #include <string>
 #include <vector>
 #include <stdexcept>

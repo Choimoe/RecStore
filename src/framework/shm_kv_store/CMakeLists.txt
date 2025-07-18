@@ -1,4 +1,5 @@
 find_package(Torch REQUIRED)
+find_package(MPI REQUIRED)
 
 set(UCC_ROOT ${PROJECT_SOURCE_DIR}/third_party/ucc/build)
 set(UCC_INCLUDE_DIR ${UCC_ROOT}/include)
@@ -26,5 +27,6 @@ target_link_libraries(recstore_shm_kv_store PUBLIC
     ${FOLLY_LIBRARIES}
     ${TORCH_LIBRARIES}
     ucc
+    MPI::MPI_CXX
 )
 

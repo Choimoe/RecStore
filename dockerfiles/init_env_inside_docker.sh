@@ -84,10 +84,17 @@ cd ${PROJECT_PATH}/binary
 pip install torch==2.0.0 -f https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/
 
 cd ${PROJECT_PATH}/third_party/ucx
-./autogen.sh && ./configure --prefix=$(pwd)/build && make -j$(nproc) install
+mkdir -p build && cd build
+../contrib/configure-release --prefix=/opt/ucx
+make -j$(nproc)
+sudo make install
+
+export PKG_CONFIG_PATH=/opt/ucx/lib/pkgconfig:$PKG_CONFIG_PATH
+export LD_LIBRARY_PATH=/opt/ucx/lib:$LD_LIBRARY_PATH
+export CPATH=/opt/ucx/include:$CPATH
 
 cd ${PROJECT_PATH}/third_party/ucc
-./autogen.sh && ./configure --prefix=$(pwd)/build --with-ucx=${PROJECT_PATH}/third_party/ucx/build && make -j$(nproc) install
+./autogen.sh && ./configure --prefix=$(pwd)/build --with-ucx=/opt/ucx && make -j$(nproc) && sudo make install
 
 # HugeCTR
 cd ${PROJECT_PATH}/build
