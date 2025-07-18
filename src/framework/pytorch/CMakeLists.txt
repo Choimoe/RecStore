@@ -10,7 +10,6 @@ find_package(Python 3.10 COMPONENTS Interpreter Development REQUIRED)
 add_library(recstore_torch_ops SHARED
     op_torch.cc
     ../op.cc
-    ../shm_kv_store/shm_kv_store.cc
 )
 
 # Specify the include directories required for compilation.
@@ -22,6 +21,7 @@ target_include_directories(recstore_torch_ops PRIVATE
 
 # Link the compiled library against the libraries provided by PyTorch.
 target_link_libraries(recstore_torch_ops PRIVATE
+    recstore_shm_kv_store
     ${TORCH_LIBRARIES}
 )
 
