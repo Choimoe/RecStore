@@ -43,6 +43,7 @@ public:
   void EmbRead(const RecTensor& keys, RecTensor& values) override;
   void EmbWrite(const RecTensor& keys, const RecTensor& values) override;
   void EmbUpdate(const RecTensor& keys, const RecTensor& grads) override;
+  void barrier() override;
 
   // ===================================================================
   // Not implemented interface

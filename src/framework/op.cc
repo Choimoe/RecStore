@@ -21,6 +21,8 @@ public:
         std::cout << "KVClientOp initialized with full interface." << std::endl;
     }
 
+    void barrier() override { /* In-process backend does nothing */ }
+
     void EmbInit(const base::RecTensor& keys, const base::RecTensor& init_values) override {
         EmbWrite(keys, init_values);
     }

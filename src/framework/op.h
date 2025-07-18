@@ -72,6 +72,8 @@ public:
     virtual void SaveToFile(const std::string& path) = 0; // not urgent
     virtual void LoadFromFile(const std::string& path) = 0; // not urgent
 
+    virtual void barrier() = 0;
+
     virtual ~CommonOp() = default;
 };
 

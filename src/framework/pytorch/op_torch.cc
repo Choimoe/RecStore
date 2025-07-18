@@ -77,10 +77,16 @@ void emb_write_torch(const torch::Tensor& keys, const torch::Tensor& values) {
   op->EmbWrite(rec_keys, rec_values);
 }
 
+void emb_barrier_torch() {
+    auto op = GetKVClientOp();
+    op->barrier();
+}
+
 TORCH_LIBRARY(recstore_ops, m) {
   m.def("emb_read", emb_read_torch);
   m.def("emb_update", emb_update_torch);
   m.def("emb_write", emb_write_torch);
+  m.def("emb_barrier", emb_barrier_torch);
 }
 
 } // namespace framework
