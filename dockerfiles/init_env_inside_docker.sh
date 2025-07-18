@@ -83,6 +83,12 @@ cd ${PROJECT_PATH}/binary
 # pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple torch-2.0.0a0+git*.whl
 pip install torch==2.0.0 -f https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/
 
+cd ${PROJECT_PATH}/third_party/ucx
+./autogen.sh && ./configure --prefix=$(pwd)/build && make -j$(nproc) install
+
+cd ${PROJECT_PATH}/third_party/ucc
+./autogen.sh && ./configure --prefix=$(pwd)/build --with-ucx=${PROJECT_PATH}/third_party/ucx/build && make -j$(nproc) install
+
 # HugeCTR
 cd ${PROJECT_PATH}/build
 wget https://apache.jfrog.io/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb

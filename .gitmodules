@@ -37,3 +37,9 @@
 [submodule "third_party/cpptrace"]
 	path = third_party/cpptrace
 	url = https://github.com/jeremy-rifkin/cpptrace.git
+[submodule "third_party/ucc"]
+	path = third_party/ucc
+	url = https://github.com/openucx/ucc.git
+[submodule "third_party/ucx"]
+	path = third_party/ucx
+	url = https://github.com/openucx/ucx.git
