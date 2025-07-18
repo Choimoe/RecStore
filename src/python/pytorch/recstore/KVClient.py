@@ -66,13 +66,8 @@ class RecStoreClient:
         return 1
 
     def barrier(self):
-        """Barrier for all client nodes.
-
-        This API will be blocked untill all the clients invoke this API.
-        """
-        # Not applicable in a non-distributed, ops-based setup.
-        print("Warning: barrier() called but has no effect in ops-based implementation.")
-        pass
+        """Barrier for all client nodes."""
+        self.ops.emb_barrier()
 
     def register_push_handler(self, name: str, func: Callable):
         """Register UDF push function."""

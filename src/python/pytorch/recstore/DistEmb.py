@@ -52,6 +52,7 @@ class DistEmbedding(torch.nn.Module):
         name: Optional[str] = None,
         init_func: Optional[Callable] = None,
         part_policy: Any = None,
+        persistent: bool = False
     ):
         super(DistEmbedding, self).__init__()
         if not name:
@@ -63,6 +64,7 @@ class DistEmbedding(torch.nn.Module):
             name=name,
             init_func=init_func,
             part_policy=part_policy,
+            persistent=persistent
         )
         self.dummy_param = torch.nn.Parameter(torch.empty(0))
 
@@ -71,6 +73,7 @@ class DistEmbedding(torch.nn.Module):
         self._embedding_dim = embedding_dim
         self._part_policy = part_policy
         self._optm_state = None
+        self.persistent = persistent
 
     def forward(self, ids):
         """

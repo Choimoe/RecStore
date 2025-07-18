@@ -26,6 +26,7 @@ class DistTensor:
         self._name = name
         self._kv_client = get_kv_client()
         self._is_gdata = is_gdata
+        self._persistent = persistent
 
         if part_policy is not None:
             print("Warning: part_policy is ignored in the current ops-based implementation.")
