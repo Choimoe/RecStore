@@ -46,6 +46,11 @@ public:
   void barrier() override;
 
   // ===================================================================
+  // Additional utility methods
+  // ===================================================================
+  void reset_embedding_dimension();
+
+  // ===================================================================
   // Not implemented interface
   // ===================================================================
   bool EmbExists(const RecTensor& keys) override;

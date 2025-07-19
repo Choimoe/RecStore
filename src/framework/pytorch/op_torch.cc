@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include "framework/op.h"
 #include "base/tensor.h"
+#include "framework/shm_kv_store/shm_kv_store.h"
 
 namespace recstore {
 namespace framework {
@@ -82,11 +83,21 @@ void emb_barrier_torch() {
     op->barrier();
 }
 
+void emb_reset_dimension_torch() {
+    auto op = GetKVClientOp();
+    // Cast to SharedMemoryKVStore to access reset_embedding_dimension
+    auto shm_op = std::dynamic_pointer_cast<SharedMemoryKVStore>(op);
+    if (shm_op) {
+        shm_op->reset_embedding_dimension();
+    }
+}
+
 TORCH_LIBRARY(recstore_ops, m) {
   m.def("emb_read", emb_read_torch);
   m.def("emb_update", emb_update_torch);
   m.def("emb_write", emb_write_torch);
   m.def("emb_barrier", emb_barrier_torch);
+  m.def("emb_reset_dimension", emb_reset_dimension_torch);
 }
 
 } // namespace framework

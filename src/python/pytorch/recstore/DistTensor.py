@@ -36,6 +36,9 @@ class DistTensor:
         if init_func is None:
             init_func = _default_init_data
 
+        # Synchronize before checking tensor existence to avoid race conditions
+        self._kv_client.barrier()
+        
         exist_names = self._kv_client.data_name_list()
 
         if name is None:
@@ -46,11 +49,13 @@ class DistTensor:
 
         if self._name not in self._kv_client.data_name_list():
             self._owner = True
+            print(f"Creating new DistTensor '{self._name}' with shape {self._shape}")
             self._kv_client.init_data(
                 self._name, self._shape, self._dtype, part_policy, init_func, is_gdata
             )
         else:
             self._owner = False
+            print(f"Attaching to existing DistTensor '{self._name}'")
             existing_dtype, existing_shape = self._kv_client.get_data_meta(self._name)
             if self._shape != existing_shape or self._dtype != existing_dtype:
                 raise TypeError(
@@ -58,6 +63,9 @@ class DistTensor:
                     f"Existing: {existing_shape}/{existing_dtype}, "
                     f"New: {self._shape}/{self._dtype}"
                 )
+        
+        # Synchronize after tensor creation/attachment
+        self._kv_client.barrier()
 
     def __del__(self):
         """Destructor to clean up non-persistent tensors."""

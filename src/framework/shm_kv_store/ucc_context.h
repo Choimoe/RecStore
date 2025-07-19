@@ -22,6 +22,11 @@ public:
 
   int GetWorldSize() const { return world_size_; }
 
+  // NEW: Getter for the receive counts from the last Allgatherv call.
+  const std::vector<int>& GetLastRecvCounts() const {
+    return last_recv_counts_;
+  }
+
   UCCContext(const UCCContext&)            = delete;
   UCCContext& operator=(const UCCContext&) = delete;
 
@@ -37,6 +42,8 @@ private:
 
   int rank_       = 0;
   int world_size_ = 1;
+
+  std::vector<int> last_recv_counts_;
 };
 
 } // namespace framework

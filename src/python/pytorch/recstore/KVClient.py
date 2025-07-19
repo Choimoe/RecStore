@@ -69,6 +69,10 @@ class RecStoreClient:
         """Barrier for all client nodes."""
         self.ops.emb_barrier()
 
+    def reset_embedding_dimension(self):
+        """Reset embedding dimension to -1 to allow different dimensions in different tests."""
+        self.ops.emb_reset_dimension()
+
     def register_push_handler(self, name: str, func: Callable):
         """Register UDF push function."""
         raise NotImplementedError("register_push_handler is not implemented for the ops-based client.")
