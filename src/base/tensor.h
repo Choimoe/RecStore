@@ -128,6 +128,8 @@ class RecTensor {
   }
   void set_dtype(DataType new_dtype) { dtype_ = new_dtype; }
 
+  const std::vector<int64_t>& shape_as_vector() const { return shape_; }
+
  private:
   void recalculate_num_elements() {
     if (shape_.empty()) {
@@ -147,5 +149,43 @@ class RecTensor {
   DataType dtype_;
   size_t num_elements_;
 };
+
+inline DataType FromTorchDType(const at::ScalarType& dtype) {
+  switch (dtype) {
+    case at::kFloat:
+      return DataType::FLOAT32;
+    case at::kHalf:
+      return DataType::FLOAT16;
+    case at::kLong:
+      return DataType::UINT64;
+    case at::kInt:
+      return DataType::INT32;
+    case at::kShort:
+      return DataType::INT16;
+    case at::kChar:
+      return DataType::INT8;
+    default:
+      return DataType::UNKNOWN;
+  }
+}
+
+inline at::ScalarType ToTorchDType(DataType dtype) {
+  switch (dtype) {
+    case DataType::FLOAT32:
+      return at::kFloat;
+    case DataType::FLOAT16:
+      return at::kHalf;
+    case DataType::UINT64:
+      return at::kLong;
+    case DataType::INT32:
+      return at::kInt;
+    case DataType::INT16:
+      return at::kShort;
+    case DataType::INT8:
+      return at::kChar;
+    default:
+      throw std::runtime_error("Unsupported DataType for ToTorchDType");
+  }
+}
 
 }  // namespace base
