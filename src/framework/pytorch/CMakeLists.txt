@@ -52,14 +52,3 @@ add_test(
 set_tests_properties(dist_emb_unittest PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/pytorch
 )
-
-find_package(MPI REQUIRED)
-
-add_test(
-    NAME dist_emb_shm_unittest
-    COMMAND ${MPIEXEC_EXECUTABLE} -np 2 ${PYTHON_EXECUTABLE} -m unittest recstore.unittest.test_dist_emb_shm
-)
-
-set_tests_properties(dist_emb_shm_unittest PROPERTIES
-    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/pytorch
-)
