@@ -11,6 +11,8 @@
 
 #include "base/array.h"
 #include "base/flatc.h"
+#include "base/json.h"
+#include "base_ps/base_client.h"
 #include "base_ps/parameters.h"
 #include "ps.grpc.pb.h"
 #include "ps.pb.h"
@@ -27,20 +29,32 @@ using recstoreps::PutParameterRequest;
 using recstoreps::PutParameterResponse;
 
 using base::ConstArray;
+using json = nlohmann::json;
 
 static const int MAX_PARAMETER_BATCH = 2000;
 
-class GRPCParameterClient {
- public:
-  explicit GRPCParameterClient(const std::string &host, int port, int shard);
+class GRPCParameterClient : public recstore::BasePSClient {
+public:
+  // 新的构造函数，接收 json 配置参数
+  explicit GRPCParameterClient(json config);
+
+  // 保留原有的构造函数以保持向后兼容
+  explicit GRPCParameterClient(const std::string& host, int port, int shard);
+
   ~GRPCParameterClient() {}
 
-  bool GetParameter(const ConstArray<uint64_t> &keys,
-                    std::vector<std::vector<float>> *values);
-  bool GetParameter(const ConstArray<unsigned int> &keys,
-                    std::vector<std::vector<float>> *values);
-  // this interface assume all keys with the same embedding dimension
-  bool GetParameter(const ConstArray<uint64_t> &keys, float *values);
+  // 实现 BasePSClient 的纯虚函数
+  int GetParameter(const base::ConstArray<uint64_t>& keys, float* values) override;
+
+  int AsyncGetParameter(const base::ConstArray<uint64_t>& keys, float* values) override;
+
+  int PutParameter(const base::ConstArray<uint64_t>& keys, const std::vector<std::vector<float>>& values) override;
+
+  void Command(recstore::PSCommand command) override;
+
+  // 原有的接口方法
+  bool GetParameter(const ConstArray<uint64_t>& keys, std::vector<std::vector<float>>* values);
+  bool GetParameter(const ConstArray<unsigned int>& keys, std::vector<std::vector<float>>* values);
 
   inline int shard() const { return shard_; }
 

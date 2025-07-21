@@ -32,9 +32,34 @@ using recstoreps::PutParameterResponse;
 DEFINE_int32(get_parameter_threads, 4, "get clients per shard");
 DEFINE_bool(parameter_client_random_init, false, "");
 
-GRPCParameterClient::GRPCParameterClient(const std::string &host, int port,
-                                         int shard)
-    : host_(host),
+// 新的构造函数，接收 json 配置参数
+/*  
+可用下面的代码来读取配置文件
+std::ifstream config_file(FLAGS_config_path);
+  nlohmann::json ex;
+  config_file >> ex;
+  json client_config = ex["client"];
+  
+*/
+GRPCParameterClient::GRPCParameterClient(json config) : recstore::BasePSClient(config) {
+  // 从json配置中提取参数
+  host_       = config.value("host", "localhost");
+  port_       = config.value("port", 15000);
+  shard_      = config.value("shard", 0);
+  nr_clients_ = FLAGS_get_parameter_threads;
+  Initialize();
+  channel_ = grpc::CreateChannel(fmt::format("{}:{}", host_, port_), grpc::InsecureChannelCredentials());
+  for (int i = 0; i < nr_clients_; i++) {
+    stubs_.push_back(nullptr);
+    stubs_[i] = recstoreps::ParameterService::NewStub(channel_);
+    LOG(INFO) << "Init PS Client Shard " << i;
+  }
+}
+
+// 保留原有的构造函数以保持向后兼容
+GRPCParameterClient::GRPCParameterClient(const std::string& host, int port, int shard)
+    : recstore::BasePSClient(json{{"host", host}, {"port", port}, {"shard", shard}}),
+      host_(host),
       port_(port),
       shard_(shard),
       nr_clients_(FLAGS_get_parameter_threads) {
@@ -281,3 +306,46 @@ bool GRPCParameterClient::PutParameter(
   }
   return true;
 }
+
+// 实现 BasePSClient 的纯虚函数
+int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t>& keys, float* values) {
+  bool success = GetParameter(keys, values);
+  return success ? 0 : -1;
+}
+
+int GRPCParameterClient::AsyncGetParameter(const base::ConstArray<uint64_t>& keys, float* values) {
+  
+  return GetParameter(keys, values);
+}
+
+int GRPCParameterClient::PutParameter(const base::ConstArray<uint64_t>& keys,
+                                      const std::vector<std::vector<float>>& values) {
+  std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
+  bool success = PutParameter(key_vec, values);
+  return success ? 0 : -1;
+}
+
+//这个的作用是什么，需要如何修改
+void GRPCParameterClient::Command(recstore::PSCommand command) {
+  switch (command) {
+  case recstore::PSCommand::CLEAR_PS:
+    ClearPS();
+    break;
+  case recstore::PSCommand::RELOAD_PS:
+    //  这里是要用GRPCParameterClient::LoadCkpt吗？
+    LOG(WARNING) << "RELOAD_PS command requires additional parameters";
+    break;
+  case recstore::PSCommand::LOAD_FAKE_DATA:
+    {
+      int64_t fake_data = 1000;
+      LoadFakeData(fake_data);
+    }
+    break;
+  default:
+    LOG(ERROR) << "Unknown PS command: " << static_cast<int>(command);
+    break;
+  }
+}
+
+// 注册 GRPCParameterClient 到工厂
+FACTORY_REGISTER(recstore::BasePSClient, grpc, GRPCParameterClient, json);
