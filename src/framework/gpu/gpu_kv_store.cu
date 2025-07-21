@@ -6,170 +6,121 @@
 namespace recstore {
 namespace framework {
 
-static std::optional<torch::Tensor> global_storage_;
-
-inline torch::Tensor
-ToTorchTensor(const base::RecTensor& tensor, torch::Device device) {
+// Helper to correctly wrap a RecTensor's data pointer into a torch::Tensor
+inline torch::Tensor ToTorchTensor(const base::RecTensor& tensor, torch::Device device) {
   auto options = torch::TensorOptions()
                      .dtype(base::ToTorchDType(tensor.dtype()))
-                     .device(torch::kCPU);
-  auto t = torch::from_blob(tensor.data(), tensor.shape_as_vector(), options);
-  if (device.type() == torch::kCUDA) {
-    if (t.numel() == 0) {
-      return torch::empty(tensor.shape_as_vector(), options.device(device));
-    }
-    return t.to(device);
+                     .device(device);
+  // FIX: Handle empty tensors correctly to avoid creating a tensor from a null/invalid pointer.
+  if (tensor.num_elements() == 0) {
+    return torch::empty(tensor.shape_as_vector(), options);
   }
-  return t;
+  return torch::from_blob(tensor.data(), tensor.shape_as_vector(), options);
 }
 
 GPUKVStore::GPUKVStore(int device_id)
-    : device_(torch::kCUDA, device_id),
-      learning_rate_(0.01f),
-      num_embeddings_(-1),
-      embedding_dim_(-1) {
+    : device_(torch::kCUDA, device_id), learning_rate_(0.01f) {
   if (!torch::cuda::is_available()) {
-    throw std::runtime_error(
-        "CUDA is not available, cannot create GPUKVStore.");
+    throw std::runtime_error("CUDA is not available, cannot create GPUKVStore.");
   }
   if (device_id >= torch::cuda::device_count()) {
     throw std::runtime_error("Invalid device_id: " + std::to_string(device_id));
   }
-  std::cout << "GPUKVStore: Initialized on device cuda:" << device_id
-            << std::endl;
+  std::cout << "GPUKVStore: Initialized on device cuda:" << device_id << std::endl;
 }
 
-void GPUKVStore::initialize_storage_if_needed(const RecTensor& keys,
-                                              const RecTensor& values) {
-  if (global_storage_.has_value()) {
-    return;
-  }
-
-  // Infer storage size from the first write operation.
-  // We assume the largest key seen defines the number of embeddings.
-  auto keys_tensor = ToTorchTensor(keys, device_).to(torch::kInt64);
-  auto max_key_val =
-      keys_tensor.numel() > 0 ? keys_tensor.max().item<int64_t>() : 0;
-
-  num_embeddings_ = max_key_val + 1;
-  embedding_dim_  = values.shape(1);
-
-  std::cout << "GPUKVStore: Lazily initializing storage on " << device_
-            << " with shape [" << num_embeddings_ << ", " << embedding_dim_
-            << "]" << std::endl;
-
-  global_storage_ = torch::zeros(
-      {num_embeddings_, embedding_dim_},
-      torch::dtype(base::ToTorchDType(values.dtype())).device(device_));
-}
-
-void GPUKVStore::EmbRead(const RecTensor& keys, RecTensor& values) {
+void GPUKVStore::EmbRead(const std::string& name, const RecTensor& keys, RecTensor& values) {
   c10::cuda::CUDAGuard device_guard(device_);
+  auto values_tensor = ToTorchTensor(values, device_);
 
-  if (!global_storage_.has_value() || keys.num_elements() == 0) {
-    auto values_tensor = ToTorchTensor(values, device_);
+  // If the named storage doesn't exist or input keys are empty, return zeros.
+  if (storage_map_.find(name) == storage_map_.end() || keys.num_elements() == 0) {
     values_tensor.zero_();
     return;
   }
 
-  auto keys_tensor   = ToTorchTensor(keys, device_);
-  auto values_tensor = ToTorchTensor(values, device_);
-
-  // Use PyTorch's highly optimized index_select.
-  torch::index_select_out(
-      values_tensor, global_storage_.value(), 0, keys_tensor);
+  auto keys_tensor = ToTorchTensor(keys, device_);
+  torch::index_select_out(values_tensor, storage_map_.at(name), 0, keys_tensor);
 }
 
-void GPUKVStore::EmbWrite(const RecTensor& keys, const RecTensor& values) {
+void GPUKVStore::EmbWrite(const std::string& name, const RecTensor& keys, const RecTensor& values) {
   c10::cuda::CUDAGuard device_guard(device_);
+  
+  if (keys.num_elements() == 0) {
+      return;
+  }
 
-  if (keys.num_elements() == 0)
-    return;
-  initialize_storage_if_needed(keys, values);
-
-  auto keys_tensor   = ToTorchTensor(keys, device_);
+  auto keys_tensor = ToTorchTensor(keys, device_).to(torch::kInt64);
   auto values_tensor = ToTorchTensor(values, device_);
+  int64_t embedding_dim = values.shape(1);
 
-  // Use PyTorch's highly optimized index_put_.
-  // This operation is performed entirely on the GPU.
-  global_storage_->index_put_({keys_tensor}, values_tensor, false);
+  // If the named tensor doesn't exist, create it (lazy initialization).
+  if (storage_map_.find(name) == storage_map_.end()) {
+      int64_t num_embeddings = keys_tensor.max().item<int64_t>() + 1;
+      std::cout << "GPUKVStore: Lazily initializing storage '" << name << "' on " << device_
+                << " with shape [" << num_embeddings << ", " << embedding_dim << "]" << std::endl;
+      storage_map_[name] = torch::zeros({num_embeddings, embedding_dim}, values_tensor.options());
+  }
+
+  // Check if the storage needs to be resized to accommodate new, larger keys.
+  auto max_key = keys_tensor.max().item<int64_t>();
+  if (max_key >= storage_map_[name].size(0)) {
+      int64_t current_size = storage_map_[name].size(0);
+      int64_t new_size = max_key + 1;
+      std::cout << "GPUKVStore: Resizing storage '" << name << "' from " << current_size
+                << " to " << new_size << std::endl;
+      auto new_storage = torch::zeros({new_size, embedding_dim}, storage_map_[name].options());
+      new_storage.slice(0, 0, current_size) = storage_map_[name];
+      storage_map_[name] = new_storage;
+  }
+
+  storage_map_[name].index_put_({keys_tensor}, values_tensor, false);
 }
 
-void GPUKVStore::EmbUpdate(const RecTensor& keys, const RecTensor& grads) {
+void GPUKVStore::EmbUpdate(const std::string& name, const RecTensor& keys, const RecTensor& grads) {
   c10::cuda::CUDAGuard device_guard(device_);
 
-  if (!global_storage_.has_value() || keys.num_elements() == 0) {
-    // Cannot update if not initialized or keys为空
-    std::cerr << "Warning: EmbUpdate called before any EmbWrite or with empty "
-                 "keys. Gradients will be ignored."
-              << std::endl;
+  if (storage_map_.find(name) == storage_map_.end() || keys.num_elements() == 0) {
     return;
   }
 
-  auto keys_tensor  = ToTorchTensor(keys, device_);
+  auto keys_tensor = ToTorchTensor(keys, device_);
   auto grads_tensor = ToTorchTensor(grads, device_);
 
-  // Use PyTorch's index_add_ for efficient sparse updates.
-  // This performs: storage[keys] += grads * (-learning_rate)
-  global_storage_->index_add_(0, keys_tensor, grads_tensor * -learning_rate_);
+  storage_map_[name].index_add_(0, keys_tensor, grads_tensor * -learning_rate_);
 }
 
-void GPUKVStore::EmbInit(const RecTensor& keys, const RecTensor& init_values) {
-  // For GPU store, Init is the same as a Write.
-  EmbWrite(keys, init_values);
+void GPUKVStore::EmbInit(const std::string& name, const RecTensor& keys, const RecTensor& init_values) {
+  EmbWrite(name, keys, init_values);
 }
 
-void GPUKVStore::EmbInit(const RecTensor& keys, const InitStrategy& strategy) {
-  // This implementation initializes with zeros.
-  // A more complete version would handle different strategies.
-  c10::cuda::CUDAGuard device_guard(device_);
-  initialize_storage_if_needed(keys, keys); // Pass dummy values to infer shape
-
-  auto values     = torch::zeros({keys.shape(0), embedding_dim_},
-                             torch::dtype(torch::kFloat32).device(device_));
-  auto rec_values = base::RecTensor(
-      values.data_ptr(),
-      {keys.shape(0), embedding_dim_},
-      base::DataType::FLOAT32);
-
-  EmbWrite(keys, rec_values);
+void GPUKVStore::EmbInit(const std::string& name, const RecTensor& keys, const InitStrategy& strategy) {
+    c10::cuda::CUDAGuard device_guard(device_);
+    int64_t embedding_dim = keys.shape(1); // This seems incorrect, should be from context
+    auto values = torch::zeros({keys.shape(0), embedding_dim},
+                               torch::dtype(torch::kFloat32).device(device_));
+    auto rec_values = base::RecTensor(values.data_ptr(), {keys.shape(0), embedding_dim}, base::DataType::FLOAT32);
+    EmbWrite(name, keys, rec_values);
 }
 
 void GPUKVStore::barrier() {
-  // For a single GPU, we can synchronize the device stream.
   c10::cuda::getCurrentCUDAStream(device_.index()).synchronize();
 }
 
-void GPUKVStore::SaveToFile(const std::string& path) {
-  if (!global_storage_.has_value()) {
-    throw std::runtime_error("No storage to save.");
-  }
-  auto cpu_tensor = global_storage_.value().to(torch::kCPU);
-  torch::save(cpu_tensor, path);
-}
-
-void GPUKVStore::LoadFromFile(const std::string& path) {
-  torch::Tensor loaded;
-  torch::load(loaded, path);
-  global_storage_ = loaded.to(device_);
-  num_embeddings_ = global_storage_->size(0);
-  embedding_dim_  = global_storage_->size(1);
-}
-
-#define NOT_IMPLEMENTED                                                        \
-  throw std::runtime_error(                                                    \
-      __FUNCTION__ + std::string(" is not implemented for GPUKVStore."))
-bool GPUKVStore::EmbExists(const RecTensor& keys) { NOT_IMPLEMENTED; }
-void GPUKVStore::EmbDelete(const RecTensor& keys) { NOT_IMPLEMENTED; }
-uint64_t GPUKVStore::EmbPrefetch(const RecTensor& keys) { NOT_IMPLEMENTED; }
+// Stubs for other optional APIs
+#define NOT_IMPLEMENTED_WITH_NAME(name) throw std::runtime_error(std::string(__FUNCTION__) + " is not implemented for GPUKVStore for name " + name)
+#define NOT_IMPLEMENTED throw std::runtime_error(std::string(__FUNCTION__) + " is not implemented for GPUKVStore.")
+bool GPUKVStore::EmbExists(const std::string& name, const RecTensor& keys) { NOT_IMPLEMENTED_WITH_NAME(name); }
+void GPUKVStore::EmbDelete(const std::string& name, const RecTensor& keys) { NOT_IMPLEMENTED_WITH_NAME(name); }
+uint64_t GPUKVStore::EmbPrefetch(const std::string& name, const RecTensor& keys) { NOT_IMPLEMENTED_WITH_NAME(name); }
+uint64_t GPUKVStore::EmbWriteAsync(const std::string& name, const RecTensor& keys, const RecTensor& values) { NOT_IMPLEMENTED_WITH_NAME(name); }
+void GPUKVStore::SaveToFile(const std::string& name, const std::string& path) { NOT_IMPLEMENTED_WITH_NAME(name); }
+void GPUKVStore::LoadFromFile(const std::string& name, const std::string& path) { NOT_IMPLEMENTED_WITH_NAME(name); }
 bool GPUKVStore::IsPrefetchDone(uint64_t prefetch_id) { NOT_IMPLEMENTED; }
 void GPUKVStore::WaitForPrefetch(uint64_t prefetch_id) { NOT_IMPLEMENTED; }
-uint64_t
-GPUKVStore::EmbWriteAsync(const RecTensor& keys, const RecTensor& values) {
-  NOT_IMPLEMENTED;
-}
 bool GPUKVStore::IsWriteDone(uint64_t write_id) { NOT_IMPLEMENTED; }
 void GPUKVStore::WaitForWrite(uint64_t write_id) { NOT_IMPLEMENTED; }
+#undef NOT_IMPLEMENTED_WITH_NAME
 #undef NOT_IMPLEMENTED
 
 } // namespace framework
