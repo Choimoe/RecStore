@@ -22,6 +22,7 @@ target_include_directories(recstore_torch_ops PRIVATE
 # Link the compiled library against the libraries provided by PyTorch.
 target_link_libraries(recstore_torch_ops PRIVATE
     recstore_shm_kv_store
+    gpu_kv_store
     ${TORCH_LIBRARIES}
 )
 
