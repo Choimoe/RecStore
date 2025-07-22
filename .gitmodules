@@ -37,3 +37,6 @@
 [submodule "third_party/cpptrace"]
 	path = third_party/cpptrace
 	url = https://github.com/jeremy-rifkin/cpptrace.git
+[submodule "third_party/torchrec"]
+	path = third_party/torchrec
+	url = https://github.com/pytorch/torchrec.git

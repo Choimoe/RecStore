@@ -136,6 +136,7 @@ add_subdirectory(third_party/json)
 # add_subdirectory(third_party/pybind11)
 # add_subdirectory(third_party/mimalloc)
 
+set(CTEST_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/Testing")
 enable_testing()
 
 include_directories(

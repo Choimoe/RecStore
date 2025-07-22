@@ -1,241 +1,126 @@
-"""Define sparse embedding and optimizer."""
+import torch
+from .DistTensor import DistTensor
+from typing import Optional, Callable, Any
 
-import torch as th
-import torch.distributed as dist
+class _DistEmbFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, ids, dist_tensor, dummy_param):
+        ctx.save_for_backward(ids)
+        ctx.dist_tensor = dist_tensor
+        embs = dist_tensor[ids]
+        return embs
 
-from recstore.DistTensor import DistTensor
-import recstore.dist_utils as dist_utils
-from recstore.utils import XLOG
+    @staticmethod
+    def backward(ctx, grad_output):
+        ids, = ctx.saved_tensors
+        dist_tensor = ctx.dist_tensor
+        dist_tensor[ids] = grad_output.contiguous()
+        return None, None, None
 
-
-class DistEmbedding:
+class DistEmbedding(torch.nn.Module):
     """
+    Distributed node embeddings.
+
+    This class, inspired by DGL's DistEmbedding, provides a way to handle large-scale
+    learnable embeddings for models. It uses a DistTensor backend for storage and
+    retrieval.
+
+    Updates to these embeddings are handled sparsely. Instead of using PyTorch's
+    standard autograd for the backward pass, this module traces the forward
+    tensors. A custom optimizer is then required to process these traces and apply gradients.
+
     Parameters
     ----------
     num_embeddings : int
-        The number of embeddings. Currently, the number of embeddings has to be the same as
-        the number of nodes or the number of edges.
+        The total number of embeddings in the layer.
     embedding_dim : int
-        The dimension size of embeddings.
+        The dimensionality of each embedding vector.
     name : str, optional
-        The name of the embeddings. The name can uniquely identify embeddings in a system
-        so that another DistEmbedding object can referent to the same embeddings.
+        A unique name for the embeddings. If not provided, a name will be
+        generated, but the embedding will not be persistent.
     init_func : callable, optional
-        The function to create the initial data. If the init function is not provided,
-        the values of the embeddings are initialized to zero.
-    part_policy : PartitionPolicy, optional
-        The partition policy that assigns embeddings to different machines in the cluster.
-        Currently, it only supports node partition policy or edge partition policy.
-        The system determines the right partition policy automatically.
-
-    Examples
-    --------
-    >>> def initializer(shape, dtype):
-            arr = th.zeros(shape, dtype=dtype)
-            arr.uniform_(-1, 1)
-            return arr
-    >>> emb = dgl.distributed.DistEmbedding(g.num_nodes(), 10, init_func=initializer)
-    >>> optimizer = dgl.distributed.optim.SparseAdagrad([emb], lr=0.001)
-    >>> for blocks in dataloader:
-    ...     feats = emb(nids)
-    ...     loss = F.sum(feats + 1, 0)
-    ...     loss.backward()
-    ...     optimizer.step()
-
-    Note
-    ----
-    When a ``DistEmbedding``  object is used when the deep learning framework is recording
-    the forward computation, users have to invoke
-    py:meth:`~dgl.distributed.optim.SparseAdagrad.step` afterwards. Otherwise, there will be
-    some memory leak.
+        A function to initialize the embedding weights. If None, they are
+        initialized to zeros.
+    part_policy : Any, optional
+        The partition policy for distributing the embeddings. This is currently
+        a placeholder for API compatibility and is not used by the ops-based backend.
     """
-
     def __init__(
         self,
-        num_embeddings,
-        embedding_dim,
-        name=None,
-        init_func=None,
-        part_policy=None,
+        num_embeddings: int,
+        embedding_dim: int,
+        name: Optional[str] = None,
+        init_func: Optional[Callable] = None,
+        part_policy: Any = None,
     ):
+        super(DistEmbedding, self).__init__()
+        if not name:
+            raise ValueError("DistEmb requires a unique 'name'.")
+        
         self._tensor = DistTensor(
-            (num_embeddings, embedding_dim),
-            th.float32,
-            name,
+            shape=(num_embeddings, embedding_dim),
+            dtype=torch.float32,
+            name=name,
             init_func=init_func,
             part_policy=part_policy,
         )
+        self.dummy_param = torch.nn.Parameter(torch.empty(0))
+
         self._trace = []
-        self._hand_grad = []
-        self._name = name
         self._num_embeddings = num_embeddings
         self._embedding_dim = embedding_dim
-        """
-        # Check whether it is multi-gpu/distributed training or not
-        if th.distributed.is_initialized():
-            self._rank = th.distributed.get_rank()
-            self._world_size = th.distributed.get_world_size()
-        # [TODO] The following code is clearly wrong but changing it to "raise DGLError"
-        # actually fails unit test.  ???
-        # else:
-        #     assert 'th.distributed should be initialized'
-        """
-        self._optm_state = None  # track optimizer state
         self._part_policy = part_policy
+        self._optm_state = None
 
-    def __call__(self, idx, device=th.device("cpu"), record_trace=True):
+    def forward(self, ids):
         """
-        node_ids : th.tensor
-            Index of the embeddings to collect.
-        device : th.device
-            Target device to put the collected embeddings.
+        Performs a lookup for the given embedding IDs.
 
-        Returns
-        -------
-        Tensor
-            The requested node embeddings
-        """
-        idx = dist_utils.toTensor(dist_utils.toindex(idx))
-        emb = self._tensor[idx].to(device, non_blocking=True)
+        If called within a gradient-enabled context (e.g., model.train()),
+        it traces the pulled embeddings so that a custom optimizer can
+        later apply sparse gradients.
 
-        if True or th.is_grad_enabled():
-            emb = dist_utils.attach_grad(emb)
-            if record_trace:
-                self._trace.append((idx.to(device, non_blocking=True), emb))
-                print(f"self._trace.append(({idx}, {emb}))")
-        return emb
-
-    def record_grad(self, idx, grad):
-        # XLOG.debug(f"record_grad {idx} {grad}")
-        assert len(idx) == len(grad)
-        self._hand_grad.append((idx, grad))
-
-    def reset_trace(self):
-        """Reset the traced data."""
-        self._trace = []
-        self._hand_grad = []
-    
-    def get_grad(self,):
-        assert len(self._trace) == 0
-        for trace in self._trace:
-            each_idx, embbed_value = trace
-            if embbed_value.grad is None:
-                assert len(each_idx) == 0
-            else:
-                # idics.append(each_idx)
-                # grads.append(embbed_value.grad.data)
-                yield (each_idx, embbed_value.grad.data)
-            # print("autotrace", each_idx, each_grad)
-
-        for each_hand_record_grad in self._hand_grad:
-            each_idx, each_grad = each_hand_record_grad
-            if each_grad is not None:
-                # idics.append(each_idx)
-                # grads.append(each_grad)
-                yield (each_idx, each_grad)
-            else:
-                assert len(each_idx) == 0
-    
-
-    def set_data(self, data: th.Tensor):
-        assert data.shape == (self.num_embeddings,
-                              self.embedding_dim), "Shape does not match!"
-        self.weight[th.arange(0, self.num_embeddings,
-                              dtype=th.int64, device='cpu')] = data
-
-    @property
-    def part_policy(self):
-        """Return the partition policy
-
-        Returns
-        -------
-        PartitionPolicy
-            partition policy
-        """
-        return self._part_policy
-
-    @property
-    def name(self):
-        """Return the name of the embeddings
-
-        Returns
-        -------
-        str
-            The name of the embeddings
-        """
-        return self._tensor.tensor_name
-
-    @property
-    def data_name(self):
-        """Return the data name of the embeddings
-
-        Returns
-        -------
-        str
-            The data name of the embeddings
-        """
-        return self._tensor._name
-
-    @property
-    def kvstore(self):
-        """Return the kvstore client
-
-        Returns
-        -------
-        KVClient
-            The kvstore client
-        """
-        return self._tensor.kvstore
-
-    @property
-    def num_embeddings(self):
-        """Return the number of embeddings
-
-        Returns
-        -------
-        int
-            The number of embeddings
-        """
-        return self._num_embeddings
-
-    @property
-    def embedding_dim(self):
-        """Return the dimension of embeddings
-
-        Returns
-        -------
-        int
-            The dimension of embeddings
-        """
-        return self._embedding_dim
-
-    @property
-    def shape(self):
-        return (self.num_embeddings, self.embedding_dim)
-
-    @property
-    def optm_state(self):
-        """Return the optimizer related state tensor.
-
-        Returns
-        -------
-        tuple of torch.Tensor
-            The optimizer related state.
-        """
-        return self._optm_state
-
-    @property
-    def weight(self):
-        """Return the tensor storing the node embeddings
+        Parameters
+        ----------
+        ids : torch.Tensor
+            A tensor of IDs to look up in the embedding table.
 
         Returns
         -------
         torch.Tensor
-            The tensor storing the node embeddings
+            The corresponding embeddings for the given IDs.
         """
-        # return self._tensor
-        return self._tensor.get_shm_tensor()
+        return _DistEmbFunction.apply(ids, self._tensor, self.dummy_param)
 
-    def get_shm_tensor(self):
-        # return self.weight.get_shm_tensor()
-        return self._tensor.get_shm_tensor()
+    def reset_trace(self):
+        """Reset the traced data. Should be called after each optimizer step."""
+        self._trace = []
+
+    @property
+    def name(self) -> str:
+        """Return the name of the embeddings."""
+        return self._tensor.name
+
+    @property
+    def num_embeddings(self) -> int:
+        """Return the number of embeddings."""
+        return self._num_embeddings
+
+    @property
+    def embedding_dim(self) -> int:
+        """Return the dimension of embeddings."""
+        return self._embedding_dim
+
+    @property
+    def weight(self) -> DistTensor:
+        """Return the DistTensor that stores the embeddings."""
+        return self._tensor
+
+    @property
+    def part_policy(self) -> Any:
+        """Return the partition policy."""
+        return self._part_policy
+
+    def __repr__(self):
+        return (f"DistEmbedding(name='{self.name}', num_embeddings={self.num_embeddings}, "
+                f"embedding_dim={self.embedding_dim})")
