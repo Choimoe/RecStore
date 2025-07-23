@@ -45,6 +45,49 @@ void validate_embeddings(const base::RecTensor& embeddings,
         std::to_string(base::EMBEDDING_DIMENSION_D));
   }
 }
+
+void KVClientOp::EmbInit(const base::RecTensor& keys,
+                         const base::RecTensor& init_values) {
+  EmbWrite(keys, init_values);
+}
+
+void KVClientOp::EmbDelete(const base::RecTensor& keys) {
+  throw std::runtime_error("Not impl");
+}
+bool KVClientOp::EmbExists(const base::RecTensor& keys) {
+  throw std::runtime_error("Not impl");
+}
+uint64_t KVClientOp::EmbPrefetch(const base::RecTensor& keys,
+                                 const base::RecTensor& values) {
+  throw std::runtime_error("Not impl");
+}
+bool KVClientOp::IsPrefetchDone(uint64_t prefetch_id) {
+  throw std::runtime_error("Not impl");
+}
+void KVClientOp::WaitForPrefetch(uint64_t prefetch_id) {
+  throw std::runtime_error("Not impl");
+}
+uint64_t KVClientOp::EmbWriteAsync(const base::RecTensor& keys,
+                                   const base::RecTensor& values) {
+  throw std::runtime_error("Not impl");
+}
+bool KVClientOp::IsWriteDone(uint64_t write_id) {
+  throw std::runtime_error("Not impl");
+}
+void KVClientOp::WaitForWrite(uint64_t write_id) {
+  throw std::runtime_error("Not impl");
+}
+void KVClientOp::SaveToFile(const std::string& path) {
+  throw std::runtime_error("Not impl");
+}
+void KVClientOp::LoadFromFile(const std::string& path) {
+  throw std::runtime_error("Not impl");
+}
+void KVClientOp::GetPretchResult(uint64_t prefetch_id,
+                                 std::vector<std::vector<float>>* values) {
+  throw std::runtime_error("Not impl");
+}
+
 } // namespace recstore
 
 #ifndef USE_FAKE_KVCLIENT
@@ -110,11 +153,6 @@ void KVClientOp::EmbInit(const base::RecTensor& keys,
   validate_keys(keys);
 }
 
-void KVClientOp::EmbInit(const base::RecTensor& keys,
-                         const base::RecTensor& init_values) {
-  EmbWrite(keys, init_values);
-}
-
 uint64_t
 KVClientOp::EmbPrefetch(const base::RecTensor& keys, const RecTensor& values) {
   const uint64_t* keys_data = keys.data_as<uint64_t>();
@@ -153,11 +191,8 @@ KVClientOp::KVClientOp() : learning_rate_(0.01f), embedding_dim_(-1) {
   std::cout << "KVClientOp initialized with full interface." << std::endl;
 }
 
-void KVClientOp::EmbInit(const base::RecTensor& keys, const base::RecTensor& init_values) {
-  EmbWrite(keys, init_values);
-}
-
-void KVClientOp::EmbInit(const base::RecTensor& keys, const InitStrategy& strategy) {
+void KVClientOp::EmbInit(const base::RecTensor& keys,
+                         const InitStrategy& strategy) {
   std::lock_guard<std::mutex> lock(mtx_);
   if (embedding_dim_ == -1) {
     throw std::runtime_error(
@@ -197,7 +232,8 @@ void KVClientOp::EmbRead(const base::RecTensor& keys, base::RecTensor& values) {
   }
 }
 
-void KVClientOp::EmbWrite(const base::RecTensor& keys, const base::RecTensor& values) {
+void KVClientOp::EmbWrite(const base::RecTensor& keys,
+                          const base::RecTensor& values) {
   std::lock_guard<std::mutex> lock(mtx_);
   const int64_t emb_dim = values.shape(1);
   if (embedding_dim_ == -1) {
@@ -221,7 +257,8 @@ void KVClientOp::EmbWrite(const base::RecTensor& keys, const base::RecTensor& va
   }
 }
 
-void KVClientOp::EmbUpdate(const base::RecTensor& keys, const base::RecTensor& grads) {
+void KVClientOp::EmbUpdate(const base::RecTensor& keys,
+                           const base::RecTensor& grads) {
   std::lock_guard<std::mutex> lock(mtx_);
   const int64_t emb_dim = grads.shape(1);
   if (embedding_dim_ == -1) {
@@ -244,40 +281,6 @@ void KVClientOp::EmbUpdate(const base::RecTensor& keys, const base::RecTensor& g
       }
     }
   }
-}
-
-// Stubs for other optional APIs remain unchanged...
-bool KVClientOp::EmbExists(const base::RecTensor& keys) {
-  throw std::runtime_error("Not impl");
-}
-void KVClientOp::EmbDelete(const base::RecTensor& keys) {
-  throw std::runtime_error("Not impl");
-}
-uint64_t
-KVClientOp::EmbPrefetch(const base::RecTensor& keys, const base::RecTensor& values) {
-  throw std::runtime_error("Not impl");
-}
-bool KVClientOp::IsPrefetchDone(uint64_t prefetch_id) {
-  throw std::runtime_error("Not impl");
-}
-void KVClientOp::WaitForPrefetch(uint64_t prefetch_id) {
-  throw std::runtime_error("Not impl");
-}
-uint64_t
-KVClientOp::EmbWriteAsync(const base::RecTensor& keys, const base::RecTensor& values) {
-  throw std::runtime_error("Not impl");
-}
-bool KVClientOp::IsWriteDone(uint64_t write_id) { throw std::runtime_error("Not impl"); }
-void KVClientOp::WaitForWrite(uint64_t write_id) { throw std::runtime_error("Not impl"); }
-void KVClientOp::SaveToFile(const std::string& path) {
-  throw std::runtime_error("Not impl");
-}
-void KVClientOp::LoadFromFile(const std::string& path) {
-  throw std::runtime_error("Not impl");
-}
-
-void KVClientOp::GetPretchResult(uint64_t prefetch_id, std::vector<std::vector<float>>* values) {
-    throw std::runtime_error("Not impl");
 }
 
 // **FIX**: Replaced the previous singleton implementation with the robust
