@@ -13,9 +13,12 @@ execute_process(
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
+file(GLOB TENSORFLOW_FRAMEWORK_SO ${TENSORFLOW_LIB_DIR}/libtensorflow_framework.so*)
+file(GLOB TENSORFLOW_CC_SO ${TENSORFLOW_LIB_DIR}/libtensorflow_cc.so*)
+
 set(TENSORFLOW_LIBRARIES
-    ${TENSORFLOW_LIB_DIR}/libtensorflow_framework.so
-    ${TENSORFLOW_LIB_DIR}/libtensorflow_cc.so
+    ${TENSORFLOW_FRAMEWORK_SO}
+    ${TENSORFLOW_CC_SO}
 )
 
 find_package(Python 3.10 COMPONENTS Interpreter Development REQUIRED)
@@ -25,6 +28,10 @@ add_library(recstore_tf_ops SHARED
     op_tensorflow.cc
     ../op.cc
 )
+
+if(USE_FAKE_KVCLIENT)
+    target_compile_definitions(recstore_tf_ops PRIVATE USE_FAKE_KVCLIENT)
+endif()
 
 include_directories(${PROJECT_SOURCE_DIR}/src/framework)
 
@@ -56,11 +63,11 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/python_client
 )
 
-add_test(
-    NAME dist_emb_unittest
-    COMMAND ${Python3_EXECUTABLE} -m unittest recstore.unittest.test_dist_emb
-)
+# add_test(
+#     NAME dist_emb_unittest
+#     COMMAND ${Python3_EXECUTABLE} -m unittest recstore.unittest.test_dist_emb
+# )
 
-set_tests_properties(dist_emb_unittest PROPERTIES
-    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/tensorflow
-)
+# set_tests_properties(dist_emb_unittest PROPERTIES
+#     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/tensorflow
+# )

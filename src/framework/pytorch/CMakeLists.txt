@@ -12,6 +12,10 @@ add_library(recstore_torch_ops SHARED
     ../op.cc
 )
 
+if(USE_FAKE_KVCLIENT)
+    target_compile_definitions(recstore_torch_ops PRIVATE USE_FAKE_KVCLIENT)
+endif()
+
 # Specify the include directories required for compilation.
 target_include_directories(recstore_torch_ops PRIVATE
     ${PROJECT_SOURCE_DIR}/src
