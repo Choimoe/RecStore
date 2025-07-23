@@ -57,23 +57,7 @@ void KVClientOp::EmbDelete(const base::RecTensor& keys) {
 bool KVClientOp::EmbExists(const base::RecTensor& keys) {
   throw std::runtime_error("Not impl");
 }
-uint64_t KVClientOp::EmbPrefetch(const base::RecTensor& keys,
-                                 const base::RecTensor& values) {
-  throw std::runtime_error("Not impl");
-}
-bool KVClientOp::IsPrefetchDone(uint64_t prefetch_id) {
-  throw std::runtime_error("Not impl");
-}
-void KVClientOp::WaitForPrefetch(uint64_t prefetch_id) {
-  throw std::runtime_error("Not impl");
-}
-uint64_t KVClientOp::EmbWriteAsync(const base::RecTensor& keys,
-                                   const base::RecTensor& values) {
-  throw std::runtime_error("Not impl");
-}
-bool KVClientOp::IsWriteDone(uint64_t write_id) {
-  throw std::runtime_error("Not impl");
-}
+
 void KVClientOp::WaitForWrite(uint64_t write_id) {
   throw std::runtime_error("Not impl");
 }
@@ -83,15 +67,30 @@ void KVClientOp::SaveToFile(const std::string& path) {
 void KVClientOp::LoadFromFile(const std::string& path) {
   throw std::runtime_error("Not impl");
 }
-void KVClientOp::GetPretchResult(uint64_t prefetch_id,
-                                 std::vector<std::vector<float>>* values) {
+
+uint64_t KVClientOp::EmbWriteAsync(const base::RecTensor& keys,
+                                   const base::RecTensor& values) {
   throw std::runtime_error("Not impl");
+}
+
+std::shared_ptr<CommonOp> GetKVClientOp() {
+  static std::shared_ptr<CommonOp> instance;
+  static std::once_flag once_flag;
+  std::call_once(once_flag, []() {
+    instance = std::make_shared<KVClientOp>();
+  });
+  return instance;
 }
 
 } // namespace recstore
 
 #ifndef USE_FAKE_KVCLIENT
 namespace recstore {
+
+KVClientOp::KVClientOp() {
+  std::cout << "KVClientOp initialized." << std::endl;
+}
+
 BasePSClient* KVClientOp::ps_client_ = nullptr;
 
 void KVClientOp::EmbRead(const RecTensor& keys, RecTensor& values) {
@@ -115,6 +114,11 @@ void KVClientOp::EmbRead(const RecTensor& keys, RecTensor& values) {
     throw std::runtime_error("Failed to read embeddings from PS client.");
   }
   // std::cout << "[EmbRead] Read operation complete." << std::endl;
+}
+
+void KVClientOp::EmbUpdate(const base::RecTensor& keys,
+                           const base::RecTensor& grads) {
+  throw std::runtime_error("Not impl");
 }
 
 void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
@@ -174,13 +178,9 @@ void KVClientOp::GetPretchResult(uint64_t prefetch_id,
   ps_client_->GetPrefetchResult(prefetch_id, values);
 }
 
-std::shared_ptr<CommonOp> GetKVClientOp() {
-  static std::shared_ptr<CommonOp> instance;
-  static std::once_flag once_flag;
-  std::call_once(once_flag, []() {
-    instance = std::make_shared<KVClientOp>();
-  });
-  return instance;
+bool KVClientOp::IsWriteDone(uint64_t write_id) {
+  // return ps_client_->IsWriteDone(write_id);
+  throw std::runtime_error("Not impl");
 }
 
 } // namespace recstore
@@ -283,16 +283,22 @@ void KVClientOp::EmbUpdate(const base::RecTensor& keys,
   }
 }
 
-// **FIX**: Replaced the previous singleton implementation with the robust
-// std::call_once pattern. This guarantees that the KVClientOp instance is
-// created exactly once, regardless of build environment complexities.
-std::shared_ptr<CommonOp> GetKVClientOp() {
-  static std::shared_ptr<CommonOp> instance;
-  static std::once_flag once_flag;
-  std::call_once(once_flag, []() {
-    instance = std::make_shared<recstore::KVClientOp>();
-  });
-  return instance;
+void KVClientOp::GetPretchResult(uint64_t prefetch_id,
+                                 std::vector<std::vector<float>>* values) {
+  throw std::runtime_error("Not impl");
+}
+uint64_t KVClientOp::EmbPrefetch(const base::RecTensor& keys,
+                                 const base::RecTensor& values) {
+  throw std::runtime_error("Not impl");
+}
+void KVClientOp::WaitForPrefetch(uint64_t prefetch_id) {
+  throw std::runtime_error("Not impl");
+}
+bool KVClientOp::IsWriteDone(uint64_t write_id) {
+  throw std::runtime_error("Not impl");
+}
+bool KVClientOp::IsPrefetchDone(uint64_t prefetch_id) {
+  throw std::runtime_error("Not impl");
 }
 
 } // namespace recstore
