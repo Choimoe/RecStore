@@ -38,6 +38,12 @@ from torchrec.optim.keyed import CombinedOptimizer, KeyedOptimizerWrapper
 from torchrec.optim.optimizers import in_backward_optimizer_filter
 from tqdm import tqdm
 
+RECSTORE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../src'))
+if RECSTORE_PATH not in sys.path:
+    sys.path.insert(0, RECSTORE_PATH)
+
+from python.pytorch.torchrec.EmbeddingBag import RecStoreEmbeddingBagCollection
+
 # OSS import
 try:
     # pyre-ignore[21]
@@ -582,27 +588,27 @@ def main(argv: List[str]) -> None:
     test_dataloader = get_dataloader(args, backend, "test")
 
     eb_configs = [
-        EmbeddingBagConfig(
-            name=f"t_{feature_name}",
-            embedding_dim=args.embedding_dim,
-            num_embeddings=(
+        {
+            "name": f"t_{feature_name}",
+            "num_embeddings": (
                 none_throws(args.num_embeddings_per_feature)[feature_idx]
                 if args.num_embeddings is None
                 else args.num_embeddings
             ),
-            feature_names=[feature_name],
-        )
+            "embedding_dim": args.embedding_dim,
+            "feature_names": [feature_name],
+        }
         for feature_idx, feature_name in enumerate(DEFAULT_CAT_NAMES)
     ]
+    # === 用 RecStoreEmbeddingBagCollection 替换 ===
+    embedding_bag_collection = RecStoreEmbeddingBagCollection(eb_configs)
     sharded_module_kwargs = {}
     if args.over_arch_layer_sizes is not None:
         sharded_module_kwargs["over_arch_layer_sizes"] = args.over_arch_layer_sizes
 
     if args.interaction_type == InteractionType.ORIGINAL:
         dlrm_model = DLRM(
-            embedding_bag_collection=EmbeddingBagCollection(
-                tables=eb_configs, device=torch.device("meta")
-            ),
+            embedding_bag_collection=embedding_bag_collection,
             dense_in_features=len(DEFAULT_INT_NAMES),
             dense_arch_layer_sizes=args.dense_arch_layer_sizes,
             over_arch_layer_sizes=args.over_arch_layer_sizes,
@@ -610,9 +616,7 @@ def main(argv: List[str]) -> None:
         )
     elif args.interaction_type == InteractionType.DCN:
         dlrm_model = DLRM_DCN(
-            embedding_bag_collection=EmbeddingBagCollection(
-                tables=eb_configs, device=torch.device("meta")
-            ),
+            embedding_bag_collection=embedding_bag_collection,
             dense_in_features=len(DEFAULT_INT_NAMES),
             dense_arch_layer_sizes=args.dense_arch_layer_sizes,
             over_arch_layer_sizes=args.over_arch_layer_sizes,
@@ -622,9 +626,7 @@ def main(argv: List[str]) -> None:
         )
     elif args.interaction_type == InteractionType.PROJECTION:
         dlrm_model = DLRM_Projection(
-            embedding_bag_collection=EmbeddingBagCollection(
-                tables=eb_configs, device=torch.device("meta")
-            ),
+            embedding_bag_collection=embedding_bag_collection,
             dense_in_features=len(DEFAULT_INT_NAMES),
             dense_arch_layer_sizes=args.dense_arch_layer_sizes,
             over_arch_layer_sizes=args.over_arch_layer_sizes,

@@ -3,164 +3,182 @@ import logging
 from torch.autograd import Function
 from typing import List, Dict, Any, Tuple
 from torchrec.sparse.jagged_tensor import KeyedJaggedTensor, KeyedTensor
-
+from torchrec.modules.embedding_configs import EmbeddingBagConfig
 from ..recstore.KVClient import get_kv_client, RecStoreClient
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging for better diagnostics
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 
 class _RecStoreEBCFunction(Function):
     """
-    Custom autograd Function to bridge PyTorch's autograd engine with the
-    RecStore backend. It handles the forward lookup and backward gradient update.
+    FX-traceable autograd Function to bridge PyTorch's autograd engine with
+    the RecStore backend.
     """
 
     @staticmethod
     def forward(
         ctx,
-        features: KeyedJaggedTensor,
-        module: 'RecStoreEmbeddingBagCollection'
-    ) -> KeyedJaggedTensor:
+        # Non-tensor arguments are passed first
+        module: "RecStoreEmbeddingBagCollection",
+        feature_keys: List[str],
+        # Tensor arguments (which become Proxies during tracing) are passed next
+        features_values: torch.Tensor,
+        features_lengths: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Performs the forward pass by pulling embedding vectors from RecStore.
-
-        Args:
-            ctx: PyTorch autograd context to save tensors for the backward pass.
-            features (KeyedJaggedTensor): Input features containing IDs to look up.
-            module (RecStoreEmbeddingBagCollection): The parent module instance to
-                access the kv_client.
-
-        Returns:
-            KeyedJaggedTensor: The resulting embedding vectors, structured as a KJT.
+        This implementation is designed to be torch.fx.traceable.
         """
-        ctx.features = features
-        ctx.module = module
-        
-        grouped_features = features.to_dict()
-        pulled_embs: Dict[str, torch.Tensor] = {}
-
-        for key in features.keys():
-            ids_to_pull = grouped_features[key].values()
-            if ids_to_pull.numel() == 0:
-                # Create an empty tensor with the correct embedding dimension if no IDs are present
-                emb_dim = module._embedding_dims[key]
-                pulled_embs[key] = torch.empty(
-                    (0, emb_dim), dtype=torch.float32, device=features.device()
-                )
-                continue
-
-            pulled_embs[key] = module.kv_client.pull(name=key, ids=ids_to_pull)
-
-        # Reconstruct the KeyedJaggedTensor from the pulled embeddings
-        output_values = torch.cat([pulled_embs[key] for key in features.keys()], dim=0)
-        output_kt = KeyedTensor(
-            keys=features.keys(),
-            values=output_values,
-            lengths=features.lengths(),
+        # Reconstruct a KJT from the raw tensors for ID lookup.
+        # This KJT is temporary and not used in a way that breaks tracing.
+        features = KeyedJaggedTensor(
+            keys=feature_keys,
+            values=features_values,
+            lengths=features_lengths,
         )
         
-        return KeyedJaggedTensor.from_keyed_tensor(kt=output_kt)
+        ctx.save_for_backward(features_values, features_lengths)
+        ctx.module = module
+        ctx.feature_keys = feature_keys
+
+        pulled_embs: List[torch.Tensor] = []
+        lengths = features.lengths()
+        values = features.values()
+        # Use static index-based access to avoid iterating over Proxy
+        start = 0
+        for i in range(len(feature_keys)):
+            l = lengths[i]
+            ids_to_pull = values[start:start+l]
+            pulled_embs.append(module.kv_client.pull(name=feature_keys[i], ids=ids_to_pull))
+            start = start + l
+        return torch.cat(pulled_embs, dim=0)
 
     @staticmethod
-    def backward(ctx, grad_output: KeyedJaggedTensor) -> Tuple[None, None]:
+    def backward(
+        ctx, grad_output_values: torch.Tensor
+    ) -> Tuple[None, None, None, None]:
         """
         Performs the backward pass by pushing gradients to the RecStore backend.
-
-        Args:
-            ctx: PyTorch autograd context with saved tensors from the forward pass.
-            grad_output (KeyedJaggedTensor): Gradients from the upstream layers.
-
-        Returns:
-            A tuple of None values, as gradients are handled manually and not
-            propagated further back for the inputs of this function.
+        This implementation is also FX-traceable.
         """
-        features: KeyedJaggedTensor = ctx.features
-        module: 'RecStoreEmbeddingBagCollection' = ctx.module
-        
-        grouped_features = features.to_dict()
-        grouped_grads = grad_output.to_dict()
+        features_values, features_lengths = ctx.saved_tensors
+        module: "RecStoreEmbeddingBagCollection" = ctx.module
+        feature_keys: List[str] = ctx.feature_keys
 
-        for key in features.keys():
-            ids_to_update = grouped_features[key].values()
-            if ids_to_update.numel() == 0:
-                continue
-            
-            grads = grouped_grads[key].values()
-            module.kv_client.update(name=key, ids=ids_to_update, grads=grads.contiguous())
+        # Reconstruct the original KJT to get IDs and the gradient KT to get gradients.
+        features = KeyedJaggedTensor(
+            keys=feature_keys,
+            values=features_values,
+            lengths=features_lengths,
+        )
+        grad_output = KeyedTensor(
+            keys=feature_keys,
+            values=grad_output_values,
+            lengths=features_lengths, # Grads have the same length structure as inputs
+        )
 
-        return None, None
+        lengths = features.lengths()
+        values = features.values()
+        grad_values = grad_output.values()
+        start = 0
+        grad_start = 0
+        for i in range(len(feature_keys)):
+            l = lengths[i]
+            ids_to_update = values[start:start+l]
+            grads = grad_values[grad_start:grad_start+l]
+            module.kv_client.update(name=feature_keys[i], ids=ids_to_update, grads=grads.contiguous())
+            start = start + l
+            grad_start = grad_start + l
+
+        # Return gradients for inputs to forward: module, feature_keys, features_values, features_lengths
+        return None, None, None, None
 
 
 class RecStoreEmbeddingBagCollection(torch.nn.Module):
     """
-    An EmbeddingBagCollection that uses a custom RecStore backend for storage
-    and computation, designed to be a drop-in replacement for torchrec's EBC.
+    An FX-traceable EmbeddingBagCollection that uses a custom RecStore backend.
+    It is designed as a drop-in replacement for torchrec.EmbeddingBagCollection
+    within a DLRM model.
     """
-    def __init__(self, embedding_bag_configs: List[Dict[str, Any]]):
-        """
-        Initializes the RecStoreEmbeddingBagCollection.
 
-        Args:
-            embedding_bag_configs (List[Dict[str, Any]]): A list of configs,
-                where each config is a dict describing an embedding table.
-                Required keys: 'name', 'num_embeddings', 'embedding_dim'.
-        """
+    def __init__(self, embedding_bag_configs: List[Dict[str, Any]]):
         super().__init__()
-        
+
         if not embedding_bag_configs:
             raise ValueError("embedding_bag_configs cannot be empty.")
 
-        self._embedding_bag_configs = embedding_bag_configs
+        # Convert dicts to EmbeddingBagConfig objects
+        self._embedding_bag_configs = [
+            EmbeddingBagConfig(
+                name=c["name"],
+                embedding_dim=c["embedding_dim"],
+                num_embeddings=c["num_embeddings"],
+                feature_names=c.get("feature_names", [c["name"]])
+            )
+            for c in embedding_bag_configs
+        ]
         self.kv_client: RecStoreClient = get_kv_client()
-        self._embedding_dims: Dict[str, int] = {}
+        
+        # Store feature names and embedding dimensions in a static, ordered way.
+        # This is crucial for FX tracing, as we will iterate over these static lists.
+        self.feature_keys: List[str] = [c.name for c in self._embedding_bag_configs]
+        self._embedding_dims: Dict[str, int] = {c.name: c.embedding_dim for c in self._embedding_bag_configs}
 
         logging.info("Initializing RecStoreEmbeddingBagCollection...")
         for config in self._embedding_bag_configs:
             self._validate_config(config)
-            name: str = config["name"]
-            num_embeddings: int = config["num_embeddings"]
-            embedding_dim: int = config["embedding_dim"]
-            
-            self._embedding_dims[name] = embedding_dim
-            
+            name: str = config.name
+            num_embeddings: int = config.num_embeddings
+            embedding_dim: int = config.embedding_dim
+
             logging.info(
-                f"  - Initializing table '{name}' in RecStore backend with "
+                f"  - Ensuring table '{name}' exists in RecStore backend with "
                 f"shape ({num_embeddings}, {embedding_dim})."
             )
-            
             self.kv_client.init_data(
                 name=name,
                 shape=(num_embeddings, embedding_dim),
                 dtype=torch.float32,
-                init_func=None
             )
         logging.info("RecStoreEmbeddingBagCollection initialized successfully.")
 
-    def _validate_config(self, config: Dict[str, Any]):
+    def embedding_bag_configs(self):
+        return self._embedding_bag_configs
+
+    def _validate_config(self, config: EmbeddingBagConfig):
         """Helper to validate a single embedding table configuration."""
         required_keys = ["name", "num_embeddings", "embedding_dim"]
         for key in required_keys:
-            if key not in config:
-                raise ValueError(f"Missing required key '{key}' in embedding_bag_configs.")
+            if not hasattr(config, key):
+                raise ValueError(
+                    f"Missing required key '{key}' in embedding_bag_configs."
+                )
 
-    def forward(self, features: KeyedJaggedTensor) -> KeyedJaggedTensor:
+    def forward(self, features: KeyedJaggedTensor) -> KeyedTensor:
         """
-        Performs the embedding lookup.
-
-        The actual lookup and gradient handling logic is delegated to the
-        _RecStoreEBCFunction to integrate with PyTorch's autograd.
-
-        Args:
-            features (KeyedJaggedTensor): The input features from the DLRM model.
-
-        Returns:
-            KeyedJaggedTensor: The looked-up embedding vectors.
+        Performs the embedding lookup in a way that is compatible with torch.fx.
         """
-        return _RecStoreEBCFunction.apply(features, self)
+        # Decompose the KJT into its constituent tensors before passing to the
+        # autograd.Function. This is a key pattern for making complex objects
+        # traceable, as fx traces operations on tensors.
+        pooled_embs_values = _RecStoreEBCFunction.apply(
+            self,
+            self.feature_keys,
+            features.values(),
+            features.lengths(),
+        )
+
+        # Reconstruct the final KeyedTensor, which is the expected output format
+        # for the sparse architecture of the DLRM.
+        # Only pass supported arguments to KeyedTensor
+        return KeyedTensor(
+            keys=self.feature_keys,
+            values=pooled_embs_values,
+            length_per_key=features.lengths(),
+        )
 
     def __repr__(self) -> str:
-        tables = list(self._embedding_dims.keys())
-        return (
-            f"{self.__class__.__name__}(\n"
-            f"  (tables): {tables}\n"
-            f")"
-        )
+        return f"{self.__class__.__name__}(tables={self.feature_keys})"

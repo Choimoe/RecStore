@@ -78,10 +78,13 @@ cd ${PROJECT_PATH}/third_party/cityhash/ && ./configure && make -j20 && sudo mak
 # sudo rm /opt/conda/lib/libtinfo.so.6
 # "
 
+TORCH_VERSION="2.5.1"
+CUDA_VERSION="cu118"
+
 mkdir -p ${PROJECT_PATH}/binary
 cd ${PROJECT_PATH}/binary
 # pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple torch-2.0.0a0+git*.whl
-pip install torch==2.0.0 -f https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/pytorch/
+pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu118
 
 # HugeCTR
 cd ${PROJECT_PATH}/build
@@ -95,12 +98,11 @@ git checkout v0.3.1
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release ${CMAKE_REQUIRE} && make -j && sudo make install
 
-# mkdir -p ${PROJECT_PATH}/third_party/libtorch
-# cd ${PROJECT_PATH}/third_party/libtorch
-# CUDA_VERSION="cu117"
-# wget https://download.pytorch.org/libtorch/${CUDA_VERSION}/libtorch-cxx11-abi-shared-with-deps-2.0.0%2B${CUDA_VERSION}.zip -O libtorch.zip \
-# && unzip libtorch.zip -d . > /dev/null \
-# && rm libtorch.zip
+mkdir -p ${PROJECT_PATH}/third_party/libtorch
+cd ${PROJECT_PATH}/third_party/libtorch
+wget https://download.pytorch.org/libtorch/${CUDA_VERSION}/libtorch-shared-with-deps-${TORCH_VERSION}%2B${CUDA_VERSION}.zip -O libtorch.zip \
+&& unzip libtorch.zip -d . > /dev/null \
+&& rm libtorch.zip
 
 # find /usr -name "libparquet.so"
 # find /usr -name "properties.h" | grep "parquet/properties.h"
