@@ -187,6 +187,11 @@ class RecStoreClient:
         
         meta = self._tensor_meta[name]
         embedding_dim = meta['shape'][1]
+        
+        # Ensure ids are on the correct device and dtype
+        if ids.dtype != torch.int64:
+            ids = ids.to(dtype=torch.int64)
+        
         return self.ops.emb_read(ids, embedding_dim)
 
     def push(self, name: str, ids: torch.Tensor, data: torch.Tensor):
