@@ -32,12 +32,28 @@ class _RecStoreEBCFunction(Function):
         Performs the forward pass by pulling embedding vectors from RecStore.
         This implementation is designed to be torch.fx.traceable.
         """
-        # Reconstruct a KJT from the raw tensors for ID lookup.
-        # This KJT is temporary and not used in a way that breaks tracing.
+        # Check if we're in FX tracing mode
+        is_tracing = hasattr(features_values, 'node') and hasattr(features_values.node, 'op')
+        
+        if is_tracing:
+            # During FX tracing, we need to return a placeholder tensor
+            # that represents the pooled embeddings for each feature
+            # The shape should be (num_features, embedding_dim)
+            embedding_dim = module._embedding_dims[feature_keys[0]] if feature_keys else 64
+            num_features = len(feature_keys)
+            # During tracing, we can't access device attribute, so use CPU
+            return torch.zeros(num_features, embedding_dim, device='cpu')
+        
+        # Normal execution path
+        if not isinstance(features_lengths, torch.Tensor):
+            lengths_tensor = torch.tensor(features_lengths, dtype=torch.int32)
+        else:
+            lengths_tensor = features_lengths.to(dtype=torch.int32, device="cpu")
+        
         features = KeyedJaggedTensor(
             keys=feature_keys,
             values=features_values,
-            lengths=features_lengths,
+            lengths=lengths_tensor,
         )
         
         ctx.save_for_backward(features_values, features_lengths)
@@ -52,7 +68,15 @@ class _RecStoreEBCFunction(Function):
         for i in range(len(feature_keys)):
             l = lengths[i]
             ids_to_pull = values[start:start+l]
-            pulled_embs.append(module.kv_client.pull(name=feature_keys[i], ids=ids_to_pull))
+            embeddings = module.kv_client.pull(name=feature_keys[i], ids=ids_to_pull)
+            # For embedding bag, we need to average the embeddings for each feature
+            if l > 0:
+                pooled_emb = embeddings.mean(dim=0, keepdim=True)
+            else:
+                # If no embeddings, create a zero embedding
+                embedding_dim = module._embedding_dims[feature_keys[i]]
+                pooled_emb = torch.zeros(1, embedding_dim, device=embeddings.device)
+            pulled_embs.append(pooled_emb)
             start = start + l
         return torch.cat(pulled_embs, dim=0)
 
@@ -68,11 +92,23 @@ class _RecStoreEBCFunction(Function):
         module: "RecStoreEmbeddingBagCollection" = ctx.module
         feature_keys: List[str] = ctx.feature_keys
 
-        # Reconstruct the original KJT to get IDs and the gradient KT to get gradients.
+        # Check if we're in FX tracing mode
+        is_tracing = hasattr(features_values, 'node') and hasattr(features_values.node, 'op')
+        
+        if is_tracing:
+            # During FX tracing, we don't need to do actual gradient updates
+            # Just return None gradients for all inputs
+            return None, None, None, None
+
+        # Normal execution path
+        if not isinstance(features_lengths, torch.Tensor):
+            lengths_tensor = torch.tensor(features_lengths, dtype=torch.int32)
+        else:
+            lengths_tensor = features_lengths.to(dtype=torch.int32, device="cpu")
         features = KeyedJaggedTensor(
             keys=feature_keys,
             values=features_values,
-            lengths=features_lengths,
+            lengths=lengths_tensor,
         )
         grad_output = KeyedTensor(
             keys=feature_keys,
@@ -161,23 +197,24 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         """
         Performs the embedding lookup in a way that is compatible with torch.fx.
         """
-        # Decompose the KJT into its constituent tensors before passing to the
-        # autograd.Function. This is a key pattern for making complex objects
-        # traceable, as fx traces operations on tensors.
+        values = features.values().contiguous()
+        lengths = features.lengths().contiguous()
+
         pooled_embs_values = _RecStoreEBCFunction.apply(
             self,
             self.feature_keys,
-            features.values(),
-            features.lengths(),
+            values,
+            lengths,
         )
 
-        # Reconstruct the final KeyedTensor, which is the expected output format
-        # for the sparse architecture of the DLRM.
         # Only pass supported arguments to KeyedTensor
+        # For KeyedTensor, we need to provide the correct length_per_key format
+        # Each feature should have length 1 since we're doing embedding bag pooling
+        length_per_key = torch.ones(len(self.feature_keys), dtype=torch.int32)
         return KeyedTensor(
             keys=self.feature_keys,
             values=pooled_embs_values,
-            length_per_key=features.lengths(),
+            length_per_key=length_per_key,
         )
 
     def __repr__(self) -> str:
