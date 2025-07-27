@@ -1,6 +1,8 @@
 # RecStore 测试用例清单
 
-## RecStoreEmbeddingBagCollection 测试用例
+## RecStoreEmbeddingBagCollection CPU测试用例
+
+> based on Commit 7000e63b71c7071e1a38848cd8cb4f351739ee9e
 
 | 测试用例 | 测试目标 | 状态 | 说明 |
 |---------|---------|------|------|
@@ -25,15 +27,43 @@
 | test_multiple_ids_per_sample | 每个样本多个ID | ✅ | 验证多ID样本处理 |
 | test_embedding_update_consistency | 嵌入更新一致性 | ✅ | 验证更新后一致性 |
 
+## RecStoreEmbeddingBagCollection GPU测试用例
+
+> based on Commit 0aafa8115ff2ca1200eceaedf632a630286194d0
+
+| 测试用例 | 测试目标 | 状态 | 说明 |
+|---------|---------|------|------|
+| test_gpu_initialization | GPU初始化功能 | ✅ | 验证GPU上单表配置初始化 |
+| test_gpu_forward_pass | GPU前向传播 | ✅ | 验证GPU上基本embedding lookup |
+| test_gpu_multi_table_forward_pass | GPU多表前向传播 | ✅ | 验证GPU上多表embedding lookup |
+| test_gpu_gradient_update | GPU梯度更新功能 | ✅ | 验证GPU上反向传播和梯度更新 |
+| test_gpu_multi_table_gradient_update | GPU多表梯度更新 | ✅ | 验证GPU上多表梯度更新 |
+| test_gpu_device_transfer | GPU设备间数据传输 | ✅ | 验证CPU到GPU数据传输 |
+| test_gpu_large_batch_forward_pass | GPU大批次前向传播 | ✅ | 验证GPU上大批次处理 |
+| test_gpu_memory_management | GPU内存管理 | ✅ | 验证GPU内存分配和释放 |
+| test_gpu_mixed_precision | GPU混合精度 | ✅ | 验证GPU上混合精度计算 |
+| test_gpu_concurrent_operations | GPU并发操作 | ✅ | 验证GPU上多流并发处理 |
+| test_gpu_error_handling | GPU错误处理 | ✅ | 验证GPU上异常情况处理 |
+| test_gpu_performance_benchmark | GPU性能基准 | ✅ | 验证GPU性能测试 |
+| test_gpu_multi_device | 多GPU设备 | ✅ | 验证多GPU设备支持 |
+| test_gpu_tensor_operations | GPU张量操作 | ✅ | 验证GPU上张量运算 |
+| test_gpu_gradient_accumulation | GPU梯度累积 | ✅ | 验证GPU上梯度累积 |
+
 ## 测试统计
 
+### CPU测试统计
 - **总测试数**: 20
 - **通过测试**: 20
+- **失败测试**: 0
+- **通过率**: 100%
+
+### GPU测试统计
+- **总测试数**: 15
+- **通过测试**: 15
 - **失败测试**: 0
 - **通过率**: 100%
 
 ## 已知限制
 
 - 所有表必须使用相同的嵌入维度（KVClientOp单例限制）
-- 目前仅支持CPU设备
 - 不支持分布式KV存储
