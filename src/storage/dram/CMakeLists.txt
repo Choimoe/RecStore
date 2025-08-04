@@ -2,7 +2,7 @@ add_library(dram_hash)
 
 target_sources(dram_hash 
   PRIVATE 
-    src/extendible_hash.cpp
+   extendible_hash.cpp
 )
 
 target_include_directories(dram_hash

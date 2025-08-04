@@ -1,5 +1,4 @@
-#ifndef UTIL_PERSIST_H_
-#define UTIL_PERSIST_H_
+#pragma once
 
 #include <cstdlib>
 #include <stdint.h>
@@ -38,5 +37,3 @@ inline void clflush(char *data, size_t len) {
   }
   mfence();
 }
-
-#endif // UTIL_PERSIST_H_

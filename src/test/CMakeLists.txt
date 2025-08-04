@@ -32,3 +32,44 @@ target_link_libraries(corotine PUBLIC
     ${BOOST_LIBRARIES}
     ${FOLLY_LIBRARIES}
 )
+
+# ExtendibleHash 单元测试
+add_executable(test_extendible_hash test_extendible_hash.cpp)
+target_link_libraries(test_extendible_hash PUBLIC
+    dram_hash 
+    base 
+    gtest 
+    gtest_main 
+    pthread
+)
+
+# index 单元测试
+add_executable(test_index test_index.cpp)
+target_link_libraries(test_index PUBLIC
+    dram_hash 
+    base 
+    gtest 
+    gtest_main 
+    pthread
+)
+
+#value 单元测试
+add_executable(test_value test_value.cpp)
+target_link_libraries(test_value PUBLIC
+    dram_hash 
+    base 
+    gtest 
+    gtest_main 
+    pthread
+    base_memory
+)
+
+add_executable(test_hybridkv test_hybridkv.cpp)
+target_link_libraries(test_hybridkv PUBLIC
+    dram_hash 
+    base 
+    gtest 
+    gtest_main 
+    pthread
+    base_memory
+)

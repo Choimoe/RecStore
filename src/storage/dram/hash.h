@@ -1,5 +1,4 @@
-#ifndef UTIL_HASH_H_
-#define UTIL_HASH_H_
+#pragma once
 
 #include <cstdint>
 #include <functional>
@@ -200,7 +199,7 @@ uint64_t hash_compute(const void *input, uint64_t length, uint64_t seed,
   }
 
   if (p + 4 <= end) {
-    hash ^= (uint64_t)(hash_get32bits(p))*NUMBER64_1;
+    hash ^= (uint64_t)(hash_get32bits(p)) * NUMBER64_1;
     hash = shifting_hash(hash, 23) * NUMBER64_2 + NUMBER64_3;
     p += 4;
   }
@@ -233,5 +232,3 @@ static size_t (*hash_funcs[4])(const void *key, size_t len, size_t seed) = {
 inline size_t h(const void *key, size_t len, size_t seed = 0xc70697UL) {
   return hash_funcs[0](key, len, seed);
 }
-
-#endif // UTIL_HASH_H_
