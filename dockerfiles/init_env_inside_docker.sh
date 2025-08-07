@@ -83,7 +83,13 @@ CUDA_VERSION="cu118"
 
 mkdir -p ${PROJECT_PATH}/binary
 cd ${PROJECT_PATH}/binary
-pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu118
+################################################################################
+#     Manually compile torch from source, specifically, enable the CXX11 ABI.
+#     (binary/pytorch/dist/torch-2.5.0a0+gita8d6afb-cp310-cp310-linux_x86_64.whl)
+#     TODO: Manually compile and install torch commands or share wheel files.
+################################################################################
+# pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple torch-2.5.0a0+git*.whl
+# pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu118
 
 # HugeCTR
 cd ${PROJECT_PATH}/build
