@@ -44,6 +44,7 @@ struct Block {
   void Insert4split(Key_t &, Value_t);
   bool Put(Key_t &, Value_t, size_t);
   Block **Split(void);
+  bool Delete(Key_t &);
 
   Pair _[kNumSlot];
   size_t local_depth;

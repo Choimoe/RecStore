@@ -538,7 +538,7 @@ class PersistLoopShmMalloc : public MallocApi {
   // 一共分配了多少块内存, 和 GetUsedBlockAppend 对应
   uint64 total_malloc() const { return total_malloc_; }
   bool Healthy() const { return total_used_ <= healthy_used_; }
-
+  int64 DataBaseOffset()const {return data_ - shm_file_.Data();}
   char *GetMallocData(int64 offset) const {
     if (offset < 8 || (offset & 7) != 0 || offset > block_num_ * 8L)
       return NULL;
