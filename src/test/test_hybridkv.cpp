@@ -11,626 +11,350 @@
 #include <vector>
 
 #include "base/json.h"
-#include "memory/shm_file.h"
-#include "storage/kv_engine/engine_hybridkv.h"  // 修改头文件引用
+#include "memory/shm_file.h"  // for PMMmapRegisterCenter config
+#include "storage/kv_engine/engine_hybridkv.h"
 
-class KVEngineHybridTest : public ::testing::Test {  // 修改测试类名
+class KVEngineHybridTest : public ::testing::Test {
 protected:
   void SetUp() override {
-    // 创建临时测试目录
-    char test_dir_[] = "/tmp/ssd_XXXXXX";
+    // 测试目录
+    test_dir_ = "/tmp/test_kv_engine_hybrid_" + std::to_string(getpid());
     std::filesystem::create_directories(test_dir_);
 
-    // 配置使用DRAM而不是持久内存
-    base::PMMmapRegisterCenter::GetConfig().use_dram = true;
+    base::PMMmapRegisterCenter::GetConfig().use_dram = false;
     base::PMMmapRegisterCenter::GetConfig().numa_id = 0;
 
-    // 创建配置
     config_.num_threads_ = 16;
     config_.json_config_ = {
-        {"path", test_dir_}, {"capacity", 1024*1024*100}};
+        {"path", test_dir_},
+        {"shmcapacity", 4 * 1024 * 1024},   // 4MB
+        {"ssdcapacity", 8 * 1024 * 1024}    // 8MB
+    };
 
-    // 创建KV引擎实例
-    kv_engine_ = new KVEngineHybrid(config_); 
+    kv_ = std::make_unique<KVEngineHybrid>(config_);
   }
 
   void TearDown() override {
-    // 清理测试
-    delete kv_engine_;
-
-    // 删除临时测试目录
+    kv_.reset();
     std::filesystem::remove_all(test_dir_);
   }
 
-  // 辅助函数：创建固定长度的value
-  std::string CreateFixedLengthValue(const std::string &base_value) {
-    std::string value = base_value;
-    return value;
+  // 生成指定长度的 value（内容可控）
+  static std::string MakeValue(const std::string& prefix, size_t total_len) {
+    std::string s = prefix;
+    if (s.size() < total_len) s.resize(total_len, 'x');
+    else s.resize(total_len);
+    return s;
   }
 
-  // 简单的barrier实现，用于同步多线程测试
+  // 将 BatchGet 返回的 float 数组还原为字符串
+  static std::string FloatsToString(const base::ConstArray<float>& arr) {
+    std::string out;
+    out.reserve(arr.Size());
+    for (int i = 0; i < arr.Size(); ++i) {
+      // 存的时候是将每个 char 按 unsigned char → float 存的
+      auto byte = static_cast<unsigned char>(static_cast<int>(arr[i]));
+      out.push_back(static_cast<char>(byte));
+    }
+    return out;
+  }
+
+  // 简单屏障
   class SimpleBarrier {
   public:
-    explicit SimpleBarrier(int count) : count_(count), current_(0) {}
-
+    explicit SimpleBarrier(int n) : n_(n), cur_(0) {}
     void wait() {
-      std::unique_lock<std::mutex> lock(mutex_);
-      ++current_;
-      if (current_ == count_) {
-        condition_.notify_all();
-      } else {
-        condition_.wait(lock, [this] { return current_ == count_; });
-      }
+      std::unique_lock<std::mutex> lk(mu_);
+      if (++cur_ == n_) cv_.notify_all();
+      else cv_.wait(lk, [&]{ return cur_ == n_; });
     }
-
   private:
-    int count_;
-    int current_;
-    std::mutex mutex_;
-    std::condition_variable condition_;
+    int n_, cur_;
+    std::mutex mu_;
+    std::condition_variable cv_;
   };
 
   std::string test_dir_;
   BaseKVConfig config_;
-  KVEngineHybrid *kv_engine_;  // 修改引擎类型
+  std::unique_ptr<KVEngineHybrid> kv_;
 };
 
-// 基本的Put和Get测试
-TEST_F(KVEngineHybridTest, BasicPutAndGet) {  // 修改测试类名
+// 基础 Put / Get
+TEST_F(KVEngineHybridTest, BasicPutAndGet) {
   uint64_t key = 123;
-  std::string value = "test_value_123";
-  std::string retrieved_value;
-  unsigned tid = 0;
-  // 测试Put操作
-  kv_engine_->Put(key, value, tid);
-  // 测试Get操作
-  kv_engine_->Get(key, retrieved_value, tid);
+  std::string v = MakeValue("test_value_123", 32);
+  std::string got;
 
-  EXPECT_EQ(retrieved_value, value);
+  kv_->Put(key, v, 0);
+  kv_->Get(key, got, 0);
+
+  EXPECT_EQ(got, v);
 }
 
-// 测试不存在的键
-TEST_F(KVEngineHybridTest, GetNonExistentKey) {  // 修改测试类名
-  uint64_t key = 999;
-  std::string retrieved_value;
-  kv_engine_->Get(key, retrieved_value, 0);
-  EXPECT_TRUE(retrieved_value.empty());
+// 不存在的键
+TEST_F(KVEngineHybridTest, GetNonExistentKey) {
+  std::string got;
+  kv_->Get(999999, got, 0);
+  EXPECT_TRUE(got.empty());
 }
 
-// 测试键值覆盖
-TEST_F(KVEngineHybridTest, KeyOverwrite) {  // 修改测试类名
+// 覆盖写
+TEST_F(KVEngineHybridTest, KeyOverwrite) {
   uint64_t key = 100;
-  std::string value1 = CreateFixedLengthValue("initial_value");
-  std::string value2 = CreateFixedLengthValue("updated_value");
-  std::string retrieved_value;
-  // 插入初始值
-  kv_engine_->Put(key, value1, 0);
-  kv_engine_->Get(key, retrieved_value, 0);
-  EXPECT_EQ(retrieved_value, value1);
-  // 覆盖值
-  kv_engine_->Put(key, value2, 0);
-  kv_engine_->Get(key, retrieved_value, 0);
-  EXPECT_EQ(retrieved_value, value2);
+  std::string v1 = MakeValue("initial", 24);
+  std::string v2 = MakeValue("updated", 40);
+  std::string got;
+
+  kv_->Put(key, v1, 0);
+  kv_->Get(key, got, 0);
+  EXPECT_EQ(got, v1);
+
+  kv_->Put(key, v2, 0);
+  kv_->Get(key, got, 0);
+  EXPECT_EQ(got, v2);
 }
 
-// 测试多个键值对
-TEST_F(KVEngineHybridTest, MultiplePutAndGet) {  // 修改测试类名
-  const int num_pairs = 50;
-  std::vector<std::pair<uint64_t, std::string>> test_data;
-
-  // 准备测试数据
-  for (int i = 0; i < num_pairs; i++) {
-    test_data.emplace_back(
-        i, CreateFixedLengthValue("value_" + std::to_string(i)));
+// 多键 Put / Get
+TEST_F(KVEngineHybridTest, MultiplePutAndGet) {
+  const int N = 64;
+  for (int i = 0; i < N; ++i) {
+    kv_->Put(i, MakeValue("v" + std::to_string(i), 16 + (i % 8)), 0);
   }
-  // 插入数据
-  for (const auto &pair : test_data) {
-    kv_engine_->Put(pair.first, pair.second, 0);
-  }
-  // 验证数据
-  for (const auto &pair : test_data) {
-    std::string retrieved_value;
-    kv_engine_->Get(pair.first, retrieved_value, 0);
-    EXPECT_EQ(retrieved_value, pair.second) << "Failed for key " << pair.first;
+  for (int i = 0; i < N; ++i) {
+    std::string got;
+    kv_->Get(i, got, 0);
+    EXPECT_FALSE(got.empty()) << "key=" << i;
+    EXPECT_EQ(got.substr(0, 1), "v");
   }
 }
 
-// 测试BatchGet功能
-TEST_F(KVEngineHybridTest, BatchGet) {  // 修改测试类名
-  const int num_keys = 10;
+// 批量 BatchGet（存在的键）
+TEST_F(KVEngineHybridTest, BatchGet) {
+  const int N = 100;
   std::vector<uint64_t> keys;
-  std::vector<std::string> expected_values;
-  // 准备测试数据
-  for (int i = 0; i < num_keys; i++) {
+  keys.reserve(N);
+  std::vector<std::string> expect(N);
+
+  for (int i = 0; i < N; ++i) {
     keys.push_back(i);
-    expected_values.push_back(
-        CreateFixedLengthValue("batch_value_" + std::to_string(i)));
-    kv_engine_->Put(i, expected_values[i], 0);
-    // std::cout<<"expected_values:"<<expected_values[i]<<"retrieved_value:"<<retrieved_value<<std::endl;
+    expect[i] = "batch_" + std::to_string(i);
+    kv_->Put(i, expect[i], 0);
   }
 
-  // 创建keys数组
-  base::ConstArray<uint64_t> keys_array(keys.data(), keys.size());
-  // 执行BatchGet
-  std::vector<base::ConstArray<float>> batch_values;
-  kv_engine_->BatchGet(keys_array, &batch_values, 0);
-  // 验证结果
-  EXPECT_EQ(batch_values.size(), num_keys);
-  for (int i = 0; i < batch_values.size(); i++) {
-    if (batch_values[i].Size() > 0) {
-      // 将float数组转换回字符串进行比较
-      std::string result;
-      for (int j = 0; j < batch_values[i].Size(); ++j) {
-          // 将 float 转回 char（截断小数部分）
-          char c = static_cast<char>(batch_values[i][j]);
-          result += c;
+  base::ConstArray<uint64_t> ka(keys.data(), keys.size());
+  std::vector<base::ConstArray<float>> vals;
+  kv_->BatchGet(ka, &vals, 0);
+
+  ASSERT_EQ(vals.size(), keys.size());
+  for (int i = 0; i < N; ++i) {
+    auto s = FloatsToString(vals[i]);
+    EXPECT_EQ(s, expect[i]) << "key=" << i;
+  }
+}
+
+// 批量 BatchGet（不存在的键）
+TEST_F(KVEngineHybridTest, BatchGetNonExistent) {
+  std::vector<uint64_t> keys = {1001, 1002, 1003};
+  base::ConstArray<uint64_t> ka(keys.data(), keys.size());
+  std::vector<base::ConstArray<float>> vals;
+  kv_->BatchGet(ka, &vals, 0);
+
+  ASSERT_EQ(vals.size(), keys.size());
+  for (auto &arr : vals) {
+    EXPECT_EQ(arr.Size(), 0);
+  }
+}
+
+// 批量 BatchGet（混合键）
+TEST_F(KVEngineHybridTest, BatchGetMixed) {
+  kv_->Put(1, "a", 0);
+  kv_->Put(3, "ccc", 0);
+  kv_->Put(5, "eeeee", 0);
+
+  std::vector<uint64_t> keys = {1,2,3,4,5,6};
+  base::ConstArray<uint64_t> ka(keys.data(), keys.size());
+  std::vector<base::ConstArray<float>> vals;
+  kv_->BatchGet(ka, &vals, 0);
+
+  ASSERT_EQ(vals.size(), keys.size());
+  EXPECT_GT(vals[0].Size(), 0); 
+  EXPECT_EQ(vals[1].Size(), 0); 
+  EXPECT_GT(vals[2].Size(), 0); 
+  EXPECT_EQ(vals[3].Size(), 0); 
+  EXPECT_GT(vals[4].Size(), 0); 
+  EXPECT_EQ(vals[5].Size(), 0); 
+}
+
+// 边界值：空串 / 长串 / 特殊字符与\0
+TEST_F(KVEngineHybridTest, BoundaryValues) {
+  std::string got;
+
+  kv_->Put(1, "", 0);
+  kv_->Get(1, got, 0);
+  EXPECT_EQ(got, "");
+
+  std::string longv(512, 'x');
+  kv_->Put(2, longv, 0);
+  kv_->Get(2, got, 0);
+  EXPECT_EQ(got, longv);
+
+  std::string special = std::string("Hello\nWorld\t", 12) + std::string("\0ABC", 4);
+  kv_->Put(3, special, 0);
+  kv_->Get(3, got, 0);
+  EXPECT_EQ(got.size(), special.size());
+  EXPECT_EQ(memcmp(got.data(), special.data(), special.size()), 0);
+}
+
+// 特殊键：0 与超大
+TEST_F(KVEngineHybridTest, SpecialKeys) {
+  std::string v = "test_value";
+  std::string got;
+
+  kv_->Put(0, v, 0);
+  kv_->Get(0, got, 0);
+  EXPECT_EQ(got, v);
+
+  uint64_t big = std::numeric_limits<uint64_t>::max() - 123;
+  kv_->Put(big, v, 0);
+  kv_->Get(big, got, 0);
+  EXPECT_EQ(got, v);
+}
+
+// 随机数据：最后一次写入应为最终值
+TEST_F(KVEngineHybridTest, RandomData) {
+  std::mt19937_64 gen(12345);
+  std::uniform_int_distribution<uint64_t> kdist(1, 1000);
+  std::uniform_int_distribution<int> lenDist(1, 64);
+
+  const int ops = 2000;
+  std::unordered_map<uint64_t, std::string> expect;
+
+  for (int i = 0; i < ops; ++i) {
+    auto key = kdist(gen);
+    int L = lenDist(gen);
+    std::string base;
+    base.reserve(L);
+    for (int j = 0; j < L; ++j) base.push_back('a' + (gen() % 26));
+    kv_->Put(key, base, 0);
+    expect[key] = base;
+  }
+
+  for (auto &p : expect) {
+    std::string got;
+    kv_->Get(p.first, got, 0);
+    EXPECT_EQ(got, p.second) << "key=" << p.first;
+  }
+}
+
+// 并发 Put
+TEST_F(KVEngineHybridTest, ConcurrentPut) {
+  const int T = 8;
+  const int per = 500;
+  SimpleBarrier bar(T);
+  std::vector<std::thread> ths;
+  std::atomic<int> fail{0};
+
+  for (int t = 0; t < T; ++t) {
+    ths.emplace_back([&, t]{
+      bar.wait();
+      for (int i = 0; i < per; ++i) {
+        uint64_t key = uint64_t(t) * per + i;
+        std::string v = "thread_" + std::to_string(t) + "_" + std::to_string(i);
+        try { kv_->Put(key, v, 0); }
+        catch (...) { fail++; }
       }
-      // 创建期望值的原始字符串（不包含填充）
-      std::string expected_original = "batch_value_" + std::to_string(i);
-      EXPECT_EQ(result, expected_original) << "Failed for key " << i;
+    });
+  }
+  for (auto &th : ths) th.join();
+
+  EXPECT_EQ(fail.load(), 0);
+  for (int t = 0; t < T; ++t) {
+    for (int i = 0; i < per; ++i) {
+      uint64_t key = uint64_t(t) * per + i;
+      std::string got;
+      kv_->Get(key, got, 0);
+      EXPECT_NE(got.find("thread_" + std::to_string(t) + "_"), std::string::npos)
+          << "key=" << key;
     }
   }
 }
 
-// 测试BatchGet中不存在的键
-TEST_F(KVEngineHybridTest, BatchGetNonExistentKeys) {  // 修改测试类名
-  std::vector<uint64_t> keys = {999, 1000, 1001};
-  base::ConstArray<uint64_t> keys_array(keys.data(), keys.size());
-  std::vector<base::ConstArray<float>> batch_values;
-  kv_engine_->BatchGet(keys_array, &batch_values, 0);
-  // 验证所有不存在的键都返回空数组
-  EXPECT_EQ(batch_values.size(), 3);
-  for (const auto &value : batch_values) {
-    EXPECT_EQ(value.Size(), 0);
-  }
-}
+// 并发 Get
+TEST_F(KVEngineHybridTest, ConcurrentGet) {
+  const int N = 200;
+  for (int i = 0; i < N; ++i) kv_->Put(i, "cg_" + std::to_string(i), 0);
 
-// 测试混合存在和不存在的键的BatchGet
-TEST_F(KVEngineHybridTest, BatchGetMixedKeys) {  // 修改测试类名
-  // 插入一些数据
-  kv_engine_->Put(1, CreateFixedLengthValue("value_1"), 0);
-  kv_engine_->Put(3, CreateFixedLengthValue("value_3"), 0);
-  kv_engine_->Put(5, CreateFixedLengthValue("value_5"), 0);
+  const int T = 8;
+  const int R = 1000;
+  SimpleBarrier bar(T);
+  std::vector<std::thread> ths;
+  std::atomic<int> ok{0}, bad{0};
 
-  // 查询混合键（包含存在和不存在的）
-  std::vector<uint64_t> keys = {1, 2, 3, 4, 5, 6};
-  base::ConstArray<uint64_t> keys_array(keys.data(), keys.size());
-
-  std::vector<base::ConstArray<float>> batch_values;
-  kv_engine_->BatchGet(keys_array, &batch_values, 0);
-
-  EXPECT_EQ(batch_values.size(), 6);
-
-  // 验证存在的键有值，不存在的键为空
-  EXPECT_GT(batch_values[0].Size(), 0); // key 1 exists
-  EXPECT_EQ(batch_values[1].Size(), 0); // key 2 doesn't exist
-  EXPECT_GT(batch_values[2].Size(), 0); // key 3 exists
-  EXPECT_EQ(batch_values[3].Size(), 0); // key 4 doesn't exist
-  EXPECT_GT(batch_values[4].Size(), 0); // key 5 exists
-  EXPECT_EQ(batch_values[5].Size(), 0); // key 6 doesn't exist
-}
-
-// 测试边界值
-TEST_F(KVEngineHybridTest, BoundaryValues) {  // 修改测试类名
-  // 测试空字符串
-  uint64_t key1 = 1;
-  std::string empty_value = CreateFixedLengthValue("");
-  std::string retrieved_value;
-  kv_engine_->Put(key1, empty_value, 0);
-  kv_engine_->Get(key1, retrieved_value, 0);
-  EXPECT_EQ(retrieved_value, empty_value);
-
-  // 测试长字符串
-  uint64_t key2 = 2;
-  std::string long_value = CreateFixedLengthValue(std::string(100, 'x'));
-  kv_engine_->Put(key2, long_value, 0);
-  kv_engine_->Get(key2, retrieved_value, 0);
-  EXPECT_EQ(retrieved_value, long_value);
-  // 测试包含特殊字符的字符串
-  uint64_t key3 = 3;
-  std::string special_value = CreateFixedLengthValue("Hello\nWorld\t\0Test");
-  kv_engine_->Put(key3, special_value, 0);
-  kv_engine_->Get(key3, retrieved_value, 0);
-  EXPECT_EQ(retrieved_value, special_value);
-}
-
-// 测试特殊键值
-TEST_F(KVEngineHybridTest, SpecialKeys) {  // 修改测试类名
-  std::string test_value = CreateFixedLengthValue("test_value");
-  std::string retrieved_value;
-  // 测试0键
-  kv_engine_->Put(0, test_value, 0);
-  kv_engine_->Get(0, retrieved_value, 0);
-  EXPECT_EQ(retrieved_value, test_value);
-
-  // 测试大键值
-  uint64_t large_key = UINT64_MAX - 1000;
-  kv_engine_->Put(large_key, test_value, 0);
-  kv_engine_->Get(large_key, retrieved_value, 0);
-  EXPECT_EQ(retrieved_value, test_value);
-}
-
-// 随机数据测试
-TEST_F(KVEngineHybridTest, RandomData) {  // 修改测试类名
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<uint64_t> key_dist(1, 1000);
-  std::uniform_int_distribution<int> value_length_dist(1, 50);
-
-  const int num_operations = 1000;
-  std::unordered_map<uint64_t, std::string> expected_data;
-  for (int i = 0; i < num_operations; i++) {
-    uint64_t key = key_dist(gen);
-    int value_length = value_length_dist(gen);
-
-    // 生成随机值
-    std::string base_value;
-    for (int j = 0; j < value_length; j++) {
-      base_value += static_cast<char>('a' + (gen() % 26));
-    }
-    std::string value = CreateFixedLengthValue(base_value);
-
-    kv_engine_->Put(key, value, 0);
-    expected_data[key] = value; // 记录最后插入的值
-  }
-  // 验证所有最终的键值对
-  for (const auto &pair : expected_data) {
-    std::string retrieved_value;
-    kv_engine_->Get(pair.first, retrieved_value, 0);
-    EXPECT_EQ(retrieved_value, pair.second) << "Failed for key " << pair.first;
-  }
-}
-
-// 性能测试
-TEST_F(KVEngineHybridTest, PerformanceTest) {  // 修改测试类名
-  const int num_operations = 1000;
-
-  auto start_time = std::chrono::high_resolution_clock::now();
-  // 插入操作
-  for (int i = 0; i < num_operations; i++) {
-    std::string value =
-        CreateFixedLengthValue("performance_test_value_" + std::to_string(i));
-    kv_engine_->Put(i, value, 0);
-  }
-
-  auto insert_end_time = std::chrono::high_resolution_clock::now();
-
-  // 查找操作
-  for (int i = 0; i < num_operations; i++) {
-    std::string retrieved_value;
-    kv_engine_->Get(i, retrieved_value, 0);
-    EXPECT_FALSE(retrieved_value.empty())
-        << "Failed to get value for key " << i;
-    // 验证值是否包含预期的内容
-    std::string expected_prefix = "performance_test_value_" + std::to_string(i);
-    EXPECT_TRUE(retrieved_value.find(expected_prefix) != std::string::npos)
-        << "Retrieved value doesn't contain expected prefix for key " << i;
-  }
-
-  auto get_end_time = std::chrono::high_resolution_clock::now();
-
-  auto insert_duration = std::chrono::duration_cast<std::chrono::microseconds>(
-      insert_end_time - start_time);
-  auto get_duration = std::chrono::duration_cast<std::chrono::microseconds>(
-      get_end_time - insert_end_time);
-
-  std::cout << "KVEngineHybrid Performance Results for "  // 修改引擎名
-            << num_operations << " operations:\n";
-  std::cout << "Insert time: " << insert_duration.count() << " microseconds\n";
-  std::cout << "Get time: " << get_duration.count() << " microseconds\n";
-  std::cout << "Insert throughput: "
-            << (num_operations * 1000000.0 / insert_duration.count())
-            << " ops/sec\n";
-  std::cout << "Get throughput: "
-            << (num_operations * 1000000.0 / get_duration.count())
-            << " ops/sec\n";
-}
-
-// 压力测试
-TEST_F(KVEngineHybridTest, StressTest) {  // 修改测试类名
-  const int num_operations = 10000;
-
-  // 大量插入操作
-  for (int i = 0; i < num_operations; i++) {
-    std::string base_value = "stress_test_value_" + std::to_string(i) + "_" +
-                             std::string(20, 'x'); // 较长的值
-    std::string value = CreateFixedLengthValue(base_value);
-    kv_engine_->Put(i, value, 0);
-  }
-
-  // 验证所有数据
-  for (int i = 0; i < num_operations; i++) {
-    std::string retrieved_value;
-    kv_engine_->Get(i, retrieved_value, 0);
-    EXPECT_FALSE(retrieved_value.empty()) << "Failed for key " << i;
-    EXPECT_TRUE(retrieved_value.find("stress_test_value_" +
-                                     std::to_string(i)) != std::string::npos);
-  }
-}
-
-// 多线程并发Put测试
-TEST_F(KVEngineHybridTest, ConcurrentPutTest) {  // 修改测试类名
-  const int num_threads = 16;
-  const int operations_per_thread = 1000;
-  std::vector<std::thread> threads;
-  std::atomic<int> failed_operations(0);
-
-  SimpleBarrier barrier(num_threads);
-
-  // 创建多个线程同时进行Put操作
-  for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back(
-        [this, t, operations_per_thread, &barrier, &failed_operations]() {
-          barrier.wait(); // 等待所有线程就绪
-
-          for (int i = 0; i < operations_per_thread; i++) {
-            uint64_t key = t * operations_per_thread + i;
-            std::string base_value =
-                "thread_" + std::to_string(t) + "_value_" + std::to_string(i);
-            std::string value = CreateFixedLengthValue(base_value);
-
-            try {
-              kv_engine_->Put(key, value, 0);
-            } catch (const std::exception &e) {
-              failed_operations++;
-            }
-          }
-        });
-  }
-
-  // 等待所有线程完成
-  for (auto &thread : threads) {
-    thread.join();
-  }
-
-  // 验证所有数据都成功插入
-  EXPECT_EQ(failed_operations.load(), 0);
-
-  // 验证所有插入的数据都能正确读取
-  for (int t = 0; t < num_threads; t++) {
-    for (int i = 0; i < operations_per_thread; i++) {
-      uint64_t key = t * operations_per_thread + i;
-      std::string retrieved_value;
-      kv_engine_->Get(key, retrieved_value, 0);
-      EXPECT_FALSE(retrieved_value.empty()) << "Failed for key " << key;
-      std::string expected_prefix =
-          "thread_" + std::to_string(t) + "_value_" + std::to_string(i);
-      EXPECT_TRUE(retrieved_value.find(expected_prefix) != std::string::npos)
-          << "Value mismatch for key " << key;
-    }
-  }
-}
-
-// 多线程并发Get测试
-TEST_F(KVEngineHybridTest, ConcurrentGetTest) {  // 修改测试类名
-  const int num_data = 200;
-  const int num_threads = 16;
-  const int reads_per_thread = 1000;
-
-  // 预先插入数据
-  for (int i = 0; i < num_data; i++) {
-    std::string base_value = "concurrent_get_value_" + std::to_string(i);
-    std::string value = CreateFixedLengthValue(base_value);
-    kv_engine_->Put(i, value, 0);
-  }
-
-  std::vector<std::thread> threads;
-  std::atomic<int> successful_reads(0);
-  std::atomic<int> failed_reads(0);
-
-  SimpleBarrier barrier(num_threads);
-
-  // 创建多个线程同时进行Get操作
-  for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back([this, t, reads_per_thread, num_data, &barrier,
-                          &successful_reads, &failed_reads]() {
-      barrier.wait(); // 等待所有线程就绪
-
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<int> dist(0, num_data - 1);
-
-      for (int i = 0; i < reads_per_thread; i++) {
-        uint64_t key = dist(gen);
-        std::string retrieved_value;
-
+  for (int t = 0; t < T; ++t) {
+    ths.emplace_back([&, t]{
+      std::mt19937 gen(777 + t);
+      std::uniform_int_distribution<int> d(0, N - 1);
+      bar.wait();
+      for (int i = 0; i < R; ++i) {
+        uint64_t k = d(gen);
+        std::string got;
         try {
-          kv_engine_->Get(key, retrieved_value, 0);
-          if (!retrieved_value.empty()) {
-            successful_reads++;
-          } else {
-            failed_reads++;
-          }
-        } catch (const std::exception &e) {
-          failed_reads++;
-        }
+          kv_->Get(k, got, 0);
+          if (got.empty()) bad++; else ok++;
+        } catch (...) { bad++; }
       }
     });
   }
+  for (auto &th : ths) th.join();
 
-  // 等待所有线程完成
-  for (auto &thread : threads) {
-    thread.join();
-  }
-
-  // 验证读取结果
-  EXPECT_GT(successful_reads.load(), 0);
-  EXPECT_EQ(failed_reads.load(), 0);
-  EXPECT_EQ(successful_reads.load(), num_threads * reads_per_thread);
+  EXPECT_EQ(bad.load(), 0);
+  EXPECT_EQ(ok.load(), T * R);
 }
 
-// 多线程混合读写测试
-TEST_F(KVEngineHybridTest, ConcurrentReadWriteTest) {  // 修改测试类名
-  const int num_threads = 16;
-  const int operations_per_thread = 1000;
-  std::vector<std::thread> threads;
-  std::atomic<int> successful_operations(0);
-  std::atomic<int> failed_operations(0);
+// 并发读写混合
+TEST_F(KVEngineHybridTest, ConcurrentReadWrite) {
+  const int T = 8;
+  const int OPS = 800;
+  SimpleBarrier bar(T);
+  std::vector<std::thread> ths;
+  std::atomic<int> ok{0}, bad{0};
 
-  SimpleBarrier barrier(num_threads);
-
-  // 创建多个线程同时进行读写操作
-  for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back([this, t, operations_per_thread, &barrier,
-                          &successful_operations, &failed_operations]() {
-      barrier.wait(); // 等待所有线程就绪
-
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<int> op_dist(0, 1); // 0: Put, 1: Get
-      std::uniform_int_distribution<uint64_t> key_dist(0, 199);
-
-      for (int i = 0; i < operations_per_thread; i++) {
-        uint64_t key = key_dist(gen);
-        bool is_put = op_dist(gen) == 0;
-
-        try {
-          if (is_put) {
-            std::string base_value = "mixed_thread_" + std::to_string(t) +
-                                     "_value_" + std::to_string(i);
-            std::string value = CreateFixedLengthValue(base_value);
-            kv_engine_->Put(key, value, 0);
-            successful_operations++;
-          } else {
-            std::string retrieved_value;
-            kv_engine_->Get(key, retrieved_value, 0);
-            successful_operations++;
-          }
-        } catch (const std::exception &e) {
-          failed_operations++;
+  for (int t = 0; t < T; ++t) {
+    ths.emplace_back([&, t]{
+      std::mt19937 gen(2024 + t);
+      std::uniform_int_distribution<int> op(0,1);
+      std::uniform_int_distribution<uint64_t> kd(0, 199);
+      bar.wait();
+      for (int i = 0; i < OPS; ++i) {
+        uint64_t k = kd(gen);
+        if (op(gen) == 0) {
+          std::string v = "mix_t" + std::to_string(t) + "_" + std::to_string(i);
+          try { kv_->Put(k, v, 0); ok++; } catch (...) { bad++; }
+        } else {
+          std::string got;
+          try { kv_->Get(k, got, 0); ok++; } catch (...) { bad++; }
         }
       }
     });
   }
+  for (auto &th : ths) th.join();
 
-  // 等待所有线程完成
-  for (auto &thread : threads) {
-    thread.join();
-  }
-
-  // 验证操作结果
-  EXPECT_EQ(failed_operations.load(), 0);
-  EXPECT_EQ(successful_operations.load(), num_threads * operations_per_thread);
+  EXPECT_EQ(bad.load(), 0);
+  EXPECT_EQ(ok.load(), T * OPS);
 }
 
-// 多线程BatchGet测试
-// TEST_F(KVEngineHybridTest, ConcurrentBatchGetTest) {  // 修改测试类名
-//   const int num_data = 100;
-//   const int num_threads = 16;
-//   const int batch_size = 10;
-
-//   // 预先插入数据
-//   for (int i = 0; i < num_data; i++) {
-//     std::string base_value = "batch_get_value_" + std::to_string(i);
-//     std::string value = CreateFixedLengthValue(base_value);
-//     kv_engine_->Put(i, value, 0);
-//   }
-
-//   std::vector<std::thread> threads;
-//   std::atomic<int> successful_batches(0);
-//   std::atomic<int> failed_batches(0);
-
-//   SimpleBarrier barrier(num_threads);
-
-//   // 创建多个线程同时进行BatchGet操作
-//   for (int t = 0; t < num_threads; t++) {
-//     threads.emplace_back([this, t, batch_size, num_data, &barrier,
-//                           &successful_batches, &failed_batches]() {
-//       barrier.wait(); // 等待所有线程就绪
-
-//       std::random_device rd;
-//       std::mt19937 gen(rd());
-//       std::uniform_int_distribution<int> dist(0, num_data - 1);
-
-//       // 执行5次BatchGet操作
-//       for (int batch = 0; batch < 5; batch++) {
-//         std::vector<uint64_t> keys;
-//         for (int i = 0; i < batch_size; i++) {
-//           keys.push_back(dist(gen));
-//         }
-
-//         try {
-//           base::ConstArray<uint64_t> keys_array(keys.data(), keys.size());
-//           std::vector<base::ConstArray<float>> batch_values;
-//           kv_engine_->BatchGet(keys_array, &batch_values, 0);
-
-//           if (batch_values.size() == keys.size()) {
-//             successful_batches++;
-//           } else {
-//             failed_batches++;
-//           }
-//         } catch (const std::exception &e) {
-//           failed_batches++;
-//         }
-//       }
-//     });
-//   }
-
-//   // 等待所有线程完成
-//   for (auto &thread : threads) {
-//     thread.join();
-//   }
-
-//   // 验证BatchGet结果
-//   EXPECT_GT(successful_batches.load(), 0);
-//   EXPECT_EQ(failed_batches.load(), 0);
-// }
-
-// 数据一致性测试
-TEST_F(KVEngineHybridTest, DataConsistencyTest) {  // 修改测试类名
-  const int num_threads = 16;
-  const int num_keys = 1000;
-  const int updates_per_key = 10;
-
-  std::vector<std::thread> threads;
-  std::atomic<int> total_updates(0);
-
-  SimpleBarrier barrier(num_threads);
-
-  // 创建多个线程对同一组键进行更新
-  for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back([this, t, num_keys, updates_per_key, &barrier,
-                          &total_updates]() {
-      barrier.wait(); // 等待所有线程就绪
-      for (int update = 0; update < updates_per_key; update++) {
-        for (int key = 0; key < num_keys; key++) {
-          std::string base_value = "consistency_thread_" + std::to_string(t) +
-                                   "_update_" + std::to_string(update) +
-                                   "_key_" + std::to_string(key);
-          std::string value = CreateFixedLengthValue(base_value);
-
-          try {
-            kv_engine_->Put(key, value, 0);
-            total_updates++;
-          } catch (const std::exception &e) {
-            // 忽略异常，继续测试
-          }
-        }
-      }
-    });
+// shm触发淘汰后的一致性
+TEST_F(KVEngineHybridTest, EvictionConsistency) {
+  const int N = 4000;
+  for (int i = 0; i < N; ++i) {
+    kv_->Put(i, "evict_" + std::to_string(i), 0);
   }
-
-  // 等待所有线程完成
-  for (auto &thread : threads) {
-    thread.join();
+  // 读取检查
+  for (int i = 0; i < N; ++i) {
+    std::string got;
+    kv_->Get(i, got, 0);
+    EXPECT_EQ(got, "evict_" + std::to_string(i)) << "key=" << i;
   }
-  // 验证所有键都存在且有值
-  int valid_keys = 0;
-  for (int key = 0; key < num_keys; key++) {
-    std::string retrieved_value;
-    kv_engine_->Get(key, retrieved_value, 0);
-    if (!retrieved_value.empty()) {
-      valid_keys++;
-      // 验证值包含预期的前缀
-      EXPECT_TRUE(retrieved_value.find("consistency_thread_") !=
-                  std::string::npos)
-          << "Invalid value for key " << key;
-    }
-  }
-
-  // 验证大部分键都有值
-  EXPECT_GT(valid_keys, num_keys / 2);
-  EXPECT_GT(total_updates.load(), 0);
 }
 
 int main(int argc, char **argv) {

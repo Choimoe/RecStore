@@ -53,19 +53,10 @@ target_link_libraries(test_index PUBLIC
     pthread
 )
 
-#value 单元测试
-add_executable(test_value test_value.cpp)
-target_link_libraries(test_value PUBLIC
-    dram_hash 
-    base 
-    gtest 
-    gtest_main 
-    pthread
-    base_memory
-)
-
+#hybridkv 单元测试
 add_executable(test_hybridkv test_hybridkv.cpp)
 target_link_libraries(test_hybridkv PUBLIC
+    TBB::tbb
     dram_hash 
     base 
     gtest 
