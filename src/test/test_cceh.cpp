@@ -7,8 +7,6 @@
 #include <thread>
 #include <vector>
 
-namespace {
-
 class CCEHTest : public ::testing::Test {
 protected:
   void SetUp() override { std::filesystem::remove(test_file_path); }
@@ -140,5 +138,3 @@ TEST_F(CCEHTest, ConcurrentInsertTest) {
     EXPECT_EQ(ret_val, key * 2);
   }
 }
-
-} // namespace

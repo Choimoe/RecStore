@@ -43,6 +43,41 @@ target_link_libraries(test_extendible_hash PUBLIC
     pthread
 )
 
+# CCEH 测试
+add_executable(test_cceh test_cceh.cpp)
+target_link_libraries(test_cceh PUBLIC
+    cceh
+    base
+    gtest
+    gtest_main
+    pthread
+)
+
+# Engine Extendible Hash 测试
+add_executable(test_engine_extendible_hash test_engine_extendible_hash.cpp)
+target_link_libraries(test_engine_extendible_hash PUBLIC
+    dram_hash
+    base
+    base_memory
+    ps_common
+    kv_engine
+    gtest
+    gtest_main
+    pthread
+)
+
+add_executable(test_engine_cceh test_engine_cceh.cpp)
+target_link_libraries(test_engine_cceh PUBLIC
+    cceh
+    base
+    base_memory
+    ps_common
+    kv_engine
+    gtest
+    gtest_main
+    pthread
+)
+
 # index 单元测试
 add_executable(test_index test_index.cpp)
 target_link_libraries(test_index PUBLIC
