@@ -394,7 +394,7 @@ RETRY:
         global_depth += 1;
         clflush((char *)&global_depth, sizeof(global_depth));
         // cout << global_depth << endl;
-        delete d;
+        delete[] d;
         // TODO: requiered to do this atomically
         // cout << x << " directory doubling " << target << " " << dir._[x]<<
         // endl;
