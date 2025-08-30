@@ -41,7 +41,7 @@ class _RecStoreEBCFunction(Function):
             input=local_indices,
             weight=all_embeddings,
             offsets=offsets,
-            mode="mean",
+            mode="sum",
             sparse=False,
         )
 
@@ -77,8 +77,7 @@ class _RecStoreEBCFunction(Function):
                 if num_items_in_bag > 0:
                     ids_to_update = values_cpu[start:end]
                     grad_for_bag = grad_output_reshaped[sample_idx, i]
-                    
-                    scaled_grad = grad_for_bag / num_items_in_bag
+                    scaled_grad = grad_for_bag
                     
                     grads_to_trace = scaled_grad.unsqueeze(0).expand(num_items_in_bag, -1)
                     
