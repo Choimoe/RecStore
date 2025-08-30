@@ -1,6 +1,6 @@
 #include "extendible_hash.h"
-#include "../util/hash.h"
-#include "../util/persist.h"
+#include "hash.h"
+#include "persist.h"
 #include <bitset>
 #include <cassert>
 #include <cmath>
@@ -71,6 +71,17 @@ int Block::Insert(Key_t &key, Value_t value, size_t key_hash) {
   int ret = -1;
   while (!CAS(&sema, &lock, lock + 1)) {
     lock = sema;
+  }
+  for (unsigned i = 0; i < kNumSlot; ++i) {
+    if (_[i].key == key) {
+      _[i].value = value;
+      ret = i;
+      lock = sema;
+      while (!CAS(&sema, &lock, lock - 1)) {
+        lock = sema;
+      }
+      return ret;
+    }
   }
   Key_t LOCK = INVALID;
   for (unsigned i = 0; i < kNumSlot; ++i) {
@@ -156,7 +167,33 @@ Block **Block::Split(void) {
 #endif
 }
 
-ExtendibleHash::ExtendibleHash(void) : dir{1}, global_depth{0} {
+bool Block::Delete(Key_t &key) {
+  if (sema == -1) 
+    return false;
+
+  int64_t lock = sema;
+  while (!CAS(&sema, &lock, lock + 1)) {
+    lock = sema;
+  }
+
+  bool found = false;
+  for (unsigned i = 0; i < kNumSlot; ++i) {
+    if (_[i].key == key) {
+      _[i].key = INVALID;
+      clflush((char*)&_[i].key, sizeof(Key_t));
+      found = true;
+      break;
+    }
+  }
+
+  lock = sema;
+  while (!CAS(&sema, &lock, lock - 1)) {
+    lock = sema;
+  }
+  return found;
+}
+
+ExtendibleHash::ExtendibleHash(void) : Index(IndexConfig{}), dir{1}, global_depth{0} {
   for (unsigned i = 0; i < dir.capacity; ++i) {
     dir._[i] = new Block(global_depth);
     dir._[i]->pattern = i;
@@ -164,7 +201,22 @@ ExtendibleHash::ExtendibleHash(void) : dir{1}, global_depth{0} {
 }
 
 ExtendibleHash::ExtendibleHash(size_t initCap)
-    : dir{initCap}, global_depth{static_cast<size_t>(log2(initCap))} {
+    : Index(IndexConfig{}), dir{initCap}, global_depth{static_cast<size_t>(log2(initCap))} {
+  for (unsigned i = 0; i < dir.capacity; ++i) {
+    dir._[i] = new Block(global_depth);
+    dir._[i]->pattern = i;
+  }
+}
+
+// New config constructor (if added)
+ExtendibleHash::ExtendibleHash(const IndexConfig &config) : Index(config), dir{1}, global_depth{0} {
+  // Customize based on config, e.g.
+  size_t initCap = 1;
+  if (config.json_config_.contains("initial_capacity")) {
+    initCap = config.json_config_["initial_capacity"];
+    global_depth = static_cast<size_t>(log2(initCap));
+    dir = Directory(initCap);
+  }
   for (unsigned i = 0; i < dir.capacity; ++i) {
     dir._[i] = new Block(global_depth);
     dir._[i]->pattern = i;
@@ -342,7 +394,7 @@ RETRY:
         global_depth += 1;
         clflush((char *)&global_depth, sizeof(global_depth));
         // cout << global_depth << endl;
-        delete d;
+        delete[] d;
         // TODO: requiered to do this atomically
         // cout << x << " directory doubling " << target << " " << dir._[x]<<
         // endl;
@@ -385,8 +437,27 @@ bool ExtendibleHash::InsertOnly(Key_t &key, Value_t value) {
   return false;
 }
 
-// TODO
-bool ExtendibleHash::Delete(Key_t &key) { return false; }
+bool ExtendibleHash::Delete(Key_t &key) {
+  auto key_hash = h(&key, sizeof(key));
+#ifdef LSB
+  auto x = (key_hash % dir.capacity);
+#else
+  auto x = (key_hash >> (8 * sizeof(key_hash) - global_depth));
+#endif
+
+  Block* target = dir._[x];
+  bool success = target->Delete(key);
+  
+  // 如果删除失败且块被锁定（可能正在分裂），重试
+  if (!success && target->sema == -1) {
+    // 短暂让步避免活锁
+    std::this_thread::yield();
+    // 重新计算位置（目录可能已变化）
+    x = (key_hash % dir.capacity);
+    success = dir._[x]->Delete(key);
+  }
+  return success;
+}
 
 Value_t ExtendibleHash::Get(Key_t &key) {
   auto key_hash = h(&key, sizeof(key));
@@ -484,4 +555,117 @@ size_t Block::numElem(void) {
     }
   }
   return sum;
+}
+
+void ExtendibleHash::Insert(const Key_t &key, Value_t value) {
+  Key_t mutable_key = key;
+  Insert(mutable_key, value);
+}
+
+bool ExtendibleHash::InsertOnly(const Key_t &key, Value_t value) {
+  Key_t mutable_key = key;
+  return InsertOnly(mutable_key, value);
+}
+
+Value_t ExtendibleHash::Get(const Key_t &key) {
+  Key_t mutable_key = key;
+  return Get(mutable_key);
+}
+
+
+void ExtendibleHash::Util() {
+  std::cout << "ExtendibleHash Util: Utilization = " << Utilization() << "%" << std::endl;
+}
+
+void ExtendibleHash::Get(const uint64_t key, uint64_t &pointer, unsigned tid) {
+  pointer = Get(static_cast<Key_t>(key)); 
+}
+
+void ExtendibleHash::Put(const uint64_t key, uint64_t pointer, unsigned tid) {
+  Insert(static_cast<Key_t>(key), static_cast<Value_t>(pointer));
+}
+
+void ExtendibleHash::BatchPut(coroutine<void>::push_type &sink,
+                             base::ConstArray<uint64_t> keys,
+                             uint64_t* pointers,
+                             unsigned tid) {
+  const int nr_batch_pages = 32;  // 仿照 SSD 分批大小
+  int i = 0;
+
+  while (i < keys.Size()) {
+    int batched_size = std::min(nr_batch_pages, static_cast<int>(keys.Size() - i));
+    // 处理当前批次
+    for (int j = 0; j < batched_size; ++j) {
+      uint64_t key = keys[i + j];
+      uint64_t ptr_value = pointers[i + j];  
+      Put(key, ptr_value, tid);  
+    }
+    i += batched_size;
+    sink();  
+  }
+}
+
+void ExtendibleHash::BatchGet(base::ConstArray<uint64_t> keys,
+                             uint64_t* pointers,
+                             unsigned tid) {
+  if (pointers == nullptr || keys.Size() == 0) {
+    LOG(FATAL) << "Invalid pointers array or empty keys";
+  }
+  for (size_t i = 0; i < keys.Size(); ++i) {
+    uint64_t key = keys[i];
+    Get(key, pointers[i], tid); 
+  }
+}
+
+void ExtendibleHash::BatchGet(coroutine<void>::push_type &sink,
+              base::ConstArray<uint64_t> keys,
+              uint64_t *pointers,
+              unsigned tid) {
+  if (pointers == nullptr || keys.Size() == 0) {
+    LOG(FATAL) << "Invalid pointers array or empty keys";
+  }
+
+  const int batch_size = 32;  
+  size_t i = 0;
+
+  while (i < keys.Size()) {
+    int batched_size = std::min(batch_size, static_cast<int>(keys.Size() - i));
+    for (int j = 0; j < batched_size; ++j) {
+      uint64_t key = keys[i + j];
+      Get(key, pointers[i + j], tid);  
+    }
+    i += batched_size;
+    sink();  
+  }
+}
+
+void ExtendibleHash::DebugInfo() const {
+  std::cout << "ExtendibleHash Debug Info:" << std::endl;
+  std::cout << "  Global Depth: " << global_depth << std::endl;
+  std::cout << "  Directory Capacity: " << dir.capacity << std::endl;
+}
+
+void ExtendibleHash::BulkLoad(base::ConstArray<uint64_t> keys, const void *value) {
+  size_t value_size = sizeof(Value_t);
+  for (size_t i = 0; i < keys.Size(); ++i) {
+    uint64_t ptr_value = *reinterpret_cast<const uint64_t *>(value + i * value_size );
+    Put(keys[i], ptr_value, 0);  
+  }
+}
+
+void ExtendibleHash::LoadFakeData(int64_t key_capacity, int value_size) {
+  Index::LoadFakeData(key_capacity, sizeof(Value_t));
+}
+
+void ExtendibleHash::clear() {
+  for (size_t i = 0; i < dir.capacity; ++i) {
+    delete dir._[i];
+  }
+  delete[] dir._;
+  dir = Directory(1);
+  global_depth = 0;
+  for (unsigned i = 0; i < dir.capacity; ++i) {
+    dir._[i] = new Block(global_depth);
+    dir._[i]->pattern = i;
+  }
 }

@@ -1,39 +1,33 @@
 #pragma once
 
+#include <cstring> // for std::memcpy
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
-#include "../dram/src/extendible_hash.h"
+#include "../nvm/pet_kv/shm_common.h"
+#include "../ssd/CCEH.h"
 #include "base/factory.h"
 #include "base_kv.h"
 #include "memory/persist_malloc.h"
 
-class KVEngineExtendibleHash : public BaseKV {
+class KVEngineCCEH : public BaseKV {
   static constexpr int kKVEngineValidFileSize = 123;
 
 public:
-  KVEngineExtendibleHash(const BaseKVConfig &config)
+  KVEngineCCEH(const BaseKVConfig &config)
       : BaseKV(config),
-#ifdef XMH_SIMPLE_MALLOC
-        shm_malloc_(config.json_config_.at("path").get<std::string>() +
-                        "/value",
-                    config.json_config_.at("capacity").get<size_t>() *
-                        config.json_config_.at("value_size").get<size_t>(),
-                    config.json_config_.at("value_size").get<size_t>())
-#else
         shm_malloc_(config.json_config_.at("path").get<std::string>() +
                         "/value",
                     1.2 * config.json_config_.at("capacity").get<size_t>() *
-                        config.json_config_.at("value_size").get<size_t>())
-#endif
-  {
+                        config.json_config_.at("value_size").get<size_t>()) {
     value_size_ = config.json_config_.at("value_size").get<int>();
 
-    // 初始化extendible hash表
-    hash_table_ = new ExtendibleHash();
-
+    // 初始化extendible
+    // hash表，数据库文件放在配置的工作路径中，避免测试之间相互影响
     std::string path = config.json_config_.at("path").get<std::string>();
+    std::string db_path = path + "/cceh_test.db";
+    hash_table_ = new CCEH(db_path);
 
     // 初始化值存储区域
     uint64_t value_shm_size =
@@ -51,16 +45,18 @@ public:
 
   void Get(const uint64_t key, std::string &value, unsigned tid) override {
     base::PetKVData shmkv_data;
-    // std::shared_lock<std::shared_mutex> _(lock_);
-
     Key_t hash_key = key;
     Value_t read_value = hash_table_->Get(hash_key);
 
     if (read_value == NONE) {
       value = std::string();
     } else {
-      shmkv_data = *(base::PetKVData *)(&read_value);
+      shmkv_data.data_value = read_value;
       char *data = shm_malloc_.GetMallocData(shmkv_data.shm_malloc_offset());
+      if (data == nullptr) {
+        value = std::string();
+        return;
+      }
 #ifdef XMH_VARIABLE_SIZE_KV
       int size = shm_malloc_.GetMallocSize(shmkv_data.shm_malloc_offset());
 #else
@@ -75,8 +71,7 @@ public:
     base::PetKVData shmkv_data;
     char *sync_data = shm_malloc_.New(value.size());
     shmkv_data.SetShmMallocOffset(shm_malloc_.GetMallocOffset(sync_data));
-    memcpy(sync_data, value.data(), value.size());
-
+    std::memcpy(sync_data, value.data(), value.size());
     Key_t hash_key = key;
     hash_table_->Insert(hash_key, shmkv_data.data_value);
   }
@@ -85,34 +80,67 @@ public:
                 std::vector<base::ConstArray<float>> *values,
                 unsigned tid) override {
     values->clear();
-    // std::shared_lock<std::shared_mutex> _(lock_);
-
-    for (auto k : keys) {
+    int size = keys.Size();
+    std::vector<std::unique_ptr<coroutine<Value_t>::pull_type>> coros;
+    for (size_t i = 0; i < size; i++) {
+      auto k = keys[i];
+      coros.emplace_back(new coroutine<Value_t>::pull_type{
+          [this, i, k](auto &yield) { hash_table_->Get(yield, i, k); }});
+    }
+    struct io_uring *ring = hash_table_->fm->get_thread_ring();
+    struct io_uring_cqe *cqe;
+    std::vector<Value_t> vals(size, NONE);
+    while (active_coro) {
+      if (!io_uring_peek_cqe(ring, &cqe)) {
+        if (cqe->res < 0) {
+          active_coro--;
+          io_uring_cqe_seen(ring, cqe);
+          throw std::runtime_error("Write operation failed: " +
+                                   std::string(strerror(-cqe->res)));
+        }
+        if (cqe->res != PAGE_SIZE) {
+          active_coro--;
+          io_uring_cqe_seen(ring, cqe);
+          throw std::runtime_error("Incomplete write: expected " +
+                                   std::to_string(PAGE_SIZE) +
+                                   " bytes, wrote " + std::to_string(cqe->res));
+        }
+        int id = cqe->user_data;
+        active_coro--;
+        io_uring_cqe_seen(ring, cqe);
+        if (coros[id] && *coros[id]) {
+          (*coros[id])();
+          vals[id] = coros[id]->get();
+        }
+      }
+    }
+    for (auto v : vals) {
       base::PetKVData shmkv_data;
-      Key_t hash_key = k;
-      Value_t read_value = hash_table_->Get(hash_key);
-
-      if (read_value == NONE) {
-        values->emplace_back(std::string());
+      if (v == NONE) {
+        values->emplace_back();
       } else {
-        shmkv_data = *(base::PetKVData *)(&read_value);
+        shmkv_data.data_value = v;
         char *data = shm_malloc_.GetMallocData(shmkv_data.shm_malloc_offset());
-#ifdef XMH_VARIABLE_SIZE_KV
-        int size = shm_malloc_.GetMallocSize(shmkv_data.shm_malloc_offset());
-#else
+        if (data == nullptr) {
+          values->emplace_back();
+          continue;
+        }
         int size = value_size_;
-#endif
         values->emplace_back((float *)data, size / sizeof(float));
       }
     }
   }
 
-  ~KVEngineExtendibleHash() {
-    std::cout << "exit KVEngineExtendibleHash" << std::endl;
+  ~KVEngineCCEH() {
+    std::cout << "exit KVEngineCCEH" << std::endl;
+    if (hash_table_) {
+      delete hash_table_;
+      hash_table_ = nullptr;
+    }
   }
 
 private:
-  ExtendibleHash *hash_table_;
+  CCEH *hash_table_;
   // std::shared_mutex lock_;
 
   uint64_t counter = 0;
@@ -127,5 +155,4 @@ private:
   base::ShmFile valid_shm_file_;
 };
 
-FACTORY_REGISTER(BaseKV, KVEngineExtendibleHash, KVEngineExtendibleHash,
-                 const BaseKVConfig &);
+FACTORY_REGISTER(BaseKV, KVEngineCCEH, KVEngineCCEH, const BaseKVConfig &);

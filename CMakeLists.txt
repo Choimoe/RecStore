@@ -17,6 +17,44 @@ find_package(CUDA REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(Threads)
 
+include(ExternalProject)
+
+
+
+
+set(JEMALLOC_INSTALL_DIR ${CMAKE_BINARY_DIR}/jemalloc-install)
+
+ExternalProject_Add(jemalloc_ext
+  SOURCE_DIR        ${CMAKE_SOURCE_DIR}/third_party/jemalloc   # 你的 jemalloc 源码目录
+  CONFIGURE_COMMAND autoconf
+  BUILD_IN_SOURCE   1
+  BUILD_COMMAND     ./configure
+                      --with-jemalloc-prefix=je
+                      --prefix=${JEMALLOC_INSTALL_DIR}
+                      CC=${CMAKE_C_COMPILER}
+                      CXX=${CMAKE_CXX_COMPILER}
+                    && $(MAKE) -j
+  INSTALL_COMMAND   $(MAKE) install
+)
+
+
+set(JEMALLOC_LIB_PATH ${JEMALLOC_INSTALL_DIR}/lib/libjemalloc.a)
+
+
+file(MAKE_DIRECTORY ${JEMALLOC_INSTALL_DIR}/include)
+file(MAKE_DIRECTORY ${JEMALLOC_INSTALL_DIR}/lib)
+
+add_library(jemalloc STATIC IMPORTED GLOBAL)   
+set_target_properties(jemalloc PROPERTIES
+  IMPORTED_LOCATION             ${JEMALLOC_LIB_PATH}
+  INTERFACE_INCLUDE_DIRECTORIES ${JEMALLOC_INSTALL_DIR}/include
+)
+add_dependencies(jemalloc jemalloc_ext)
+
+
+list(APPEND CMAKE_BUILD_RPATH   "${JEMALLOC_INSTALL_DIR}/lib")
+list(APPEND CMAKE_INSTALL_RPATH "${JEMALLOC_INSTALL_DIR}/lib")
+
 
 if (OPENMP_FOUND)
 message(STATUS "OPENMP FOUND")

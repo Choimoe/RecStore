@@ -22,6 +22,8 @@
 #include "malloc.h"
 #include "shm_file.h"
 
+#include "allocator_master.hh"  // 引入 r2 的分配器
+#include "allocator.hh"
 namespace base {
 
 class PersistSimpleMalloc : public MallocApi {
@@ -48,7 +50,6 @@ class PersistSimpleMalloc : public MallocApi {
     } else {
       LOG(INFO) << "PersistSimpleMalloc: Recovery from shutdown.";
     }
-
     LOG(WARNING) << "skip the first allocate";
     allocated_.fetch_add(slab_size_);
   }
@@ -538,7 +539,7 @@ class PersistLoopShmMalloc : public MallocApi {
   // 一共分配了多少块内存, 和 GetUsedBlockAppend 对应
   uint64 total_malloc() const { return total_malloc_; }
   bool Healthy() const { return total_used_ <= healthy_used_; }
-
+  int64 DataBaseOffset()const {return data_ - shm_file_.Data();}
   char *GetMallocData(int64 offset) const {
     if (offset < 8 || (offset & 7) != 0 || offset > block_num_ * 8L)
       return NULL;
@@ -597,6 +598,7 @@ class PersistLoopShmMalloc : public MallocApi {
   Counter total_loop_malloc_{"total_loop_malloc"};
 
   DISALLOW_COPY_AND_ASSIGN(PersistLoopShmMalloc);
+  r2::AllocatorMaster R2AllocMaster;
 };
 
 }  // namespace base

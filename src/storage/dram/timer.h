@@ -1,5 +1,4 @@
-#ifndef UTIL_TIMER_H_
-#define UTIL_TIMER_H_
+#pragma once
 
 #include <time.h>
 
@@ -29,5 +28,3 @@ private:
   struct timespec start, end, now;
   size_t elapsed;
 };
-
-#endif // UTIL_TIMER_H_
