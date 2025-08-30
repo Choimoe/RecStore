@@ -13,31 +13,15 @@ import argparse
 import os
 from typing import List
 
+import torch
 from torch import distributed as dist
 from torch.utils.data import DataLoader
+
 from torchrec.datasets.criteo import (
     CAT_FEATURE_COUNT,
-    DAYS,
-    DEFAULT_CAT_NAMES,
-    DEFAULT_INT_NAMES,
     InMemoryBinaryCriteoIterDataPipe,
+    MultiHotCriteoIterDataPipe,
 )
-from torchrec.datasets.random import RandomRecDataset
-
-# OSS import
-try:
-    # pyre-ignore[21]
-    # @manual=//ai_codesign/benchmarks/dlrm/torchrec_dlrm/data:multi_hot_criteo
-    from data.multi_hot_criteo import MultiHotCriteoIterDataPipe
-
-except ImportError:
-    pass
-
-# internal import
-try:
-    from .multi_hot_criteo import MultiHotCriteoIterDataPipe  # noqa F811
-except ImportError:
-    pass
 
 STAGES = ["train", "val", "test"]
 
@@ -46,32 +30,122 @@ def _get_random_dataloader(
     args: argparse.Namespace,
     stage: str,
 ) -> DataLoader:
-    attr = f"limit_{stage}_batches"
-    num_batches = getattr(args, attr)
+    from torchrec.datasets.random import RandomRecDataset
+
+    if stage == "train":
+        dataset = RandomRecDataset(
+            keys=args.num_embeddings_per_feature,
+            batch_size=args.batch_size,
+            hash_size=args.num_embeddings_per_feature,
+            hash_dtype=torch.int32,
+            ids_per_feature=1,
+            num_dense=13,
+        )
+    else:
+        dataset = RandomRecDataset(
+            keys=args.num_embeddings_per_feature,
+            batch_size=args.test_batch_size or args.batch_size,
+            hash_size=args.num_embeddings_per_feature,
+            hash_dtype=torch.int32,
+            ids_per_feature=1,
+            num_dense=13,
+        )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=None,
+        pin_memory=args.pin_memory,
+        collate_fn=lambda x: x,
+    )
+    return dataloader
+
+
+def _get_single_day_dataloader(
+    args: argparse.Namespace,
+    stage: str,
+) -> DataLoader:
+    if args.in_memory_binary_criteo_path is None:
+        raise ValueError("--in_memory_binary_criteo_path must be specified for single day training")
+    
+    dir_path = args.in_memory_binary_criteo_path
+    sparse_part = "sparse.npy"
+    datapipe = InMemoryBinaryCriteoIterDataPipe
+    
+    day_0_dense = os.path.join(dir_path, "day_0_dense.npy")
+    day_0_sparse = os.path.join(dir_path, "day_0_sparse.npy")
+    day_0_labels = os.path.join(dir_path, "day_0_labels.npy")
+    
+    if not all(os.path.exists(f) for f in [day_0_dense, day_0_sparse, day_0_labels]):
+        raise FileNotFoundError(f"Day 0 files not found in {dir_path}. Please ensure you have processed day_0 data.")
+    
+    if stage == "train":
+        stage_files: List[List[str]] = [
+            [day_0_dense],
+            [day_0_sparse],
+            [day_0_labels],
+        ]
+        train_ratio = 0.8
+    elif stage in ["val", "test"]:
+        stage_files: List[List[str]] = [
+            [day_0_dense],
+            [day_0_sparse],
+            [day_0_labels],
+        ]
+        train_ratio = 0.8
+    else:
+        raise ValueError(f"Invalid stage: {stage}")
+    
     if stage in ["val", "test"] and args.test_batch_size is not None:
         batch_size = args.test_batch_size
     else:
         batch_size = args.batch_size
-    return DataLoader(
-        RandomRecDataset(
-            keys=DEFAULT_CAT_NAMES,
+    
+    dataloader = DataLoader(
+        datapipe(
+            stage,
+            *stage_files,
             batch_size=batch_size,
-            hash_size=args.num_embeddings,
-            hash_sizes=(
+            rank=dist.get_rank(),
+            world_size=dist.get_world_size(),
+            drop_last=args.drop_last_training_batch if stage == "train" else False,
+            shuffle_batches=args.shuffle_batches,
+            shuffle_training_set=args.shuffle_training_set,
+            shuffle_training_set_random_seed=args.seed,
+            mmap_mode=args.mmap_mode,
+            hashes=(
                 args.num_embeddings_per_feature
-                if hasattr(args, "num_embeddings_per_feature")
-                else None
+                if args.num_embeddings is None
+                else ([args.num_embeddings] * CAT_FEATURE_COUNT)
             ),
-            manual_seed=getattr(args, "seed", None),
-            ids_per_feature=1,
-            num_dense=len(DEFAULT_INT_NAMES),
-            num_batches=num_batches,
+            single_day_mode=True,
+            train_ratio=train_ratio,
         ),
         batch_size=None,
-        batch_sampler=None,
         pin_memory=args.pin_memory,
-        num_workers=0,
+        collate_fn=lambda x: x,
     )
+    return dataloader
+
+
+def get_dataloader(args: argparse.Namespace, backend: str, stage: str) -> DataLoader:
+    stage = stage.lower()
+    if stage not in STAGES:
+        raise ValueError(f"Supplied stage was {stage}. Must be one of {STAGES}.")
+
+    args.pin_memory = (
+        (backend == "nccl") if not hasattr(args, "pin_memory") else args.pin_memory
+    )
+
+    if (
+        args.in_memory_binary_criteo_path is None
+        and args.synthetic_multi_hot_criteo_path is None
+    ):
+        return _get_random_dataloader(args, stage)
+    else:
+        if hasattr(args, 'single_day_mode') and args.single_day_mode:
+            return _get_single_day_dataloader(args, stage)
+        else:
+            return _get_in_memory_dataloader(args, stage)
 
 
 def _get_in_memory_dataloader(
@@ -114,10 +188,7 @@ def _get_in_memory_dataloader(
         if not available_days:
             raise FileNotFoundError(f"No complete day files found in {dir_path}")
         
-        if len(available_days) == 1:
-            train_days = available_days
-        else:
-            train_days = available_days[:-1]
+        train_days = available_days[:-1] if len(available_days) > 1 else available_days
         
         stage_files: List[List[str]] = [
             [os.path.join(dir_path, f"day_{i}_dense.npy") for i in train_days],
@@ -138,24 +209,23 @@ def _get_in_memory_dataloader(
         if not available_days:
             raise FileNotFoundError(f"No complete day files found in {dir_path}")
         
-        if len(available_days) == 1:
-            val_day = available_days[0]
-        else:
-            val_day = available_days[-1]
+        val_day = available_days[-1]
         
         stage_files: List[List[str]] = [
             [os.path.join(dir_path, f"day_{val_day}_dense.npy")],
             [os.path.join(dir_path, f"day_{val_day}_{sparse_part}")],
             [os.path.join(dir_path, f"day_{val_day}_labels.npy")],
         ]
+    
     if stage in ["val", "test"] and args.test_batch_size is not None:
         batch_size = args.test_batch_size
     else:
         batch_size = args.batch_size
+    
     dataloader = DataLoader(
         datapipe(
             stage,
-            *stage_files,  # pyre-ignore[6]
+            *stage_files,
             batch_size=batch_size,
             rank=dist.get_rank(),
             world_size=dist.get_world_size(),
@@ -165,8 +235,8 @@ def _get_in_memory_dataloader(
             shuffle_training_set_random_seed=args.seed,
             mmap_mode=args.mmap_mode,
             hashes=(
-                [int(x) for x in args.num_embeddings_per_feature.split(",")]
-                if args.num_embeddings_per_feature is not None
+                args.num_embeddings_per_feature
+                if args.num_embeddings is None
                 else ([args.num_embeddings] * CAT_FEATURE_COUNT)
             ),
         ),
@@ -174,37 +244,4 @@ def _get_in_memory_dataloader(
         pin_memory=args.pin_memory,
         collate_fn=lambda x: x,
     )
-    return dataloader
-
-
-def get_dataloader(args: argparse.Namespace, backend: str, stage: str) -> DataLoader:
-    """
-    Gets desired dataloader from dlrm_main command line options. Currently, this
-    function is able to return either a DataLoader wrapped around a RandomRecDataset or
-    a Dataloader wrapped around an InMemoryBinaryCriteoIterDataPipe.
-
-    Args:
-        args (argparse.Namespace): Command line options supplied to dlrm_main.py's main
-            function.
-        backend (str): "nccl" or "gloo".
-        stage (str): "train", "val", or "test".
-
-    Returns:
-        dataloader (DataLoader): PyTorch dataloader for the specified options.
-
-    """
-    stage = stage.lower()
-    if stage not in STAGES:
-        raise ValueError(f"Supplied stage was {stage}. Must be one of {STAGES}.")
-
-    args.pin_memory = (
-        (backend == "nccl") if not hasattr(args, "pin_memory") else args.pin_memory
-    )
-
-    if (
-        args.in_memory_binary_criteo_path is None
-        and args.synthetic_multi_hot_criteo_path is None
-    ):
-        return _get_random_dataloader(args, stage)
-    else:
-        return _get_in_memory_dataloader(args, stage)
+    return dataloader 

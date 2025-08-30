@@ -2,14 +2,15 @@
 
 ## RecStoreEmbeddingBagCollection CPU Test Cases
 
-> based on Commit 7000e63b71c7071e1a38848cd8cb4f351739ee9e
+<!-- > based on Commit 7000e63b71c7071e1a38848cd8cb4f351739ee9e -->
+> based on Commit 9c31e49a4e692ea47caa6452f43124fc3cf6e678
 
 | Test Case | Test Objective | Status | Description |
 |-----------|---------------|--------|-------------|
 | test_basic_initialization | Basic initialization functionality | ✅ | Verify single table configuration initialization |
 | test_multi_table_initialization | Multi-table initialization | ✅ | Verify multi-table configuration initialization |
-| test_empty_config_error | Empty configuration error handling | ✅ | Verify exception thrown for empty configuration |
-| test_missing_config_fields | Missing configuration fields error handling | ✅ | Verify exception thrown for missing required fields |
+<!-- | test_empty_config_error | Empty configuration error handling | ✅ | Verify exception thrown for empty configuration | -->
+<!-- | test_missing_config_fields | Missing configuration fields error handling | ✅ | Verify exception thrown for missing required fields | -->
 | test_basic_forward_pass | Basic forward pass | ✅ | Verify basic embedding lookup |
 | test_multi_table_forward_pass | Multi-table forward pass | ✅ | Verify multi-table embedding lookup |
 | test_empty_batch_forward_pass | Empty batch forward pass | ✅ | Verify empty batch processing |
@@ -81,8 +82,8 @@
 ### Test Statistics
 
 ### CPU Test Statistics
-- **Total Tests**: 20
-- **Passed Tests**: 20
+- **Total Tests**: 18
+- **Passed Tests**: 18
 - **Failed Tests**: 0
 - **Pass Rate**: 100%
 

@@ -118,73 +118,8 @@ torch::Tensor emb_read_torch(const torch::Tensor& keys, int64_t embedding_dim) {
 }
 
 void emb_update_torch(const torch::Tensor& keys, const torch::Tensor& grads) {
-  RECSTORE_LOG(0,
-               "[DEBUG][op_torch] emb_update_torch: keys shape="
-                   << keys.sizes() << ", dtype=" << keys.dtype()
-                   << ", data_ptr=" << keys.data_ptr());
-  RECSTORE_LOG(0,
-               "[DEBUG][op_torch] emb_update_torch: grads shape="
-                   << grads.sizes() << ", dtype=" << grads.dtype()
-                   << ", data_ptr=" << grads.data_ptr());
-  if (keys.size(0) > 0) {
-    auto keys_acc = keys.accessor<int64_t, 1>();
-    std::ostringstream oss;
-    oss << "[DEBUG][op_torch] emb_update_torch: keys start with: ";
-    for (int i = 0; i < std::min((int64_t)10, keys.size(0)); ++i)
-      oss << keys_acc[i] << ", ";
-    RECSTORE_LOG(0, oss.str());
-  }
-  if (grads.size(0) > 0) {
-    auto grads_acc = grads.accessor<float, 2>();
-    std::ostringstream oss;
-    oss << "[DEBUG][op_torch] emb_update_torch: grads start with: ";
-    for (int i = 0; i < std::min((int64_t)10, grads.size(0)); ++i) {
-      oss << "[";
-      for (int j = 0; j < std::min((int64_t)10, grads.size(1)); ++j) {
-        oss << grads_acc[i][j] << ", ";
-      }
-      oss << "] ";
-    }
-    RECSTORE_LOG(0, oss.str());
-  }
-  RECSTORE_LOG(2,
-               "[INFO] emb_update_torch called: keys shape="
-                   << keys.sizes() << ", grads shape=" << grads.sizes());
-  TORCH_CHECK(keys.dim() == 1, "Keys tensor must be 1-dimensional");
-  TORCH_CHECK(keys.scalar_type() == torch::kInt64,
-              "Keys tensor must have dtype int64");
-  TORCH_CHECK(keys.is_contiguous(), "Keys tensor must be contiguous");
-  TORCH_CHECK(grads.dim() == 2, "Grads tensor must be 2-dimensional");
-  TORCH_CHECK(grads.scalar_type() == torch::kFloat32,
-              "Grads tensor must have dtype float32");
-  TORCH_CHECK(grads.is_contiguous(), "Grads tensor must be contiguous");
-  TORCH_CHECK(keys.size(0) == grads.size(0),
-              "Keys and Grads tensors must have the same number of entries");
-
-  if (keys.size(0) == 0) {
-    RECSTORE_LOG(3, "[DEBUG] emb_update_torch: num_keys==0, early return");
-    return;
-  }
-
-  auto op = GetKVClientOp();
-
-  torch::Tensor cpu_keys  = keys;
-  torch::Tensor cpu_grads = grads;
-  if (keys.is_cuda()) {
-    RECSTORE_LOG(2, "[INFO] emb_update_torch: copying GPU keys to CPU");
-    cpu_keys = keys.cpu();
-  }
-  if (grads.is_cuda()) {
-    RECSTORE_LOG(2, "[INFO] emb_update_torch: copying GPU grads to CPU");
-    cpu_grads = grads.cpu();
-  }
-
-  base::RecTensor rec_keys  = ToRecTensor(cpu_keys, base::DataType::UINT64);
-  base::RecTensor rec_grads = ToRecTensor(cpu_grads, base::DataType::FLOAT32);
-
-  RECSTORE_LOG(3, "[DEBUG] emb_update_torch: calling op->EmbUpdate");
-  op->EmbUpdate(rec_keys, rec_grads);
-  RECSTORE_LOG(3, "[DEBUG] emb_update_torch: EmbUpdate done");
+  throw std::runtime_error(
+      "emb_update_torch is deprecated. Use the Python-based sparse optimizer.");
 }
 
 void emb_write_torch(const torch::Tensor& keys, const torch::Tensor& values) {

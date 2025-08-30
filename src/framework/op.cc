@@ -257,7 +257,8 @@ void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
   validate_keys(keys);
   validate_embeddings(values, "Values");
 
-  const int64_t L = keys.shape(0);
+  const int64_t L          = keys.shape(0);
+  const auto& values_shape = values.shape();
   if (values.shape(0) != L) {
     throw std::invalid_argument(
         "Dimension mismatch: Keys has length " + std::to_string(L) +
@@ -271,12 +272,54 @@ void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
   // std::cout << "[EmbRead] Reading " << L << " embeddings of dimension " <<
   // base::EMBEDDING_DIMENSION_D << std::endl;
 
-  std::vector<std::vector<float>> values_vector(L, std::vector<float>(D));
-  for (int64_t i = 0; i < L; ++i) {
-    for (int64_t j = 0; j < D; ++j) {
-      values_vector[i][j] = values_data[i * D + j];
-    }
+  const int64_t total_values = L * D;
+  if (values_shape[0] * values_shape[1] != total_values) {
+    throw std::invalid_argument(
+        "Values total elements mismatch: expected " +
+        std::to_string(total_values) + ", but got " +
+        std::to_string(values_shape[0] * values_shape[1]));
   }
+
+  if (D <= 0) {
+    throw std::invalid_argument(
+        "Invalid embedding dimension D: " + std::to_string(D));
+  }
+
+  std::vector<std::vector<float>> values_vector;
+  values_vector.reserve(L);
+  for (int64_t i = 0; i < L; ++i) {
+    std::vector<float> row(D);
+    std::memcpy(row.data(), values_data + i * D, D * sizeof(float));
+    values_vector.push_back(std::move(row));
+  }
+
+  RECSTORE_LOG(2, "=== Keys Array Info ===");
+  RECSTORE_LOG(2, "Keys size: " << L);
+  if (L > 0) {
+    std::ostringstream keys_stream;
+    keys_stream << "First 3 keys: ";
+    for (int64_t i = 0; i < std::min(L, static_cast<int64_t>(3)); ++i) {
+      keys_stream << keys_array[i] << " ";
+    }
+    RECSTORE_LOG(2, keys_stream.str());
+  }
+
+  RECSTORE_LOG(2, "=== Values Vector Info ===");
+  RECSTORE_LOG(2, "Values total elements: " << total_values);
+  RECSTORE_LOG(2, "Embedding dimension D: " << D);
+  if (L > 0 && D > 0) {
+    std::ostringstream values_stream;
+    values_stream << "First 3 embeddings (each first 3 items): ";
+    for (int64_t i = 0; i < std::min(L, static_cast<int64_t>(3)); ++i) {
+      values_stream << "[";
+      for (int64_t j = 0; j < std::min(D, static_cast<int64_t>(3)); ++j) {
+        values_stream << values_vector[i][j] << " ";
+      }
+      values_stream << "] ";
+    }
+    RECSTORE_LOG(2, values_stream.str());
+  }
+
   bool success = ps_client_->PutParameter(keys_array, values_vector);
   if (!success) {
     throw std::runtime_error("Failed to write embeddings to PS client.");
@@ -428,40 +471,40 @@ void KVClientOp::EmbWrite(const base::RecTensor& keys,
 
 void KVClientOp::EmbUpdate(const base::RecTensor& keys,
                            const base::RecTensor& grads) {
-  std::lock_guard<std::mutex> lock(mtx_);
-  const int64_t emb_dim  = grads.shape(1);
-  const int64_t num_keys = keys.shape(0);
-  RECSTORE_LOG(2,
-               "[INFO] [MOCK] EmbUpdate called: num_keys="
-                   << num_keys << ", emb_dim=" << emb_dim
-                   << ", keys ptr=" << keys.data_as<uint64_t>()
-                   << ", grads ptr=" << grads.data_as<float>());
-  if (embedding_dim_ == -1) {
-    embedding_dim_ = emb_dim;
-    RECSTORE_LOG(1,
-                 "[WARNING] [MOCK] EmbUpdate: embedding_dim_ inferred as "
-                     << embedding_dim_);
-  } else if (embedding_dim_ != emb_dim) {
-    RECSTORE_LOG(0,
-                 "[ERROR] [MOCK] EmbUpdate: embedding_dim mismatch: "
-                     << embedding_dim_ << " vs " << emb_dim);
-    throw std::runtime_error(
-        "KVClientOp Error: Inconsistent embedding dimension for update.");
-  }
-  const uint64_t* key_data = keys.data_as<uint64_t>();
-  const float* grad_data   = grads.data_as<float>();
-  for (int64_t i = 0; i < num_keys; ++i) {
-    uint64_t key = key_data[i];
-    auto it      = store_.find(key);
-    if (it != store_.end()) {
-      for (int64_t j = 0; j < emb_dim; ++j) {
-        it->second[j] -= learning_rate_ * grad_data[i * emb_dim + j];
-      }
-      RECSTORE_LOG(
-          3,
-          "[DEBUG] [MOCK] EmbUpdate: key=" << key << " updated, grads=[...]");
-    }
-  }
+  // std::lock_guard<std::mutex> lock(mtx_);
+  // const int64_t emb_dim  = grads.shape(1);
+  // const int64_t num_keys = keys.shape(0);
+  // RECSTORE_LOG(2,
+  //              "[INFO] [MOCK] EmbUpdate called: num_keys="
+  //                  << num_keys << ", emb_dim=" << emb_dim
+  //                  << ", keys ptr=" << keys.data_as<uint64_t>()
+  //                  << ", grads ptr=" << grads.data_as<float>());
+  // if (embedding_dim_ == -1) {
+  //   embedding_dim_ = emb_dim;
+  //   RECSTORE_LOG(1,
+  //                "[WARNING] [MOCK] EmbUpdate: embedding_dim_ inferred as "
+  //                    << embedding_dim_);
+  // } else if (embedding_dim_ != emb_dim) {
+  //   RECSTORE_LOG(0,
+  //                "[ERROR] [MOCK] EmbUpdate: embedding_dim mismatch: "
+  //                    << embedding_dim_ << " vs " << emb_dim);
+  //   throw std::runtime_error(
+  //       "KVClientOp Error: Inconsistent embedding dimension for update.");
+  // }
+  // const uint64_t* key_data = keys.data_as<uint64_t>();
+  // const float* grad_data   = grads.data_as<float>();
+  // for (int64_t i = 0; i < num_keys; ++i) {
+  //   uint64_t key = key_data[i];
+  //   auto it      = store_.find(key);
+  //   if (it != store_.end()) {
+  //     for (int64_t j = 0; j < emb_dim; ++j) {
+  //       it->second[j] -= learning_rate_ * grad_data[i * emb_dim + j];
+  //     }
+  //     RECSTORE_LOG(
+  //         3,
+  //         "[DEBUG] [MOCK] EmbUpdate: key=" << key << " updated, grads=[...]");
+  //   }
+  // }
 }
 
 void KVClientOp::GetPretchResult(uint64_t prefetch_id,
