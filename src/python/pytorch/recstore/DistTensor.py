@@ -77,17 +77,17 @@ class DistTensor:
         return self._kv_client.pull(self._name, ids)
 
     def __setitem__(self, ids: Any, data: torch.Tensor):
-        """Pushes data to the given IDs."""
+        """
+        Pushes data to the given IDs, overwriting existing values.
+        In the new architecture, this is a simple 'write' or 'push' operation.
+        The gradient update logic (pull-read-modify-write) is handled by the optimizer.
+        """
         if not isinstance(ids, torch.Tensor):
             ids = torch.tensor(ids)
         if ids.dtype != torch.int64:
             ids = ids.to(torch.int64)
         
-        # In the context of DistEmb, the 'data' passed to __setitem__ during
-        # the backward pass will be gradients. We use the specialized 'update'
-        # method for this. A more general client could inspect the data type
-        # or have separate methods, but for now we assume __setitem__ is for updates.
-        self._kv_client.update(self._name, ids, data)
+        self._kv_client.push(self._name, ids, data)
     
     def __len__(self) -> int:
         """Returns the size of the first dimension."""

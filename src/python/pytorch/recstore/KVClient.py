@@ -212,14 +212,14 @@ class RecStoreClient:
             raise RuntimeError(f"Tensor '{name}' has not been initialized.")
         self.ops.emb_write(ids, data)
 
-    def update(self, name: str, ids: torch.Tensor, grads: torch.Tensor):
-        """
-        Pushes gradients to update the given IDs of a named tensor.
-        This is an additional method from your original client, kept for utility.
-        """
-        if name not in self._tensor_meta:
-            raise RuntimeError(f"Tensor '{name}' has not been initialized.")
-        self.ops.emb_update(ids, grads)
+    # def update(self, name: str, ids: torch.Tensor, grads: torch.Tensor):
+    #     """
+    #     Pushes gradients to update the given IDs of a named tensor.
+    #     This is an additional method from original client, kept for utility.
+    #     """
+    #     if name not in self._tensor_meta:
+    #         raise RuntimeError(f"Tensor '{name}' has not been initialized.")
+    #     self.ops.emb_update(ids, grads)
 
     def get_data_meta(self, name: str) -> Tuple[torch.dtype, Tuple[int, ...], None]:
         """Get meta data (data_type, data_shape, partition_policy)"""

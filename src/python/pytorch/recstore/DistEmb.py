@@ -4,96 +4,93 @@ from typing import Optional, Callable, Any
 
 class _DistEmbFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, ids, dist_tensor, dummy_param):
+    def forward(ctx, ids, dist_tensor, dummy_param, module_instance):
+        """
+        Forward pass for distributed embedding lookup.
+
+        It saves the module instance to the context so the backward pass can
+        access its trace list.
+        """
         ctx.save_for_backward(ids)
-        ctx.dist_tensor = dist_tensor
+        ctx.module_instance = module_instance
         embs = dist_tensor[ids]
         return embs
 
     @staticmethod
     def backward(ctx, grad_output):
+        """
+        Backward pass for distributed embedding.
+
+        Instead of performing an update, this function now appends the
+        (ids, gradients) pair to the module's trace list. An external
+        optimizer is responsible for processing this trace.
+        """
         ids, = ctx.saved_tensors
-        dist_tensor = ctx.dist_tensor
-        dist_tensor[ids] = grad_output.contiguous()
-        return None, None, None
+        module_instance = ctx.module_instance
+        
+        module_instance._trace.append((ids.detach(), grad_output.detach()))
+
+        return None, None, None, None
 
 class DistEmbedding(torch.nn.Module):
     """
     Distributed node embeddings.
 
-    This class, inspired by DGL's DistEmbedding, provides a way to handle large-scale
-    learnable embeddings for models. It uses a DistTensor backend for storage and
-    retrieval.
-
-    Updates to these embeddings are handled sparsely. Instead of using PyTorch's
-    standard autograd for the backward pass, this module traces the forward
-    tensors. A custom optimizer is then required to process these traces and apply gradients.
+    This module handles large-scale embeddings using a DistTensor backend.
+    
+    Instead of performing immediate gradient updates in the backward pass,
+    it traces the IDs and gradients. A dedicated `SparseOptimizer` must be
+    used to process this trace and apply the updates after `loss.backward()`
+    is called.
 
     Parameters
     ----------
     num_embeddings : int
-        The total number of embeddings in the layer.
+        The total number of embeddings.
     embedding_dim : int
         The dimensionality of each embedding vector.
-    name : str, optional
-        A unique name for the embeddings. If not provided, a name will be
-        generated, but the embedding will not be persistent.
+    name : str
+        A unique name for the embedding table.
     init_func : callable, optional
-        A function to initialize the embedding weights. If None, they are
-        initialized to zeros.
-    part_policy : Any, optional
-        The partition policy for distributing the embeddings. This is currently
-        a placeholder for API compatibility and is not used by the ops-based backend.
+        A function to initialize the embedding weights. Defaults to zeros.
     """
     def __init__(
         self,
         num_embeddings: int,
         embedding_dim: int,
-        name: Optional[str] = None,
+        name: str,
         init_func: Optional[Callable] = None,
-        part_policy: Any = None,
+        # part_policy is kept for API compatibility but not used in this backend
+        part_policy: Any = None, 
     ):
         super(DistEmbedding, self).__init__()
         if not name:
-            raise ValueError("DistEmb requires a unique 'name'.")
+            raise ValueError("DistEmbedding requires a unique 'name'.")
         
         self._tensor = DistTensor(
             shape=(num_embeddings, embedding_dim),
             dtype=torch.float32,
             name=name,
             init_func=init_func,
-            part_policy=part_policy,
         )
+        # A dummy parameter to ensure this module is included in the autograd graph
         self.dummy_param = torch.nn.Parameter(torch.empty(0))
 
         self._trace = []
         self._num_embeddings = num_embeddings
         self._embedding_dim = embedding_dim
-        self._part_policy = part_policy
-        self._optm_state = None
 
     def forward(self, ids):
         """
         Performs a lookup for the given embedding IDs.
 
-        If called within a gradient-enabled context (e.g., model.train()),
-        it traces the pulled embeddings so that a custom optimizer can
-        later apply sparse gradients.
-
-        Parameters
-        ----------
-        ids : torch.Tensor
-            A tensor of IDs to look up in the embedding table.
-
-        Returns
-        -------
-        torch.Tensor
-            The corresponding embeddings for the given IDs.
+        If `torch.is_grad_enabled()` is true, it traces the lookup so that a
+        sparse optimizer can later apply gradients.
         """
-        return _DistEmbFunction.apply(ids, self._tensor, self.dummy_param)
+        return _DistEmbFunction.apply(ids, self._tensor, self.dummy_param, self)
 
     def reset_trace(self):
-        """Reset the traced data. Should be called after each optimizer step."""
+        """Reset the traced data. Should be called by the optimizer after a step."""
         self._trace = []
 
     @property
@@ -115,11 +112,6 @@ class DistEmbedding(torch.nn.Module):
     def weight(self) -> DistTensor:
         """Return the DistTensor that stores the embeddings."""
         return self._tensor
-
-    @property
-    def part_policy(self) -> Any:
-        """Return the partition policy."""
-        return self._part_policy
 
     def __repr__(self):
         return (f"DistEmbedding(name='{self.name}', num_embeddings={self.num_embeddings}, "
