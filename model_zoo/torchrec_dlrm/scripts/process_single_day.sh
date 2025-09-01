@@ -97,6 +97,8 @@ mv "$output_dir/day_0_sparse_contig_freq.npy" "$output_dir/day_0_sparse.npy"
 
 echo "Step 3: Shuffling the dataset (single day only)..."
 
+date
+
 python -c "
 import numpy as np
 import os
@@ -121,8 +123,6 @@ if not all(os.path.exists(f) for f in [dense_file, sparse_file, labels_file]):
 dense_data = np.load(dense_file)
 sparse_data = np.load(sparse_file)
 labels_data = np.load(labels_file)
-
-date
 
 print(f'Loaded data shapes:')
 print(f'  Dense: {dense_data.shape}')
