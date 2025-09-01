@@ -8,6 +8,9 @@
 # Enhanced by Choimoe:
 # - Supports loading an arbitrary? number of days from the dataset
 
+# Usage:
+# nohup bash scripts/process_single_day.sh ./partial_data ./processed_day_0_data > preprocess_data.log 2>&1 &
+
 display_help() {
    echo "Two command line arguments are required."
    echo "Example usage:"
@@ -28,7 +31,7 @@ echo "Processing single day data..."
 echo "Input directory: $raw_tsv_criteo_files_dir"
 echo "Output directory: $output_dir"
 
-day_0_file="$raw_tsv_criteo_files_dir/day_0.tsv"
+day_0_file="$raw_tsv_criteo_files_dir/day_0"
 if [ ! -f "$day_0_file" ]; then
     echo "Error: day_0 file not found in $raw_tsv_criteo_files_dir"
     echo "Please ensure you have downloaded and uncompressed day_0.gz"
@@ -53,33 +56,95 @@ fi
 echo "Step 2: Converting sparse indices to contiguous indices..."
 date
 
-python -m torchrec.datasets.scripts.contiguous_preproc_criteo \
-    --input_dir "$output_dir" \
-    --output_dir "$output_dir" \
-    --frequency_threshold 0
+python -c "
+import numpy as np
+import os
+
+input_dir = '$output_dir'
+output_dir = '$output_dir'
+
+day_0_sparse_file = os.path.join(input_dir, 'day_0_sparse.npy')
+
+if not os.path.exists(day_0_sparse_file):
+    print(f'Error: {day_0_sparse_file} not found')
+    exit(1)
+
+print(f'Processing {day_0_sparse_file}...')
+
+sparse_data = np.load(day_0_sparse_file)
+
+unique_features = np.unique(sparse_data)
+
+feature_to_contig = {feature: idx for idx, feature in enumerate(unique_features)}
+
+contig_sparse_data = np.array([[feature_to_contig[feature] for feature in row] for row in sparse_data])
+
+output_file = os.path.join(output_dir, 'day_0_sparse_contig_freq.npy')
+np.save(output_file, contig_sparse_data)
+
+print(f'Converted sparse indices saved to {output_file}')
+print(f'Original unique features: {len(unique_features)}')
+print(f'Contiguous indices range: 0 to {len(unique_features)-1}')
+"
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to convert sparse indices"
     exit 1
 fi
 
-for i in 0
-do
-   name="$output_dir/day_$i""_sparse_contig_freq.npy"
-   renamed="$output_dir/day_$i""_sparse.npy"
-   echo "Renaming $name to $renamed"
-   mv "$name" "$renamed"
-done
+echo "Renaming files..."
+mv "$output_dir/day_0_sparse_contig_freq.npy" "$output_dir/day_0_sparse.npy"
 
-echo "Step 3: Shuffling the dataset..."
+echo "Step 3: Shuffling the dataset (single day only)..."
+
 date
 
-python -m torchrec.datasets.scripts.shuffle_preproc_criteo \
-    --input_dir_labels_and_dense "$output_dir" \
-    --input_dir_sparse "$output_dir" \
-    --output_dir_shuffled "$output_dir" \
-    --random_seed 0 \
-    --days 1
+python -c "
+import numpy as np
+import os
+import random
+
+input_dir = '$output_dir'
+output_dir = '$output_dir'
+
+random.seed(0)
+np.random.seed(0)
+
+print('Loading day_0 data...')
+
+dense_file = os.path.join(input_dir, 'day_0_dense.npy')
+sparse_file = os.path.join(input_dir, 'day_0_sparse.npy')
+labels_file = os.path.join(input_dir, 'day_0_labels.npy')
+
+if not all(os.path.exists(f) for f in [dense_file, sparse_file, labels_file]):
+    print('Error: Required day_0 files not found')
+    exit(1)
+
+dense_data = np.load(dense_file)
+sparse_data = np.load(sparse_file)
+labels_data = np.load(labels_file)
+
+print(f'Loaded data shapes:')
+print(f'  Dense: {dense_data.shape}')
+print(f'  Sparse: {sparse_data.shape}')
+print(f'  Labels: {labels_data.shape}')
+
+num_samples = len(dense_data)
+indices = list(range(num_samples))
+random.shuffle(indices)
+
+print(f'Shuffling {num_samples} samples...')
+
+dense_shuffled = dense_data[indices]
+sparse_shuffled = sparse_data[indices]
+labels_shuffled = labels_data[indices]
+
+np.save(os.path.join(output_dir, 'day_0_dense.npy'), dense_shuffled)
+np.save(os.path.join(output_dir, 'day_0_sparse.npy'), sparse_shuffled)
+np.save(os.path.join(output_dir, 'day_0_labels.npy'), labels_shuffled)
+
+print('Shuffling completed successfully!')
+"
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to shuffle dataset"
@@ -97,6 +162,13 @@ for file in "${required_files[@]}"; do
         echo "✓ $file exists"
         file_size=$(du -h "$output_dir/$file" | cut -f1)
         echo "  Size: $file_size"
+        
+        python -c "
+import numpy as np
+data = np.load('$output_dir/$file')
+print(f'    Shape: {data.shape}')
+print(f'    Data type: {data.dtype}')
+"
     else
         echo "✗ $file missing"
         exit 1
@@ -105,5 +177,3 @@ done
 
 echo ""
 echo "Single day data processing completed successfully!"
-echo "You can now use the processed data for training with:"
-echo "python dlrm_main_single_day.py --single_day_mode --in_memory_binary_criteo_path $output_dir" 

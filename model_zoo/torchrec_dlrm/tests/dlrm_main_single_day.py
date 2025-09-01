@@ -384,7 +384,7 @@ def main(argv: List[str]) -> None:
             
             optimizer.zero_grad()
             outputs = model(dense_features, sparse_features)
-            loss = criterion(outputs, labels.float().unsqueeze(1))
+            loss = criterion(outputs, labels.float())
             
             loss.backward()
             optimizer.step()
