@@ -1,5 +1,5 @@
 #include "framework/op.h"
-
+#include "grpc_ps/grpc_ps_client.h"
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -231,6 +231,7 @@ void KVClientOp::EmbRead(const RecTensor& keys, RecTensor& values) {
         " but values has length " + std::to_string(values.shape(0)));
   }
   const uint64_t* keys_data = keys.data_as<uint64_t>();
+
   base::ConstArray<uint64_t> keys_array(keys_data, L);
   float* values_data = values.data_as<float>();
   // std::cout << "[EmbRead] Reading " << L << " embeddings of dimension " <<
@@ -524,6 +525,17 @@ bool KVClientOp::IsWriteDone(uint64_t write_id) {
 bool KVClientOp::IsPrefetchDone(uint64_t prefetch_id) {
   throw std::runtime_error("Not impl");
 }
+
+namespace testing {
+
+void ClearEmbeddingTableForTesting() {
+    bool success = GetGRPCClientInstance().ClearPS();
+    if (!success) {
+        throw std::runtime_error("Failed to clear remote Parameter Server state during testing.");
+    }
+}
+
+} // namespace testing
 
 } // namespace recstore
 #endif

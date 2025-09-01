@@ -167,6 +167,32 @@ Block **Block::Split(void) {
 #endif
 }
 
+bool Block::Delete(Key_t &key) {
+  if (sema == -1) 
+    return false;
+
+  int64_t lock = sema;
+  while (!CAS(&sema, &lock, lock + 1)) {
+    lock = sema;
+  }
+
+  bool found = false;
+  for (unsigned i = 0; i < kNumSlot; ++i) {
+    if (_[i].key == key) {
+      _[i].key = INVALID;
+      clflush((char*)&_[i].key, sizeof(Key_t));
+      found = true;
+      break;
+    }
+  }
+
+  lock = sema;
+  while (!CAS(&sema, &lock, lock - 1)) {
+    lock = sema;
+  }
+  return found;
+}
+
 ExtendibleHash::ExtendibleHash(void) : Index(IndexConfig{}), dir{1}, global_depth{0} {
   for (unsigned i = 0; i < dir.capacity; ++i) {
     dir._[i] = new Block(global_depth);
@@ -368,7 +394,7 @@ RETRY:
         global_depth += 1;
         clflush((char *)&global_depth, sizeof(global_depth));
         // cout << global_depth << endl;
-        delete d;
+        delete[] d;
         // TODO: requiered to do this atomically
         // cout << x << " directory doubling " << target << " " << dir._[x]<<
         // endl;
@@ -411,8 +437,27 @@ bool ExtendibleHash::InsertOnly(Key_t &key, Value_t value) {
   return false;
 }
 
-// TODO
-bool ExtendibleHash::Delete(Key_t &key) { return false; }
+bool ExtendibleHash::Delete(Key_t &key) {
+  auto key_hash = h(&key, sizeof(key));
+#ifdef LSB
+  auto x = (key_hash % dir.capacity);
+#else
+  auto x = (key_hash >> (8 * sizeof(key_hash) - global_depth));
+#endif
+
+  Block* target = dir._[x];
+  bool success = target->Delete(key);
+  
+  // 如果删除失败且块被锁定（可能正在分裂），重试
+  if (!success && target->sema == -1) {
+    // 短暂让步避免活锁
+    std::this_thread::yield();
+    // 重新计算位置（目录可能已变化）
+    x = (key_hash % dir.capacity);
+    success = dir._[x]->Delete(key);
+  }
+  return success;
+}
 
 Value_t ExtendibleHash::Get(Key_t &key) {
   auto key_hash = h(&key, sizeof(key));
@@ -624,7 +669,3 @@ void ExtendibleHash::clear() {
     dir._[i]->pattern = i;
   }
 }
-
-// std::string ExtendibleHash::RetrieveValue(uint64_t raw_value) {
-//   return Index::RetrieveValue(raw_value); 
-// }

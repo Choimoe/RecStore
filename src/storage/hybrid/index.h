@@ -7,7 +7,7 @@
 #include "base/json.h"
 #include "base/log.h"
 #include "storage/hybrid/pointer.h"
-#include "value.h"
+// #include "value.h"
 
 using boost::coroutines2::coroutine;
 
@@ -47,7 +47,7 @@ class Index {
   }
 
   virtual void DebugInfo() const {}
-
+  virtual bool Delete(uint64_t &key) = 0;
   virtual void BulkLoad(base::ConstArray<uint64_t> keys, const void *value) {
     LOG(FATAL) << "not implemented";
   };
@@ -66,16 +66,6 @@ class Index {
   };
 
   virtual void clear() { LOG(FATAL) << "not implemented"; };
-
-  // virtual std::string RetrieveValue(const uint64_t key,uint64_t raw_value) { 
-  //   UnifiedPointer p = UnifiedPointer::FromRaw(raw_value);
-  //   return value_.RetrieveValue(key,p);
-  // }
-
-  // virtual int WriteValue(const uint64_t key,const std::string_view &value){
-  //   UnifiedPointer p =value_.WriteValue(key,value);
-  //   return p.value;
-  // }
 
  private:
 };
