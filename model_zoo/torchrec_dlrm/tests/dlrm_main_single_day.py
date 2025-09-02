@@ -414,7 +414,7 @@ def main(argv: List[str]) -> None:
                 labels = batch[2].to(device)
                 
                 outputs = model(dense_features, sparse_features)
-                loss = criterion(outputs, labels.float().unsqueeze(1))
+                loss = criterion(outputs, labels.float())
                 
                 val_loss += loss.item()
                 auroc_score = auroc(outputs.squeeze(), labels)
