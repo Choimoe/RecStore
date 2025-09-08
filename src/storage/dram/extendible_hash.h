@@ -44,6 +44,12 @@ struct Block {
   void Insert4split(Key_t &, Value_t);
   bool Put(Key_t &, Value_t, size_t);
   Block **Split(void);
+  bool Delete(Key_t &);
+
+  void operator delete[](void* p) noexcept { std::free(p); }
+  void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+  void operator delete(void* p) noexcept { std::free(p); }
+  void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
   Pair _[kNumSlot];
   size_t local_depth;
@@ -140,6 +146,8 @@ public:
 
   void clear() override;
 
+  void operator delete(void* p) noexcept { std::free(p); }
+  void operator delete(void* p, std::size_t) noexcept { std::free(p); }
   // std::string RetrieveValue(uint64_t raw_value) override;
 private:
   Directory dir;

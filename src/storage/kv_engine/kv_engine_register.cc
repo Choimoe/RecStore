@@ -3,6 +3,7 @@
 // #include "engine_double_desk.h"
 // #include "engine_dash.h"
 // #include "engine_hashapi.h"
+#include "engine_cceh.h"
 #include "engine_extendable_hash.h"
 #include "engine_map.h"
 // #include "engine_mappm.h"

@@ -12,7 +12,7 @@
 
 #include "base/json.h"
 #include "memory/shm_file.h"
-#include "storage/kv_engine/engine_extendible_hash.h"
+#include "storage/kv_engine/engine_extendable_hash.h"
 
 class KVEngineExtendibleHashTest : public ::testing::Test {
 protected:
