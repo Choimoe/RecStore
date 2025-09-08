@@ -27,6 +27,11 @@ class BasePSClient {
                            const std::vector<std::vector<float>> &values) = 0;
 
   virtual void Command(PSCommand command) = 0;
+
+  virtual uint64_t PrefetchParameter(const base::ConstArray<uint64_t>& keys) = 0;
+  virtual bool IsPrefetchDone(uint64_t prefetch_id) = 0;
+  virtual void WaitForPrefetch(uint64_t prefetch_id) = 0;
+  virtual bool GetPrefetchResult(uint64_t prefetch_id, std::vector<std::vector<float>>* values) = 0;
 };
 
 }  // namespace recstore

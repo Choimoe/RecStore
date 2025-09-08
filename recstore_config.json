@@ -3,6 +3,19 @@
         "ps_type": "GRPC",
         "max_batch_keys_size": 65536,
         "num_threads": 32,
+        "num_shards  ": 2,
+        "servers": [
+            {
+                "host": "127.0.0.1",
+                "port": 15000,
+                "shard": 0
+            },
+            {
+                "host": "127.0.0.1",
+                "port": 15001,
+                "shard": 1
+            }
+        ],
         "base_kv_config": {
             "kv_type": "KVEngineMap",
             "path": "/dev/shm/KVEngineMap",
@@ -10,5 +23,27 @@
             "value_pool_size": 1073741824,
             "corotine_per_thread": 1
         }
+    },
+    "distributed_client": {
+        "num_shards": 2,
+        "hash_method": "city_hash",
+        "max_keys_per_request": 500,
+        "servers": [
+            {
+                "host": "127.0.0.1",
+                "port": 15000,
+                "shard": 0
+            },
+            {
+                "host": "127.0.0.1",
+                "port": 15001,
+                "shard": 1
+            }
+        ]
+    },
+    "client": {
+        "host": "127.0.0.1",
+        "port": 15000,
+        "shard": 1
     }
 }

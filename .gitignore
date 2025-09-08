@@ -33,3 +33,5 @@ src/framework_adapters/torch/benchmark
 binary
 log
 dockerfiles/init_env.log
+dlrm_venv/
+libtorch/

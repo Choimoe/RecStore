@@ -67,7 +67,8 @@ public:
             base::DataType::FLOAT32);
 
         try {
-            recstore::EmbRead(rec_keys, rec_values);
+            auto op = recstore::GetKVClientOp();
+            op->EmbRead(rec_keys, rec_values);
         } catch (const std::exception& e) {
             context->SetStatus(tf::errors::Internal("Recstore EmbRead failed: ", e.what()));
         }
@@ -106,7 +107,8 @@ public:
             base::DataType::FLOAT32);
         
         try {
-            recstore::EmbUpdate(rec_keys, rec_grads);
+            auto op = recstore::GetKVClientOp();
+            op->EmbUpdate(rec_keys, rec_grads);
         } catch (const std::exception& e) {
             context->SetStatus(tf::errors::Internal("Recstore EmbUpdate failed: ", e.what()));
         }

@@ -1,10 +1,10 @@
-#ifndef EXTENDIBLE_PTR_H_
-#define EXTENDIBLE_PTR_H_
+#pragma once
 
-#include "../util/pair.h"
-#include "hash.h"
+#include "hash_interface.h"
+#include "pair.h"
 #include <cstring>
 #include <vector>
+#include "../hybrid/index.h"
 // #include "/home/nammh/quartz/src/lib/pmalloc.h"
 
 #define LSB
@@ -89,8 +89,9 @@ struct Directory {
   void LSBUpdate(int, int, int, int, Block **);
 };
 
-class ExtendibleHash : public Hash {
+class ExtendibleHash : public Index, public Hash {
 public:
+  ExtendibleHash(const IndexConfig &config);
   ExtendibleHash(void);
   ExtendibleHash(size_t);
   ~ExtendibleHash(void);
@@ -99,6 +100,9 @@ public:
   bool Delete(Key_t &);
   Value_t Get(Key_t &);
   Value_t FindAnyway(Key_t &);
+  void Insert(const Key_t &key, Value_t value);
+  bool InsertOnly(const Key_t &key, Value_t value);
+  Value_t Get(const Key_t &key);
   double Utilization(void);
   size_t Capacity(void);
 
@@ -108,10 +112,36 @@ public:
     // ret = pmalloc(size);
     return ret;
   }
+// From Index
+  void Util() override;
 
+  void Get(const uint64_t key, uint64_t &value, unsigned tid) override;
+  void Put(const uint64_t key, uint64_t value, unsigned tid) override;
+
+  void BatchPut(coroutine<void>::push_type &sink,
+                base::ConstArray<uint64_t> keys,
+                uint64_t* pointers,
+                unsigned tid) override;
+
+  void BatchGet(base::ConstArray<uint64_t> keys,
+                uint64_t* pointers,
+                unsigned tid) override;
+
+  void BatchGet(coroutine<void>::push_type &sink,
+                base::ConstArray<uint64_t> keys,
+                uint64_t* pointers,
+                unsigned tid) override;
+
+  void DebugInfo() const override;
+
+  void BulkLoad(base::ConstArray<uint64_t> keys, const void *value) override;
+
+  void LoadFakeData(int64_t key_capacity, int value_size) override;
+
+  void clear() override;
+
+  // std::string RetrieveValue(uint64_t raw_value) override;
 private:
-  size_t global_depth;
   Directory dir;
+  size_t global_depth;
 };
-
-#endif // EXTENDIBLE_PTR_H_

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.5)
 project(RecStore LANGUAGES CXX CUDA C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -19,11 +19,11 @@ find_package(Threads)
 
 
 if (OPENMP_FOUND)
-message(STATUS "OPENMP FOUND")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS} -fuse-ld=mold -faligned-new -Wno-unused-function")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS} -faligned-new -Wno-unused-function")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+    message(STATUS "OPENMP FOUND")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+    # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS} -fuse-ld=mold -faligned-new -Wno-unused-function")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS} -faligned-new -Wno-unused-function")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
 endif()
 
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
@@ -91,20 +91,23 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/common.cmake")
 list(APPEND CMAKE_PREFIX_PATH "/home/xieminhui/.local/share/cmake/")
 list(APPEND CMAKE_PREFIX_PATH "/home/pod/.local/share/cmake/")
 
-list(APPEND CMAKE_PREFIX_PATH "/home/xieminhui/.local/lib/python3.10/site-packages/torch/share/cmake/Torch/")
+list(APPEND CMAKE_PREFIX_PATH "${PROJECT_SOURCE_DIR}/third_party/libtorch/libtorch/share/cmake/Torch")
+set(Torch_DIR "${PROJECT_SOURCE_DIR}/third_party/libtorch/libtorch/share/cmake/Torch")
+
+# list(APPEND CMAKE_PREFIX_PATH "/home/xieminhui/.local/lib/python3.10/site-packages/torch/share/cmake/Torch/")
 
 
-if (EXISTS "/home/pod/.local/lib/python3.10/site-packages/torch/share/cmake/Torch")
-  list(APPEND CMAKE_PREFIX_PATH "/home/pod/.local/lib/python3.10/site-packages/torch/share/cmake/Torch")
-endif()
+# if (EXISTS "/home/pod/.local/lib/python3.10/site-packages/torch/share/cmake/Torch")
+#   list(APPEND CMAKE_PREFIX_PATH "/home/pod/.local/lib/python3.10/site-packages/torch/share/cmake/Torch")
+# endif()
 
-if (EXISTS "/home/xieminhui/miniconda3/lib/python3.11/site-packages/torch/share/cmake/Torch")
-  set(Torch_DIR "/home/xieminhui/miniconda3/lib/python3.11/site-packages/torch/share/cmake/Torch")
-endif()
+# if (EXISTS "/home/xieminhui/miniconda3/lib/python3.11/site-packages/torch/share/cmake/Torch")
+#   set(Torch_DIR "/home/xieminhui/miniconda3/lib/python3.11/site-packages/torch/share/cmake/Torch")
+# endif()
 
-if (EXISTS "/home/xieminhui/anaconda3/lib/python3.1/site-packages/torch/share/cmake/Torch")
-  set(Torch_DIR "/home/xieminhui/anaconda3/lib/python3.1/site-packages/torch/share/cmake/Torch")
-endif()
+# if (EXISTS "/home/xieminhui/anaconda3/lib/python3.1/site-packages/torch/share/cmake/Torch")
+#   set(Torch_DIR "/home/xieminhui/anaconda3/lib/python3.1/site-packages/torch/share/cmake/Torch")
+# endif()
 
 
 
@@ -118,6 +121,9 @@ set(FOLLY_ROOT_DIR "${folly_DIR}")
 
 find_package(folly REQUIRED)
 find_package(gflags REQUIRED)
+
+include_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include)
+link_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/lib)
 
 set(glog_DIR "${PROJECT_SOURCE_DIR}/third_party/glog/glog-install-fPIC/usr/local/lib/cmake/glog")
 find_package(glog CONFIG REQUIRED)
@@ -135,6 +141,13 @@ add_subdirectory(third_party/Mayfly-main)
 add_subdirectory(third_party/json)
 # add_subdirectory(third_party/pybind11)
 # add_subdirectory(third_party/mimalloc)
+
+set(PYBIND11_CMAKE_DIR "/usr/local/lib/python3.10/dist-packages/pybind11/share/cmake/pybind11")
+list(APPEND CMAKE_PREFIX_PATH ${PYBIND11_CMAKE_DIR})
+find_package(pybind11 REQUIRED)
+
+set(CTEST_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/Testing")
+enable_testing()
 
 include_directories(
   ${PROJECT_SOURCE_DIR}/src

@@ -34,23 +34,18 @@ int main() {
 
 #pragma omp parallel
   {
-    int avg_shard = (myMap.get_num_shards() - 1) / omp_get_num_threads() + 1;
     int thread_id = omp_get_thread_num();
-
-    std::cout << "thread_id " << thread_id << std::endl;
-    printf("avg_shard %d\n", avg_shard);
-
-    auto shard_begin = myMap.get_shard(avg_shard * thread_id);
-    auto shard_end = myMap.get_shard(avg_shard * (thread_id + 1));
-
-    if (shard_begin == shard_end) {
-      printf("thread %d shard_begin == shard_end\n", thread_id);
-    }
-
-    for (; shard_begin != shard_end; ++shard_begin) {
-      auto &it = *shard_begin;
-      if (thread_id == 0)
-        printf("T%d %lu %lu\n", thread_id, it.first, it.second);
+    int num_threads = omp_get_num_threads();
+    
+    for (int i = 0; i < 10; ++i) {
+      if (i % num_threads != thread_id) continue;
+      
+      auto it = myMap.find(i);
+      if (it != myMap.end()) {
+        if (thread_id == 0) {
+          printf("T%d %d %lu\n", thread_id, i, it->second);
+        }
+      }
     }
   }
 

@@ -1,6 +1,11 @@
 #pragma once
 
-#include <torch/torch.h>
+#ifdef USE_TORCH
+#  include <torch/torch.h>
+namespace c10 {
+using float16_t = c10::Half;
+}
+#endif
 
 #include <functional>
 #include <iostream>
@@ -9,10 +14,6 @@
 #include <string>
 #include <type_traits>
 #include <vector>
-
-namespace c10 {
-using float16_t = c10::Half;
-}
 
 namespace base {
 
@@ -30,25 +31,25 @@ enum class DataType {
 
 inline std::string DataTypeToString(DataType dtype) {
   switch (dtype) {
-    case DataType::UINT64:
-      return "UINT64";
-    case DataType::FLOAT32:
-      return "FLOAT32";
-    case DataType::FLOAT16:
-      return "FLOAT16";
-    case DataType::INT32:
-      return "INT32";
-    case DataType::INT16:
-      return "INT16";
-    case DataType::INT8:
-      return "INT8";
-    default:
-      return "UNKNOWN";
+  case DataType::UINT64:
+    return "UINT64";
+  case DataType::FLOAT32:
+    return "FLOAT32";
+  case DataType::FLOAT16:
+    return "FLOAT16";
+  case DataType::INT32:
+    return "INT32";
+  case DataType::INT16:
+    return "INT16";
+  case DataType::INT8:
+    return "INT8";
+  default:
+    return "UNKNOWN";
   }
 }
 
 class RecTensor {
- public:
+public:
   RecTensor()
       : data_ptr_(nullptr), dtype_(DataType::UNKNOWN), num_elements_(0) {}
 
@@ -59,8 +60,10 @@ class RecTensor {
       dtype_ = DataType::UINT64;
     } else if (std::is_same<T, float>::value) {
       dtype_ = DataType::FLOAT32;
+#ifdef USE_TORCH
     } else if (std::is_same<T, c10::float16_t>::value) {
       dtype_ = DataType::FLOAT16;
+#endif
     } else if (std::is_same<T, int32_t>::value) {
       dtype_ = DataType::INT32;
     } else if (std::is_same<T, int16_t>::value) {
@@ -91,11 +94,13 @@ class RecTensor {
       throw std::runtime_error(
           "Type mismatch: Tensor is FLOAT32, accessed as different type.");
     }
+#ifdef USE_TORCH
     if (dtype_ == DataType::FLOAT16 &&
         !std::is_same<T, c10::float16_t>::value) {
       throw std::runtime_error(
           "Type mismatch: Tensor is FLOAT16, accessed as different type.");
     }
+#endif
     if (dtype_ == DataType::INT32 && !std::is_same<T, int32_t>::value) {
       throw std::runtime_error(
           "Type mismatch: Tensor is INT32, accessed as different type.");
@@ -128,7 +133,7 @@ class RecTensor {
   }
   void set_dtype(DataType new_dtype) { dtype_ = new_dtype; }
 
- private:
+private:
   void recalculate_num_elements() {
     if (shape_.empty()) {
       num_elements_ = 0;
@@ -137,8 +142,8 @@ class RecTensor {
         if (dim_size < 0)
           throw std::runtime_error("Tensor dimension size cannot be negative.");
       }
-      num_elements_ = std::accumulate(shape_.begin(), shape_.end(), 1LL,
-                                      std::multiplies<int64_t>());
+      num_elements_ = std::accumulate(
+          shape_.begin(), shape_.end(), 1LL, std::multiplies<int64_t>());
     }
   }
 
@@ -148,4 +153,4 @@ class RecTensor {
   size_t num_elements_;
 };
 
-}  // namespace base
+} // namespace base

@@ -3,9 +3,9 @@ import torch
 
 def load_recstore_library():
     torch.ops.load_library(
-        "/home/xieminhui/RecStore/build/lib/librecstore_pytorch.so")
+        "../../../build/lib/librecstore_pytorch.so")
     torch.classes.load_library(
-        "/home/xieminhui/RecStore/build/lib/librecstore_pytorch.so")
+        "../../../build/lib/librecstore_pytorch.so")
 
 
 load_recstore_library()

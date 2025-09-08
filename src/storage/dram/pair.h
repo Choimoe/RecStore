@@ -1,5 +1,4 @@
-#ifndef UTIL_PAIR_H_
-#define UTIL_PAIR_H_
+#pragma once
 
 #include <cstdint>
 #include <cstdlib>
@@ -38,5 +37,3 @@ struct Pair {
     return ret;
   }
 };
-
-#endif // UTIL_PAIR_H_

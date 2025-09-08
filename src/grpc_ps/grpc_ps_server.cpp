@@ -7,6 +7,7 @@
 #include <future>
 #include <string>
 #include <vector>
+#include <thread>
 
 #include "base/array.h"
 #include "base/base.h"
@@ -126,17 +127,70 @@ class GRPCParameterServer : public BaseParameterServer {
   GRPCParameterServer() = default;
 
   void Run() {
-    std::string server_address("0.0.0.0:15000");
-    auto cache_ps = std::make_unique<CachePS>(config_["cache_ps"]);
-    ParameterServiceImpl service(cache_ps.get());
-    grpc::EnableDefaultHealthCheckService(true);
-    grpc::reflection::InitProtoReflectionServerBuilderPlugin();
-    ServerBuilder builder;
-    builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
-    builder.RegisterService(&service);
-    std::unique_ptr<Server> server(builder.BuildAndStart());
-    std::cout << "Server listening on " << server_address << std::endl;
-    server->Wait();
+    // 检查是否配置了多分片
+    int num_shards = 1;  // 默认单分片
+    if (config_["cache_ps"].contains("num_shards")) {
+        num_shards = config_["cache_ps"]["num_shards"];
+    }
+    
+    if (num_shards > 1) {
+        // 多服务器启动逻辑
+        std::cout << "启动分布式参数服务器，分片数量: " << num_shards << std::endl;
+        
+        if (!config_["cache_ps"].contains("servers")) {
+            LOG(FATAL) << "配置了 num_shards > 1 但缺少 servers 配置";
+            return;
+        }
+        
+        auto servers = config_["cache_ps"]["servers"];
+        if (servers.size() != num_shards) {
+            LOG(FATAL) << "servers 配置数量 (" << servers.size() 
+                      << ") 与 num_shards (" << num_shards << ") 不匹配";
+            return;
+        }
+        
+        std::vector<std::thread> server_threads;
+        
+        for (auto& server_config : servers) {
+            server_threads.emplace_back([this, server_config]() {
+                std::string host = server_config["host"];
+                int port = server_config["port"];
+                int shard = server_config["shard"];
+                
+                std::string server_address = host + ":" + std::to_string(port);
+                auto cache_ps = std::make_unique<CachePS>(config_["cache_ps"]);
+                ParameterServiceImpl service(cache_ps.get());
+                
+                grpc::EnableDefaultHealthCheckService(true);
+                grpc::reflection::InitProtoReflectionServerBuilderPlugin();
+                ServerBuilder builder;
+                builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+                builder.RegisterService(&service);
+                std::unique_ptr<Server> server(builder.BuildAndStart());
+                std::cout << "Server shard " << shard << " listening on " << server_address << std::endl;
+                server->Wait();
+            });
+        }
+        
+        // 等待所有服务器线程
+        for (auto& t : server_threads) {
+            t.join();
+        }
+    } else {
+        // 单服务器启动逻辑
+        std::cout << "启动单参数服务器" << std::endl;
+        std::string server_address("0.0.0.0:15000");
+        auto cache_ps = std::make_unique<CachePS>(config_["cache_ps"]);
+        ParameterServiceImpl service(cache_ps.get());
+        grpc::EnableDefaultHealthCheckService(true);
+        grpc::reflection::InitProtoReflectionServerBuilderPlugin();
+        ServerBuilder builder;
+        builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+        builder.RegisterService(&service);
+        std::unique_ptr<Server> server(builder.BuildAndStart());
+        std::cout << "Server listening on " << server_address << std::endl;
+        server->Wait();
+    }
   }
 };
 

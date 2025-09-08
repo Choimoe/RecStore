@@ -34,3 +34,6 @@
 [submodule "third_party/HugeCTR"]
 	path = third_party/HugeCTR
 	url = https://github.com/NVIDIA/HugeCTR.git
+[submodule "third_party/cpptrace"]
+	path = third_party/cpptrace
+	url = https://github.com/jeremy-rifkin/cpptrace.git

@@ -9,7 +9,7 @@ RECSTORE_PATH="$(cd ".." && pwd)"
 DATASET_PATH="/home/xieminhui/FrugalDataset"
 DGL_DATASET_PATH="/home/xieminhui/dgl-data"
 
-sudo docker run --cap-add=SYS_ADMIN --privileged --security-opt seccomp=unconfined --runtime=nvidia \
+sudo docker run --cap-add=SYS_ADMIN --privileged --security-opt seccomp=unconfined  \
 --name recstore --net=host \
 -v ${RECSTORE_PATH}:${RECSTORE_PATH} \
 -v /dev/shm:/dev/shm \

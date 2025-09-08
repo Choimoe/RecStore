@@ -1,14 +1,7 @@
-set(CITYHASH_ROOT_DIR ${PROJECT_SOURCE_DIR}/third_party/cityhash-install)
+set(CITYHASH_ROOT_DIR ${PROJECT_SOURCE_DIR}/third_party/cityhash)
 include(${PROJECT_SOURCE_DIR}/cmake/FindCityhash.cmake)
 
-
-include(FetchContent)
-FetchContent_Declare(
-  cpptrace
-  GIT_REPOSITORY https://github.com/jeremy-rifkin/cpptrace.git
-  GIT_TAG        v0.3.1 # <HASH or TAG>
-)
-FetchContent_MakeAvailable(cpptrace)
+find_package(cpptrace REQUIRED)
 
 add_library(base base.cc pprint.cc shm_helper.cc bind_core.cc counter.cc)
 target_link_libraries(base PUBLIC Folly::folly ${CITYHASH_LIBRARIES} gflags glog)
