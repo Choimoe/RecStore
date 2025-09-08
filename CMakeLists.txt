@@ -142,6 +142,10 @@ add_subdirectory(third_party/json)
 # add_subdirectory(third_party/pybind11)
 # add_subdirectory(third_party/mimalloc)
 
+set(PYBIND11_CMAKE_DIR "/usr/local/lib/python3.10/dist-packages/pybind11/share/cmake/pybind11")
+list(APPEND CMAKE_PREFIX_PATH ${PYBIND11_CMAKE_DIR})
+find_package(pybind11 REQUIRED)
+
 set(CTEST_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/Testing")
 enable_testing()
 
