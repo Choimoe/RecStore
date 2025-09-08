@@ -148,11 +148,28 @@ step_cpptrace() {
 }
 
 step_libtorch_abi() {
-    mkdir -p ${PROJECT_PATH}/third_party/libtorch
-    cd ${PROJECT_PATH}/third_party/libtorch
+    local libtorch_dir="${PROJECT_PATH}/third_party/libtorch"
+    local zip_file="${libtorch_dir}/libtorch.zip"
+    local extracted_marker="${libtorch_dir}/libtorch"
+
+    mkdir -p "${libtorch_dir}"
+    cd "${libtorch_dir}"
+
+    if [ -f "${zip_file}" ] && [ -d "${extracted_marker}" ]; then
+        return 0
+    fi
+
     wget -q https://download.pytorch.org/libtorch/${CUDA_VERSION}/libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}%2B${CUDA_VERSION}.zip -O libtorch.zip
-    unzip libtorch.zip -d . > /dev/null
-    rm libtorch.zip
+
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+
+    unzip -o libtorch.zip -d . > /dev/null
+
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
 }
 
 step_HugeCTR() {
