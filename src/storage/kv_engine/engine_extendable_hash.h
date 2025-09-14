@@ -5,6 +5,7 @@
 #include <unordered_map>
 
 #include "../dram/extendible_hash.h"
+#include "storage/nvm/pet_kv/shm_common.h"
 #include "base/factory.h"
 #include "base_kv.h"
 #include "memory/persist_malloc.h"

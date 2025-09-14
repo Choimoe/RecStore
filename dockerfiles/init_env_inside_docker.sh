@@ -1,14 +1,4 @@
 #!/bin/bash
-s=" |/-\\"; COUNTER_FILE="/tmp/p_c_$$"; echo 0 > "$COUNTER_FILE" && trap 'rm -f "$COUNTER_FILE"' EXIT
-exec 3>"$(pwd)/init_env.log" 4>&1 1>&3 2>&1
-update_progress_bar(){ local C; read -r C < "$COUNTER_FILE"; C=$((C+1)); echo $C > "$COUNTER_FILE"; printf "\r[%s] Step %d" "${s:C%${#s}:1}" "$C" >&4; }
-PS4='$(update_progress_bar)+ Line ${LINENO}: '
-BASH_XTRACEFD=3
-
-
-
-
-
 cd "$(dirname "$0")"
 set -x
 set -e
@@ -27,13 +17,21 @@ CUDA_VERSION="cu118"
 MARKER_DIR="/tmp/env_setup_markers"
 
 step_base() {
-    sudo apt install -y libmemcached-dev ca-certificates lsb-release wget python3-dev
+    sudo apt update
+    sudo apt install -y libmemcached-dev ca-certificates lsb-release wget python3-dev liburing-dev
     pip3 install pymemcache
 }
 
 step_recover_bash() {
-    ln -sf ${PROJECT_PATH}/dockerfiles/docker_config/.bashrc /home/${USER}/.bashrc
-    source /home/${USER}/.bashrc
+    local target_dir
+    if [ "$USER" = "root" ]; then
+        target_dir="/root"
+    else
+        target_dir="/home/$USER"
+    fi
+
+    ln -sf "${PROJECT_PATH}/dockerfiles/docker_config/.bashrc" "${target_dir}/.bashrc"
+    source "${target_dir}/.bashrc"
 }
 
 step_glog() {
