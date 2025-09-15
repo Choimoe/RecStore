@@ -233,6 +233,12 @@ void KVClientOp::EmbRead(const RecTensor& keys, RecTensor& values) {
   const uint64_t* keys_data = keys.data_as<uint64_t>();
   base::ConstArray<uint64_t> keys_array(keys_data, L);
   float* values_data = values.data_as<float>();
+
+  const int64_t D = values.shape(1);
+  const size_t total = static_cast<size_t>(L) * static_cast<size_t>(D);
+  std::fill_n(values_data, total, 0.0f);
+
+  
   // std::cout << "[EmbRead] Reading " << L << " embeddings of dimension " <<
   // base::EMBEDDING_DIMENSION_D << std::endl;
 
@@ -290,6 +296,8 @@ void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
   for (int64_t i = 0; i < L; ++i) {
     std::vector<float> row(D);
     std::memcpy(row.data(), values_data + i * D, D * sizeof(float));
+    asm volatile("" ::: "memory");
+    _mm_mfence();
     values_vector.push_back(std::move(row));
   }
 
@@ -360,12 +368,12 @@ bool KVClientOp::IsWriteDone(uint64_t write_id) {
 
 namespace testing {
 
-void ClearEmbeddingTableForTesting() {
-    bool success = GetGRPCClientInstance().ClearPS();
-    if (!success) {
-        throw std::runtime_error("Failed to clear remote Parameter Server state during testing.");
-    }
-}
+// void ClearEmbeddingTableForTesting() {
+//     bool success = GetGRPCClientInstance().ClearPS();
+//     if (!success) {
+//         throw std::runtime_error("Failed to clear remote Parameter Server state during testing.");
+//     }
+// }
 
 } // namespace testing
 

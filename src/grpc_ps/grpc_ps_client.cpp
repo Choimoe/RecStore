@@ -134,7 +134,7 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t> &keys,
     }
 
     for (int index = 0; index < parameters->item_size(); ++index) {
-      auto item = parameters->item(index);
+            auto item = parameters->item(index);
       if (item->dim != 0) {
         if (old_dimension == -1) old_dimension = item->dim;
         CHECK_EQ(item->dim, old_dimension);
@@ -423,7 +423,7 @@ int GRPCParameterClient::PutParameter(const base::ConstArray<uint64_t>& keys,
                                       const std::vector<std::vector<float>>& values) {
   std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
   bool success = PutParameter(key_vec, values);
-  return success ? 0 : -1;
+  return success ? 1 : 0;
 }
 
 //这个的作用是什么，需要如何修改

@@ -205,6 +205,7 @@ int main(int argc, char **argv) {
   nlohmann::json ex;
   config_file >> ex;
   recstore::GRPCParameterServer ps;
+  std::cout << "Parameter server config: " << ex.dump(2) << std::endl;
   ps.Init(ex);
   ps.Run();
   return 0;

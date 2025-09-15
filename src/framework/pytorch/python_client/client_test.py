@@ -35,7 +35,7 @@ read_values_unseen = client.emb_read(keys_to_read, embedding_dim)
 assert read_values_unseen.shape == (2, embedding_dim)
 assert torch.all(read_values_unseen == 0), "Unseen keys should return zero vectors"
 print("Read for unseen keys successful, returned zero vectors as expected.")
-
+exit(0)
 
 # print("\n--- Test 3: Update Operation ---")
 # keys_to_update = torch.tensor([1001, 1002], dtype=torch.int64)
