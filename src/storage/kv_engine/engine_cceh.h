@@ -10,25 +10,34 @@
 #include "base/factory.h"
 #include "base_kv.h"
 #include "memory/persist_malloc.h"
-
+#include "memory/memory_factory.h"
+#include "memory/shm_file.h"
 class KVEngineCCEH : public BaseKV {
   static constexpr int kKVEngineValidFileSize = 123;
 
 public:
   KVEngineCCEH(const BaseKVConfig &config)
-      : BaseKV(config),
-        shm_malloc_(config.json_config_.at("path").get<std::string>() +
-                        "/value",
-                    1.2 * config.json_config_.at("capacity").get<size_t>() *
-                        config.json_config_.at("value_size").get<size_t>()) {
+      : BaseKV(config) {
+    LOG(INFO) << "init engint";
+    const std::string value_path = config.json_config_.at("path").get<std::string>() + "/value";
+    const auto cap_bytes = static_cast<int64>(std::llround(
+      1.2 * config.json_config_.at("capacity").get<size_t>() *
+            config.json_config_.at("value_size").get<size_t>()));
+    
+    using MF = base::Factory<base::MallocApi,
+                           const std::string&, int64, const std::string&>;
+    shm_malloc_.reset(MF::NewInstance(
+        config.json_config_.value("value_memory_management","PersistLoopShmMalloc"),
+        value_path, cap_bytes,
+        config.json_config_.value("value_type","DRAM")));
+
+    if (!shm_malloc_) throw std::runtime_error("init shm malloc failed");
+
     value_size_ = config.json_config_.at("value_size").get<int>();
 
-    // 初始化extendible
-    // hash表，数据库文件放在配置的工作路径中，避免测试之间相互影响
     std::string path = config.json_config_.at("path").get<std::string>();
     std::string db_path = path + "/cceh_test.db";
     hash_table_ = new CCEH(db_path);
-
     // 初始化值存储区域
     uint64_t value_shm_size =
         config.json_config_.at("capacity").get<uint64_t>() *
@@ -38,9 +47,9 @@ public:
       base::file_util::Delete(path + "/valid", false);
       CHECK(
           valid_shm_file_.Initialize(path + "/valid", kKVEngineValidFileSize));
-      shm_malloc_.Initialize();
+      shm_malloc_->Initialize();
     }
-    LOG(INFO) << "After init: [shm_malloc] " << shm_malloc_.GetInfo();
+    LOG(INFO) << "After init: [shm_malloc] " << shm_malloc_->GetInfo();
   }
 
   void Get(const uint64_t key, std::string &value, unsigned tid) override {
@@ -52,13 +61,13 @@ public:
       value = std::string();
     } else {
       shmkv_data.data_value = read_value;
-      char *data = shm_malloc_.GetMallocData(shmkv_data.shm_malloc_offset());
+      char *data = shm_malloc_->GetMallocData(shmkv_data.shm_malloc_offset());
       if (data == nullptr) {
         value = std::string();
         return;
       }
 #ifdef XMH_VARIABLE_SIZE_KV
-      int size = shm_malloc_.GetMallocSize(shmkv_data.shm_malloc_offset());
+      int size = shm_malloc_->GetMallocSize(shmkv_data.shm_malloc_offset());
 #else
       int size = value_size_;
 #endif
@@ -69,9 +78,11 @@ public:
   void Put(const uint64_t key, const std::string_view &value,
            unsigned tid) override {
     base::PetKVData shmkv_data;
-    char *sync_data = shm_malloc_.New(value.size());
-    shmkv_data.SetShmMallocOffset(shm_malloc_.GetMallocOffset(sync_data));
+    char *sync_data = shm_malloc_->New(value.size());
+    shmkv_data.SetShmMallocOffset(shm_malloc_->GetMallocOffset(sync_data));
     std::memcpy(sync_data, value.data(), value.size());
+    _mm_mfence();
+    asm volatile("" ::: "memory");
     Key_t hash_key = key;
     hash_table_->Insert(hash_key, shmkv_data.data_value);
   }
@@ -120,7 +131,7 @@ public:
         values->emplace_back();
       } else {
         shmkv_data.data_value = v;
-        char *data = shm_malloc_.GetMallocData(shmkv_data.shm_malloc_offset());
+        char *data = shm_malloc_->GetMallocData(shmkv_data.shm_malloc_offset());
         if (data == nullptr) {
           values->emplace_back();
           continue;
@@ -148,9 +159,9 @@ private:
   size_t dict_pool_size_;
   int value_size_;
 #ifdef XMH_SIMPLE_MALLOC
-  base::PersistSimpleMalloc shm_malloc_;
+  std::unique_ptr<base::MallocApi> shm_malloc_;
 #else
-  base::PersistLoopShmMalloc shm_malloc_;
+  std::unique_ptr<base::MallocApi> shm_malloc_;
 #endif
   base::ShmFile valid_shm_file_;
 };

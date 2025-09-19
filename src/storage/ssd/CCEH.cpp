@@ -332,11 +332,11 @@ std::shared_mutex &CCEH::get_segment_lock(PageID_t page_id) const {
 
 bool CCEH::Insert(Key_t &key, Value_t value) {
   auto f_hash = hash_funcs[0](&key, sizeof(Key_t), f_seed);
-  auto f_idx = (f_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
+  auto f_idx  = (f_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
 
   ExponentialBackoff backoff;
   while (true) {
-    // Directory Read
+    // ---------- Directory Read ----------
     PageID_t target_page_id;
     size_t dir_depth;
     {
@@ -344,60 +344,61 @@ bool CCEH::Insert(Key_t &key, Value_t value) {
       auto dir_header_ptr = fm->GetPage<DirectoryHeader>(dir_header_page_id);
       dir_depth = dir_header_ptr->depth;
       auto x = (f_hash >> (8 * sizeof(f_hash) - dir_depth));
-
       if (x >= dir_header_ptr->capacity) {
         fm->Unpin(dir_header_page_id, dir_header_ptr, false);
         backoff.wait();
-        continue; // Retry
+        continue; // retry
       }
-
       size_t dir_page_idx = x / DirectoryPage::kNumPointers;
       size_t offset_in_dir_page = x % DirectoryPage::kNumPointers;
       PageID_t target_dir_page_id = dir_header_ptr->dir_pages[dir_page_idx];
       auto dir_page_ptr = fm->GetPage<DirectoryPage>(target_dir_page_id);
       target_page_id = dir_page_ptr->segments[offset_in_dir_page];
-
       fm->Unpin(target_dir_page_id, dir_page_ptr, false);
       fm->Unpin(dir_header_page_id, dir_header_ptr, false);
     }
 
-    // Segment Lock and Insert
-    std::unique_lock<std::shared_mutex> seg_lock(
-        get_segment_lock(target_page_id));
+    // ---------- Segment Lock & validate ----------
+    std::unique_lock<std::shared_mutex> seg_lock(get_segment_lock(target_page_id));
     auto target_ptr = fm->GetPage<Segment>(target_page_id);
-    // Validation after acquiring segment lock
     {
       std::shared_lock<std::shared_mutex> dir_rd_lock(dir_mutex);
       auto dir_header_ptr = fm->GetPage<DirectoryHeader>(dir_header_page_id);
       auto x = (f_hash >> (8 * sizeof(f_hash) - dir_header_ptr->depth));
       size_t dir_page_idx = x / DirectoryPage::kNumPointers;
       size_t offset_in_dir_page = x % DirectoryPage::kNumPointers;
-      auto dir_page_ptr =
-          fm->GetPage<DirectoryPage>(dir_header_ptr->dir_pages[dir_page_idx]);
-      PageID_t current_target_page_id =
-          dir_page_ptr->segments[offset_in_dir_page];
+      auto dir_page_ptr = fm->GetPage<DirectoryPage>(dir_header_ptr->dir_pages[dir_page_idx]);
+      PageID_t current_target_page_id = dir_page_ptr->segments[offset_in_dir_page];
       fm->Unpin(dir_header_ptr->dir_pages[dir_page_idx], dir_page_ptr, false);
       fm->Unpin(dir_header_page_id, dir_header_ptr, false);
-
       if (current_target_page_id != target_page_id) {
         fm->Unpin(target_page_id, target_ptr, false);
         seg_lock.unlock();
         backoff.wait();
-        continue; // Stale segment, retry
+        continue; // stale segment, retry
       }
     }
 
-    // Insert into segment if space is available
+    // ---------- Try update/insert in primary path ----------
     auto pattern = (f_hash >> (8 * sizeof(f_hash) - target_ptr->local_depth));
     for (unsigned i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
-      auto loc = (f_idx + i) % Segment::kNumSlot;
-      auto _key = target_ptr->bucket[loc].key;
-      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t),
-                           f_seed) >>
+      auto loc  = (f_idx + i) % Segment::kNumSlot;
+      auto curk = target_ptr->bucket[loc].key;
+
+      // 覆盖：命中同 key 直接更新 value
+      if (curk == key) {
+        target_ptr->bucket[loc].value = value;
+        mfence();
+        fm->Unpin(target_page_id, target_ptr, /*dirty=*/true);
+        return true;
+      }
+
+      // 空位插入
+      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t), f_seed) >>
              (8 * sizeof(f_hash) - target_ptr->local_depth)) != pattern) ||
-           (target_ptr->bucket[loc].key == INVALID)) &&
-          (target_ptr->bucket[loc].key != SENTINEL)) {
-        if (CAS(&target_ptr->bucket[loc].key, &_key, SENTINEL)) {
+           (curk == INVALID)) &&
+          (curk != SENTINEL)) {
+        if (CAS(&target_ptr->bucket[loc].key, &curk, SENTINEL)) {
           target_ptr->bucket[loc].value = value;
           mfence();
           target_ptr->bucket[loc].key = key;
@@ -407,17 +408,27 @@ bool CCEH::Insert(Key_t &key, Value_t value) {
       }
     }
 
+    // ---------- Try update/insert in secondary path ----------
     auto s_hash = hash_funcs[2](&key, sizeof(Key_t), s_seed);
-    auto s_idx = (s_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
+    auto s_idx  = (s_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
     for (unsigned i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
-      auto loc = (s_idx + i) % Segment::kNumSlot;
-      auto _key = target_ptr->bucket[loc].key;
-      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t),
-                           f_seed) >>
-             (8 * sizeof(s_hash) - target_ptr->local_depth)) != pattern) ||
-           (target_ptr->bucket[loc].key == INVALID)) &&
-          (target_ptr->bucket[loc].key != SENTINEL)) {
-        if (CAS(&target_ptr->bucket[loc].key, &_key, SENTINEL)) {
+      auto loc  = (s_idx + i) % Segment::kNumSlot;
+      auto curk = target_ptr->bucket[loc].key;
+
+      // 覆盖
+      if (curk == key) {
+        target_ptr->bucket[loc].value = value;
+        mfence();
+        fm->Unpin(target_page_id, target_ptr, /*dirty=*/true);
+        return true;
+      }
+
+      // 空位插入（移位位宽用 f_hash，与上面保持一致）
+      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t), f_seed) >>
+             (8 * sizeof(f_hash) - target_ptr->local_depth)) != pattern) ||
+           (curk == INVALID)) &&
+          (curk != SENTINEL)) {
+        if (CAS(&target_ptr->bucket[loc].key, &curk, SENTINEL)) {
           target_ptr->bucket[loc].value = value;
           mfence();
           target_ptr->bucket[loc].key = key;
@@ -427,24 +438,21 @@ bool CCEH::Insert(Key_t &key, Value_t value) {
       }
     }
 
-    // Segment is full, need to split
+    // ---------- Split ----------
     auto target_local_depth = target_ptr->local_depth;
 
-    // Try to acquire directory write lock to perform split
-    std::unique_lock<std::shared_mutex> dir_wr_lock(dir_mutex,
-                                                    std::try_to_lock);
+    std::unique_lock<std::shared_mutex> dir_wr_lock(dir_mutex, std::try_to_lock);
     if (!dir_wr_lock.owns_lock()) {
       fm->Unpin(target_page_id, target_ptr, false);
       seg_lock.unlock();
       backoff.wait();
-      continue; // Failed to get dir write lock, retry
+      continue; // retry
     }
 
-    // Re-check segment state after acquiring all locks
     if (target_ptr->local_depth != target_local_depth) {
       fm->Unpin(target_page_id, target_ptr, false);
       backoff.wait();
-      continue; // Another thread already split this segment
+      continue; // split by others, retry
     }
 
     PageID_t *s = target_ptr->Split(fm);
@@ -567,79 +575,76 @@ bool CCEH::Insert(Key_t &key, Value_t value) {
   }
 }
 
-void CCEH::Insert(coroutine<Value_t>::push_type &sink, int index, Key_t &key,
-                  Value_t value) {
+void CCEH::Insert(coroutine<Value_t>::push_type &sink, int index,
+                  Key_t &key, Value_t value) {
   auto f_hash = hash_funcs[0](&key, sizeof(Key_t), f_seed);
-  auto f_idx = (f_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
+  auto f_idx  = (f_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
 
   ExponentialBackoff backoff;
   while (true) {
-    // Directory Read
+    // ---------- Directory Read (coroutine) ----------
     PageID_t target_page_id;
     size_t dir_depth;
     {
       std::shared_lock<std::shared_mutex> dir_rd_lock(dir_mutex);
-      auto dir_header_ptr =
-          fm->GetPage<DirectoryHeader>(sink, index, dir_header_page_id);
+      auto dir_header_ptr = fm->GetPage<DirectoryHeader>(sink, index, dir_header_page_id);
       dir_depth = dir_header_ptr->depth;
       auto x = (f_hash >> (8 * sizeof(f_hash) - dir_depth));
-
       if (x >= dir_header_ptr->capacity) {
         fm->Unpin(sink, index, dir_header_page_id, dir_header_ptr, false);
         backoff.wait();
-        continue; // Retry
+        continue;
       }
-
       size_t dir_page_idx = x / DirectoryPage::kNumPointers;
       size_t offset_in_dir_page = x % DirectoryPage::kNumPointers;
       PageID_t target_dir_page_id = dir_header_ptr->dir_pages[dir_page_idx];
-      auto dir_page_ptr =
-          fm->GetPage<DirectoryPage>(sink, index, target_dir_page_id);
+      auto dir_page_ptr = fm->GetPage<DirectoryPage>(sink, index, target_dir_page_id);
       target_page_id = dir_page_ptr->segments[offset_in_dir_page];
-
       fm->Unpin(sink, index, target_dir_page_id, dir_page_ptr, false);
       fm->Unpin(sink, index, dir_header_page_id, dir_header_ptr, false);
     }
 
-    // Segment Lock and Insert
-    std::unique_lock<std::shared_mutex> seg_lock(
-        get_segment_lock(target_page_id));
+    // ---------- Segment Lock & validate ----------
+    std::unique_lock<std::shared_mutex> seg_lock(get_segment_lock(target_page_id));
     auto target_ptr = fm->GetPage<Segment>(sink, index, target_page_id);
-    // Validation after acquiring segment lock
     {
       std::shared_lock<std::shared_mutex> dir_rd_lock(dir_mutex);
-      auto dir_header_ptr =
-          fm->GetPage<DirectoryHeader>(sink, index, dir_header_page_id);
+      auto dir_header_ptr = fm->GetPage<DirectoryHeader>(sink, index, dir_header_page_id);
       auto x = (f_hash >> (8 * sizeof(f_hash) - dir_header_ptr->depth));
       size_t dir_page_idx = x / DirectoryPage::kNumPointers;
       size_t offset_in_dir_page = x % DirectoryPage::kNumPointers;
-      auto dir_page_ptr = fm->GetPage<DirectoryPage>(
-          sink, index, dir_header_ptr->dir_pages[dir_page_idx]);
-      PageID_t current_target_page_id =
-          dir_page_ptr->segments[offset_in_dir_page];
-      fm->Unpin(sink, index, dir_header_ptr->dir_pages[dir_page_idx],
-                dir_page_ptr, false);
+      auto dir_page_ptr = fm->GetPage<DirectoryPage>(sink, index, dir_header_ptr->dir_pages[dir_page_idx]);
+      PageID_t current_target_page_id = dir_page_ptr->segments[offset_in_dir_page];
+      fm->Unpin(sink, index, dir_header_ptr->dir_pages[dir_page_idx], dir_page_ptr, false);
       fm->Unpin(sink, index, dir_header_page_id, dir_header_ptr, false);
-
       if (current_target_page_id != target_page_id) {
         fm->Unpin(sink, index, target_page_id, target_ptr, false);
         seg_lock.unlock();
         backoff.wait();
-        continue; // Stale segment, retry
+        continue;
       }
     }
 
-    // Insert into segment if space is available
+    // ---------- Try update/insert in primary path ----------
     auto pattern = (f_hash >> (8 * sizeof(f_hash) - target_ptr->local_depth));
     for (unsigned i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
-      auto loc = (f_idx + i) % Segment::kNumSlot;
-      auto _key = target_ptr->bucket[loc].key;
-      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t),
-                           f_seed) >>
+      auto loc  = (f_idx + i) % Segment::kNumSlot;
+      auto curk = target_ptr->bucket[loc].key;
+
+      // 覆盖
+      if (curk == key) {
+        target_ptr->bucket[loc].value = value;
+        mfence();
+        fm->Unpin(sink, index, target_page_id, target_ptr, true);
+        return;
+      }
+
+      // 空位插入
+      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t), f_seed) >>
              (8 * sizeof(f_hash) - target_ptr->local_depth)) != pattern) ||
-           (target_ptr->bucket[loc].key == INVALID)) &&
-          (target_ptr->bucket[loc].key != SENTINEL)) {
-        if (CAS(&target_ptr->bucket[loc].key, &_key, SENTINEL)) {
+           (curk == INVALID)) &&
+          (curk != SENTINEL)) {
+        if (CAS(&target_ptr->bucket[loc].key, &curk, SENTINEL)) {
           target_ptr->bucket[loc].value = value;
           mfence();
           target_ptr->bucket[loc].key = key;
@@ -649,17 +654,27 @@ void CCEH::Insert(coroutine<Value_t>::push_type &sink, int index, Key_t &key,
       }
     }
 
+    // ---------- Try update/insert in secondary path ----------
     auto s_hash = hash_funcs[2](&key, sizeof(Key_t), s_seed);
-    auto s_idx = (s_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
+    auto s_idx  = (s_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
     for (unsigned i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
-      auto loc = (s_idx + i) % Segment::kNumSlot;
-      auto _key = target_ptr->bucket[loc].key;
-      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t),
-                           f_seed) >>
-             (8 * sizeof(s_hash) - target_ptr->local_depth)) != pattern) ||
-           (target_ptr->bucket[loc].key == INVALID)) &&
-          (target_ptr->bucket[loc].key != SENTINEL)) {
-        if (CAS(&target_ptr->bucket[loc].key, &_key, SENTINEL)) {
+      auto loc  = (s_idx + i) % Segment::kNumSlot;
+      auto curk = target_ptr->bucket[loc].key;
+
+      // 覆盖
+      if (curk == key) {
+        target_ptr->bucket[loc].value = value;
+        mfence();
+        fm->Unpin(sink, index, target_page_id, target_ptr, true);
+        return;
+      }
+
+      // 空位插入（位移位宽与上面一致）
+      if ((((hash_funcs[0](&target_ptr->bucket[loc].key, sizeof(Key_t), f_seed) >>
+             (8 * sizeof(f_hash) - target_ptr->local_depth)) != pattern) ||
+           (curk == INVALID)) &&
+          (curk != SENTINEL)) {
+        if (CAS(&target_ptr->bucket[loc].key, &curk, SENTINEL)) {
           target_ptr->bucket[loc].value = value;
           mfence();
           target_ptr->bucket[loc].key = key;
@@ -669,24 +684,20 @@ void CCEH::Insert(coroutine<Value_t>::push_type &sink, int index, Key_t &key,
       }
     }
 
-    // Segment is full, need to split
+    // ---------- Split ----------
     auto target_local_depth = target_ptr->local_depth;
 
-    // Try to acquire directory write lock to perform split
-    std::unique_lock<std::shared_mutex> dir_wr_lock(dir_mutex,
-                                                    std::try_to_lock);
+    std::unique_lock<std::shared_mutex> dir_wr_lock(dir_mutex, std::try_to_lock);
     if (!dir_wr_lock.owns_lock()) {
       fm->Unpin(sink, index, target_page_id, target_ptr, false);
       seg_lock.unlock();
       backoff.wait();
-      continue; // Failed to get dir write lock, retry
+      continue;
     }
-
-    // Re-check segment state after acquiring all locks
     if (target_ptr->local_depth != target_local_depth) {
       fm->Unpin(sink, index, target_page_id, target_ptr, false);
       backoff.wait();
-      continue; // Another thread already split this segment
+      continue;
     }
 
     PageID_t *s = target_ptr->Split(sink, index, fm);
@@ -818,7 +829,60 @@ void CCEH::Insert(coroutine<Value_t>::push_type &sink, int index, Key_t &key,
   }
 }
 
-bool CCEH::Delete(Key_t &key) { return false; }
+bool CCEH::Delete(Key_t &key) {
+  auto f_hash = hash_funcs[0](&key, sizeof(Key_t), f_seed);
+  auto f_idx  = (f_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
+
+  ExponentialBackoff backoff;
+  while (true) {
+    // 定位 segment（与 Get 的前半相同）
+    std::shared_lock<std::shared_mutex> dir_rd_lock(dir_mutex);
+    auto dir_header_ptr = fm->GetPage<DirectoryHeader>(dir_header_page_id);
+    auto x = (f_hash >> (8 * sizeof(f_hash) - dir_header_ptr->depth));
+    if (x >= dir_header_ptr->capacity) {
+      fm->Unpin(dir_header_page_id, dir_header_ptr, false);
+      backoff.wait();
+      continue;
+    }
+    size_t dir_page_idx = x / DirectoryPage::kNumPointers;
+    size_t offset = x % DirectoryPage::kNumPointers;
+    PageID_t dir_page_id = dir_header_ptr->dir_pages[dir_page_idx];
+    auto dir_page_ptr = fm->GetPage<DirectoryPage>(dir_page_id);
+    auto target_page_id = dir_page_ptr->segments[offset];
+    fm->Unpin(dir_page_id, dir_page_ptr, false);
+    fm->Unpin(dir_header_page_id, dir_header_ptr, false);
+    dir_rd_lock.unlock();
+
+    std::unique_lock<std::shared_mutex> seg_lock(get_segment_lock(target_page_id));
+    auto target_ptr = fm->GetPage<Segment>(target_page_id);
+
+    // 主路径
+    for (int i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
+      auto loc = (f_idx + i) % Segment::kNumSlot;
+      if (target_ptr->bucket[loc].key == key) {
+        target_ptr->bucket[loc].key = INVALID;
+        mfence();
+        fm->Unpin(target_page_id, target_ptr, /*dirty=*/true);
+        return true;
+      }
+    }
+    // 副路径
+    auto s_hash = hash_funcs[2](&key, sizeof(Key_t), s_seed);
+    auto s_idx  = (s_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
+    for (int i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
+      auto loc = (s_idx + i) % Segment::kNumSlot;
+      if (target_ptr->bucket[loc].key == key) {
+        target_ptr->bucket[loc].key = INVALID;
+        mfence();
+        fm->Unpin(target_page_id, target_ptr, true);
+        return true;
+      }
+    }
+
+    fm->Unpin(target_page_id, target_ptr, false);
+    return false;
+  }
+}
 
 Value_t CCEH::Get(const Key_t &key) {
   auto f_hash = hash_funcs[0](&key, sizeof(Key_t), f_seed);

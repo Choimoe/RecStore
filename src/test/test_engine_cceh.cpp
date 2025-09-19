@@ -22,7 +22,7 @@ protected:
     std::filesystem::create_directories(test_dir_);
 
     // 配置使用DRAM而不是持久内存
-    base::PMMmapRegisterCenter::GetConfig().use_dram = true;
+    base::PMMmapRegisterCenter::GetConfig().use_dram = false;
     base::PMMmapRegisterCenter::GetConfig().numa_id = 0;
 
     // 创建配置
@@ -32,6 +32,7 @@ protected:
 
     // 创建KV引擎实例
     kv_engine_ = std::make_unique<KVEngineCCEH>(config_);
+    LOG(INFO) << "done!";
   }
 
   void TearDown() override {

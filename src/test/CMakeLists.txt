@@ -41,6 +41,19 @@ target_link_libraries(test_extendible_hash PUBLIC
     gtest 
     gtest_main 
     pthread
+    base_memory
+)
+
+# SSDExtendibleHash 单元测试
+add_executable(test_ssd_extendable_hash test_ssd_extendable_hash.cpp)
+target_link_libraries(test_ssd_extendable_hash PUBLIC
+    dram_hash 
+    base 
+    gtest 
+    gtest_main 
+    pthread
+    base_memory
+    cceh
 )
 
 # CCEH 测试
@@ -64,6 +77,7 @@ target_link_libraries(test_engine_extendible_hash PUBLIC
     gtest
     gtest_main
     pthread
+    TBB::tbb
 )
 
 add_executable(test_engine_cceh test_engine_cceh.cpp)
@@ -76,6 +90,19 @@ target_link_libraries(test_engine_cceh PUBLIC
     gtest
     gtest_main
     pthread
+)
+
+add_executable(test_factory test_factory.cpp)
+target_link_libraries(test_factory PUBLIC
+    dram_hash
+    base
+    base_memory
+    ps_common
+    kv_engine
+    gtest
+    gtest_main
+    pthread
+    TBB::tbb
 )
 
 # index 单元测试

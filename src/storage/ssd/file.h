@@ -49,13 +49,15 @@ public:
     return new_page_id;
   }
   PageID_t AllocatePage() {
-    // Simple sequential allocation
-    PageID_t new_page_id = next_page_id++;
-    // Extend file size
-    if (pwrite(fd, &empty_page, PAGE_SIZE, new_page_id * PAGE_SIZE) !=
-        PAGE_SIZE)
-      throw std::runtime_error("Failed to extend file for new page");
-    return new_page_id;
+    PageID_t id = next_page_id++;
+    off_t off = (off_t)id * (off_t)PAGE_SIZE;
+
+    if (fallocate(fd, 0, off, PAGE_SIZE) == -1) {
+      if (ftruncate(fd, off + PAGE_SIZE) == -1) {
+        throw std::runtime_error("Failed to extend file for new page");
+      }
+    }
+    return id;
   }
 
   void ReadPage(coroutine<Value_t>::push_type &sink, int index,

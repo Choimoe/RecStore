@@ -87,13 +87,21 @@ public:
   }
 
   Allocator *get_allocator() {
-    if (shutting_down_.load(std::memory_order_acquire)) return nullptr;
-    { std::lock_guard<std::mutex> g(lock_); if (total_managed_mem() == 0) return nullptr; }
+    if (shutting_down_.load(std::memory_order_acquire)){
+      LOG(INFO) << "has benn shutting down";
+      return nullptr;
+    }
+    { 
+      std::lock_guard<std::mutex> g(lock_); 
+      if (memory_usblae() == 0){
+         //LOG(INFO) << "R2 allocator has no memory!";
+         return nullptr; 
+      }
+    }
 
     unsigned arena_id = 0, cache_id = 0;
     size_t olen = sizeof(unsigned);
 
-    // 1) 准备 hooks pack（包含 owner 指针）
     HooksPack* pack = new HooksPack();
     pack->owner = this;
     pack->hooks.alloc        = &AllocatorMaster::extent_alloc_hook;
@@ -112,17 +120,17 @@ public:
       packs().emplace(pack);
     }
 
-
     extent_hooks_t* hooks_ptr = &pack->hooks;
     int e = jemallctl("arenas.create", &arena_id, &olen, &hooks_ptr, sizeof(extent_hooks_t*));
     if (e != 0) {
+      LOG(INFO) << "arenas.create fail!";
       { std::lock_guard<std::mutex> gp(packs_mu()); packs().erase(pack); }
       delete pack;
       return nullptr;
     }
-
     e = jemallctl("tcache.create", &cache_id, &olen, nullptr, 0);
     if (e != 0) {
+      LOG(INFO) << "tcache.create fail!";
       record_entry(arena_id, /*tcache=*/0, pack);
       return new Allocator(MALLOCX_ARENA(arena_id));
     }
@@ -133,6 +141,10 @@ public:
 
   uint64_t total_managed_mem() const {
     return static_cast<uint64_t>(end_addr_ - start_addr_);
+  }
+
+  uint64 memory_usblae() const {
+    return (uint64_t)end_addr_ - (uint64_t)heap_top_;
   }
 
   bool within_range(ptr_t p) const {

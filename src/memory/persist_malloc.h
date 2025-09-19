@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
+#include "base/factory.h"
 #include "base/async_time.h"
 #include "base/bitmap.h"
 #include "base/counter.h"
@@ -509,7 +509,7 @@ class PersistLoopShmMalloc : public MallocApi {
   static const int max_fast_list_type = 32;
   static const int max_fast_list_num = 1 << 20;
   // filename: 文件名, 内存大小
-  PersistLoopShmMalloc(const std::string &filename, int64 memory_size);
+  PersistLoopShmMalloc(const std::string &filename, int64 memory_size , std::string medium="DRAM");
   // 如果分配内存不是固定的几种大小，且我们需要利用循环首次适应的 LRU 特性,
   // 关闭这个功能
   void DisableFastMalloc() { enable_fast_malloc_ = false; }
@@ -600,5 +600,8 @@ class PersistLoopShmMalloc : public MallocApi {
   DISALLOW_COPY_AND_ASSIGN(PersistLoopShmMalloc);
   r2::AllocatorMaster R2AllocMaster;
 };
-
+FACTORY_REGISTER(MallocApi,
+                 PersistLoopShmMalloc,     // 注册名（通常同类名）
+                 PersistLoopShmMalloc,     // 具体类型
+                 const std::string&, int64, const std::string& );
 }  // namespace base

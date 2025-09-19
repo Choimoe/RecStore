@@ -3,6 +3,7 @@ add_library(cceh)
 target_sources(cceh 
   PRIVATE 
     CCEH.cpp
+    ssd_extendable_hash.cpp
 )
 
 target_include_directories(cceh

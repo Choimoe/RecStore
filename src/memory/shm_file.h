@@ -226,7 +226,7 @@ class ShmFile {
   char *Data() const { return data_; }
   int64 Size() const { return size_; }
   const std::string &filename() const { return filename_; }
-
+  std::string type_;
  private:
   void Clear();
 
@@ -234,7 +234,6 @@ class ShmFile {
   bool InitializeFsDax(const std::string &filename, int64 size);
   void ClearDevDax();
   void ClearFsDax();
-
   std::string filename_;
   char *data_;
   int64 size_;

@@ -57,12 +57,16 @@ bool ShmFile::InitializeDevDax(const std::string &filename, int64 size) {
 }
 
 bool ShmFile::Initialize(const std::string &filename, int64 size) {
-  if (fs::exists("/dev/dax0.0") || PMMmapRegisterCenter::GetConfig().use_dram) {
-    LOG(INFO) << "ShmFile, devdax mode";
+  if (type_ == "DRAM" ) {
+    LOG(INFO) << "ShmFile, devdax mode" << "type:" << type_;
     return InitializeDevDax(filename, size);
-  } else {
-    LOG(INFO) << "ShmFile, fsdax mode";
+  } 
+  else if(type_ == "SSD" || filename.find("valid") != std::string::npos ){
+    LOG(INFO) << "ShmFile, fsdax mode" << "type:" << type_;
     return InitializeFsDax(filename, size);
+  }
+  else {
+    LOG(INFO) << "Unsupport Medium!";
   }
 }
 

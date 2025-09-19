@@ -11,12 +11,36 @@
 size_t lockCount = 0;
 size_t splitCount = 0;
 
+
+static inline uint64_t mypow(uint64_t x, unsigned int y) noexcept {
+  if (x == 2) {
+    if (y >= 64) return std::numeric_limits<uint64_t>::max(); 
+    return (1ULL << y);
+  }
+
+  if (x && ((x & (x - 1)) == 0)) {              
+    unsigned k = __builtin_ctzll(x);            
+    unsigned shift = k * 1u * y;
+    if (shift >= 64) return std::numeric_limits<uint64_t>::max();
+    return (1ULL << shift);
+  }
+
+  uint64_t base = x, res = 1;
+  unsigned e = y;
+  while (e) {
+    if (e & 1) res *= base;
+    e >>= 1;
+    if (e) base *= base;
+  }
+  return res;
+}
+
 int Block::Insert(Key_t &key, Value_t value, size_t key_hash) {
 #ifdef INPLACE
   if (sema == -1)
     return -2;
 #ifdef LSB
-  if ((key_hash & (size_t)pow(2, local_depth) - 1) != pattern)
+  if ((key_hash & (size_t)mypow(2, local_depth) - 1) != pattern)
     return -2;
 #else
   if ((key_hash >> (8 * sizeof(key_hash) - local_depth)) != pattern)
@@ -24,13 +48,15 @@ int Block::Insert(Key_t &key, Value_t value, size_t key_hash) {
 #endif
   auto lock = sema;
   int ret = -1;
+  if (lock < 0) return -2;             
   while (!CAS(&sema, &lock, lock + 1)) {
-    lock = sema;
+    lock = sema;                       
+    if (lock < 0) return -2;           
   }
   Key_t LOCK = INVALID;
   for (unsigned i = 0; i < kNumSlot; ++i) {
 #ifdef LSB
-    if ((h(&_[i].key, sizeof(Key_t)) & (size_t)pow(2, local_depth) - 1) !=
+    if ((h(&_[i].key, sizeof(Key_t)) & (size_t)mypow(2, local_depth) - 1) !=
         pattern) {
 #else
     if ((h(&_[i].key, sizeof(Key_t)) >> (8 * sizeof(key_hash) - local_depth)) !=
@@ -61,16 +87,18 @@ int Block::Insert(Key_t &key, Value_t value, size_t key_hash) {
   if (sema == -1)
     return -2;
 #ifdef LSB
-  if ((key_hash & (size_t)pow(2, local_depth) - 1) != pattern)
+  if ((key_hash & (size_t)mypow(2, local_depth) - 1) != pattern)
     return -2;
 #else
   if ((key_hash >> (8 * sizeof(key_hash) - local_depth)) != pattern)
     return -2;
 #endif
   auto lock = sema;
+  if (lock < 0) return -2;  
   int ret = -1;
   while (!CAS(&sema, &lock, lock + 1)) {
-    lock = sema;
+    lock = sema;                       
+    if (lock < 0) return -2;           
   }
   for (unsigned i = 0; i < kNumSlot; ++i) {
     if (_[i].key == key) {
@@ -172,8 +200,10 @@ bool Block::Delete(Key_t &key) {
     return false;
 
   int64_t lock = sema;
+  if (lock < 0) return false;            
   while (!CAS(&sema, &lock, lock + 1)) {
-    lock = sema;
+    lock = sema;                      
+    if (lock < 0) return false;           
   }
 
   bool found = false;
@@ -286,7 +316,7 @@ RETRY:
     // cout << x << " " << y << endl;
     // cout << x << " " << target->numElem() << endl;
 #ifdef LSB
-    s[0]->pattern = (key_hash % (size_t)pow(2, s[0]->local_depth - 1));
+    s[0]->pattern = (key_hash % (size_t)mypow(2, s[0]->local_depth - 1));
     s[1]->pattern = s[0]->pattern + (1 << (s[0]->local_depth - 1));
     // cout << s[0]->pattern << endl;
     // cout << s[1]->pattern << endl;
@@ -343,7 +373,7 @@ RETRY:
 #endif
           }
         } else {
-          int chunk_size = pow(2, global_depth - (s[0]->local_depth - 1));
+          int chunk_size = mypow(2, global_depth - (s[0]->local_depth - 1));
           x = x - (x % chunk_size);
           for (unsigned i = 0; i < chunk_size / 2; ++i) {
             dir._[x + chunk_size / 2 + i] = s[1];
