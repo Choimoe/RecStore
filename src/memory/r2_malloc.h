@@ -85,12 +85,12 @@ char *New(int memory_size) {
     //base::AutoLock lock(lock_);
     r2::Allocator* alloc = R2AllocMaster.get_thread_allocator();
     if (!alloc) {
-        LOG(ERROR) << "R2alloc::New failed, thread_allocator=nullptr, size=" << memory_size;
+        //LOG(ERROR) << "R2alloc::New failed, thread_allocator=nullptr, size=" << memory_size;
         return nullptr;
     }
     void* p = alloc->alloc(memory_size);
     if (!p) {
-        LOG(ERROR) << "R2alloc::New alloc failed, size=" << memory_size;
+        //LOG(ERROR) << "R2alloc::New alloc failed, size=" << memory_size;
     }
     return static_cast<char*>(p);
 }

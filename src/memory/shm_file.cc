@@ -32,7 +32,8 @@ bool ShmFile::InitializeFsDax(const std::string &filename, int64 size) {
   CHECK_NE(data_, MAP_FAILED) << "map failed";
 
   filename_ = filename;
-
+  LOG(INFO) << "mmap shm file: " << filename << ", size: " << size_
+            << ", fd: " << fd_;
   return true;
 }
 

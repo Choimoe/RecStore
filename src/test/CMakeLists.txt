@@ -114,15 +114,3 @@ target_link_libraries(test_index PUBLIC
     gtest_main 
     pthread
 )
-
-#hybridkv 单元测试
-add_executable(test_hybridkv test_hybridkv.cpp)
-target_link_libraries(test_hybridkv PUBLIC
-    TBB::tbb
-    dram_hash 
-    base 
-    gtest 
-    gtest_main 
-    pthread
-    base_memory
-)

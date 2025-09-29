@@ -3,6 +3,7 @@
 
 ExtendibleHashSSD::ExtendibleHashSSD(const IndexConfig &config)
     : Index(config), hash_table_(nullptr) {
+  LOG(INFO) << "SSD Index init";
   auto path_it = config.json_config_.find("path");
   if (path_it == config.json_config_.end()) {
     throw std::invalid_argument("IndexConfig missing 'path'");

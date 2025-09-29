@@ -97,10 +97,10 @@ if (!kv) throw std::runtime_error("Create KV engine failed: " + r.engine);
      {"value_memory_management", "PersistLoopShmMalloc"}
    };
 
-3) HYBRID 值（KVEngineHybrid)//暂不支持
+3) HYBRID 值（KVEngineHybrid)
    cfg.json_config_ = {
      {"path", "/data/hybrid"},
-     {"index_type", "DRAM/SSD"},                //
+     {"index_type", "DRAM/SSD"},               
      {"value_type", "HYBRID"},
      {"shmcapacity",  128ull * 1'000'000},  // DRAM 侧字节数
      {"ssdcapacity",  256ull * 1'000'000},  // SSD  侧字节数

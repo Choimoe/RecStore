@@ -241,6 +241,7 @@ ExtendibleHash::ExtendibleHash(size_t initCap)
 // New config constructor (if added)
 ExtendibleHash::ExtendibleHash(const IndexConfig &config) : Index(config), dir{1}, global_depth{0} {
   // Customize based on config, e.g.
+  LOG(INFO) << "DRAM index init";
   size_t initCap = 1;
   if (config.json_config_.contains("initial_capacity")) {
     initCap = config.json_config_["initial_capacity"];

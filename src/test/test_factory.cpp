@@ -636,7 +636,7 @@ INSTANTIATE_TEST_SUITE_P(
   AllCombos, KVEngineCartesianTest,
   ::testing::Combine(
     ::testing::Values("DRAM", "SSD"),                 // index_type
-    ::testing::Values("DRAM", "SSD"),                 // value_type
+    ::testing::Values("DRAM", "SSD","HYBRID"),                 // value_type
     ::testing::Values("R2ShmMalloc", "PersistLoopShmMalloc")  
   ),
   [](const testing::TestParamInfo<KVEngineCartesianTest::ParamType>& info) {

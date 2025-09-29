@@ -180,7 +180,7 @@ char *PersistLoopShmMalloc::New(int memory_size) {
       malloc_block = 0;
     }
   }
-  LOG(INFO) << "persist memory has no mem!";
+  // LOG(INFO) << "persist memory has no mem!";
   return NULL;
 }
 

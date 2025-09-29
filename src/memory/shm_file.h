@@ -96,7 +96,7 @@ class PMMmapRegisterCenter {
   }
 
   struct Config {
-    bool use_dram = false;
+    bool use_dram = true;
     int numa_id = 0;
   };
 

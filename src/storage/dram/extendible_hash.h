@@ -6,7 +6,7 @@
 #include <vector>
 #include "../hybrid/index.h"
 // #include "/home/nammh/quartz/src/lib/pmalloc.h"
-
+#include "base/factory.h"
 #define LSB
 const size_t kMask = 256 - 1;
 const size_t kShift = 8;
@@ -153,3 +153,5 @@ private:
   Directory dir;
   size_t global_depth;
 };
+
+FACTORY_REGISTER(Index, DRAM, ExtendibleHash, const IndexConfig &);
