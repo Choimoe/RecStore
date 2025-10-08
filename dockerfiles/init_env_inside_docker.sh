@@ -18,7 +18,7 @@ MARKER_DIR="/tmp/env_setup_markers"
 
 step_base() {
     sudo apt update
-    sudo apt install -y libmemcached-dev ca-certificates lsb-release wget python3-dev liburing-dev
+    sudo apt install -y libmemcached-dev ca-certificates lsb-release wget python3-dev
     pip3 install pymemcache
 }
 
@@ -32,6 +32,14 @@ step_recover_bash() {
 
     ln -sf "${PROJECT_PATH}/dockerfiles/docker_config/.bashrc" "${target_dir}/.bashrc"
     source "${target_dir}/.bashrc"
+}
+
+step_liburing() {
+    cd ${PROJECT_PATH}/third_party/liburing
+    ./configure --cc=gcc --cxx=g++
+    make -j$(nproc)
+    make liburing.pc
+    sudo make install
 }
 
 step_glog() {
