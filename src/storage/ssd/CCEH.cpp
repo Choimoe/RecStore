@@ -308,14 +308,19 @@ void CCEH::Insert(
     // Insert into segment if space is available
     auto pattern = (f_hash >> (8 * sizeof(f_hash) - target_ptr->local_depth));
     for (unsigned i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
-      auto loc  = (f_idx + i) % Segment::kNumSlot;
-      auto _key = target_ptr->bucket[loc].key;
-      if ((((hash_funcs[0](
-                 &target_ptr->bucket[loc].key, sizeof(Key_t), f_seed) >>
+      auto loc       = (f_idx + i) % Segment::kNumSlot;
+      auto storedKey = target_ptr->bucket[loc].key;
+      if (storedKey == key) {
+        target_ptr->bucket[loc].value = value;
+        mfence();
+        fm->Unpin(sink, index, target_page_id, target_ptr, true);
+        return;
+      }
+      if ((((hash_funcs[0](&storedKey, sizeof(Key_t), f_seed) >>
              (8 * sizeof(f_hash) - target_ptr->local_depth)) != pattern) ||
-           (target_ptr->bucket[loc].key == INVALID)) &&
-          (target_ptr->bucket[loc].key != SENTINEL)) {
-        if (CAS(&target_ptr->bucket[loc].key, &_key, SENTINEL)) {
+           (storedKey == INVALID)) &&
+          (storedKey != SENTINEL)) {
+        if (CAS(&target_ptr->bucket[loc].key, &storedKey, SENTINEL)) {
           target_ptr->bucket[loc].value = value;
           mfence();
           target_ptr->bucket[loc].key = key;
@@ -327,14 +332,19 @@ void CCEH::Insert(
     auto s_hash = hash_funcs[2](&key, sizeof(Key_t), s_seed);
     auto s_idx  = (s_hash % Segment::kNumGroups) * kNumPairPerCacheLine;
     for (unsigned i = 0; i < kNumPairPerCacheLine * kNumCacheLine; ++i) {
-      auto loc  = (s_idx + i) % Segment::kNumSlot;
-      auto _key = target_ptr->bucket[loc].key;
-      if ((((hash_funcs[0](
-                 &target_ptr->bucket[loc].key, sizeof(Key_t), f_seed) >>
+      auto loc       = (s_idx + i) % Segment::kNumSlot;
+      auto storedKey = target_ptr->bucket[loc].key;
+      if (storedKey == key) {
+        target_ptr->bucket[loc].value = value;
+        mfence();
+        fm->Unpin(sink, index, target_page_id, target_ptr, true);
+        return;
+      }
+      if ((((hash_funcs[0](&storedKey, sizeof(Key_t), f_seed) >>
              (8 * sizeof(s_hash) - target_ptr->local_depth)) != pattern) ||
-           (target_ptr->bucket[loc].key == INVALID)) &&
-          (target_ptr->bucket[loc].key != SENTINEL)) {
-        if (CAS(&target_ptr->bucket[loc].key, &_key, SENTINEL)) {
+           (storedKey == INVALID)) &&
+          (storedKey != SENTINEL)) {
+        if (CAS(&target_ptr->bucket[loc].key, &storedKey, SENTINEL)) {
           target_ptr->bucket[loc].value = value;
           mfence();
           target_ptr->bucket[loc].key = key;

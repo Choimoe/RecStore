@@ -44,7 +44,6 @@ struct Segment {
     local_depth = depth;
   }
 
-  int Insert(FileManager*, Key_t&, Value_t, size_t, size_t);
   bool Insert4split(Key_t&, Value_t, size_t);
   PageID_t* Split(coroutine<void>::push_type& sink, int index, FileManager*);
   std::vector<std::pair<size_t, size_t>> find_path(size_t, size_t);
