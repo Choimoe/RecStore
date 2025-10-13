@@ -2,23 +2,13 @@
 
 #include "../dram/pair.h"
 #include "file.h"
-#include "util.h"
+#include "storage/dram/pair.h"
 #include <cmath>
-#include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <memory>
 #include <mutex>
 #include <shared_mutex>
-#include <unordered_map>
 #include <vector>
-
-const PageID_t META_PAGE_ID = 0;
-
-struct MetaPage {
-  PageID_t root_dir_page_id;
-  char padding[PAGE_SIZE - sizeof(PageID_t)];
-};
 
 class CCEH;
 struct Directory;
@@ -36,7 +26,7 @@ constexpr size_t kCuckooThreshold = 16;
 // constexpr size_t kCuckooThreshold = 32;
 
 struct Segment {
-  static const size_t kNumSlot = (PAGE_SIZE - sizeof(size_t)) / sizeof(Pair);
+  static const size_t kNumSlot   = (PAGE_SIZE - sizeof(size_t)) / sizeof(Pair);
   static const size_t kNumGroups = kNumSlot / kNumPairPerCacheLine; // 63
 
   Segment(void) {}
@@ -54,15 +44,12 @@ struct Segment {
     local_depth = depth;
   }
 
-  int Insert(FileManager *, Key_t &, Value_t, size_t, size_t);
-  bool Insert4split(Key_t &, Value_t, size_t);
-  PageID_t *Split(coroutine<Value_t>::push_type &sink, int index,
-                  FileManager *);
-  PageID_t *Split(FileManager *);
+  bool Insert4split(Key_t&, Value_t, size_t);
+  PageID_t* Split(coroutine<void>::push_type& sink, int index, FileManager*);
   std::vector<std::pair<size_t, size_t>> find_path(size_t, size_t);
-  void execute_path(FileManager *, std::vector<std::pair<size_t, size_t>> &,
-                    Key_t &, Value_t);
-  void execute_path(std::vector<std::pair<size_t, size_t>> &, Pair);
+  void execute_path(
+      FileManager*, std::vector<std::pair<size_t, size_t>>&, Key_t&, Value_t);
+  void execute_path(std::vector<std::pair<size_t, size_t>>&, Pair);
   size_t numElement(void);
 
   Pair bucket[kNumSlot];
@@ -95,7 +82,7 @@ struct DirectoryHeader {
   ~DirectoryHeader(void) {}
 
   void initDirectory(size_t _depth) {
-    depth = _depth;
+    depth    = _depth;
     capacity = pow(2, _depth);
     if ((capacity / DirectoryPage::kNumPointers) > kMaxDirectoryPages)
       capacity = kMaxDirectoryPages * DirectoryPage::kNumPointers;
@@ -104,8 +91,8 @@ struct DirectoryHeader {
   void initDirectory(void) {
     // some default depth
     size_t _depth = 10;
-    depth = _depth;
-    capacity = pow(2, _depth);
+    depth         = _depth;
+    capacity      = pow(2, _depth);
     if ((capacity / DirectoryPage::kNumPointers) > kMaxDirectoryPages)
       capacity = kMaxDirectoryPages * DirectoryPage::kNumPointers;
   }
@@ -113,27 +100,28 @@ struct DirectoryHeader {
 
 class CCEH {
 public:
-  CCEH(const std::string &file_path);
+  CCEH(coroutine<void>::push_type& sink,
+       int index,
+       int queue_size,
+       FileManager* _fm = nullptr);
   ~CCEH(void);
 
-  void Insert(coroutine<Value_t>::push_type &sink, int index, Key_t &, Value_t);
-  bool Insert(Key_t &, Value_t);
-  bool InsertOnly(Key_t &, Value_t);
-  bool Delete(Key_t &);
-  void Get(coroutine<Value_t>::push_type &sink, int index, const Key_t &);
-  Value_t Get(const Key_t &);
-  Value_t FindAnyway(const Key_t &);
+  void Insert(coroutine<void>::push_type& sink, int index, Key_t&, Value_t);
+  bool InsertOnly(Key_t&, Value_t);
+  bool Delete(Key_t&);
+  Value_t Get(coroutine<void>::push_type& sink, int index, const Key_t&);
+  Value_t FindAnyway(const Key_t&);
 
   double Utilization();
   size_t Capacity();
   void Recovery();
 
   bool crashed = true;
-  FileManager *fm;
+  FileManager* fm;
 
 private:
-  void initCCEH(size_t);
-  std::shared_mutex &get_segment_lock(PageID_t page_id) const;
+  void initCCEH(coroutine<void>::push_type& sink, int index, size_t);
+  std::shared_mutex& get_segment_lock(PageID_t page_id) const;
 
   PageID_t dir_header_page_id;
   mutable std::shared_mutex dir_mutex;

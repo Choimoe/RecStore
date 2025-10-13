@@ -71,7 +71,8 @@ class KVEngineMap : public BaseKV {
     char *sync_data = shm_malloc_->New(value.size());
     shmkv_data.SetShmMallocOffset(shm_malloc_->GetMallocOffset(sync_data));
     memcpy(sync_data, value.data(), value.size());
-
+    _mm_mfence();
+    asm volatile("" ::: "memory");
     std::unique_lock<std::shared_mutex> _(lock_);
     hash_table_->insert({key, shmkv_data.data_value});
   }

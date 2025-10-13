@@ -141,14 +141,14 @@ class PseudoRandom {
 };
 
 class Rdtsc {
-  static constexpr int CPU_FREQ_MHZ = 3300;
+  static constexpr int CPU_FREQ_MHZ_ = 3300;
 
  public:
   static inline void CPUPause(void) { __asm__ volatile("pause" ::: "memory"); }
 
   static inline void SleepNS(uint64_t ns) {
     if (ns == 0) return;
-    unsigned long etcs = ReadTSC() + (unsigned long)(ns * CPU_FREQ_MHZ / 1000);
+    unsigned long etcs = ReadTSC() + (unsigned long)(ns * CPU_FREQ_MHZ_ / 1000);
     while (ReadTSC() < etcs) CPUPause();
   }
 

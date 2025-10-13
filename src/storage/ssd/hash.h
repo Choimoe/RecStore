@@ -1,19 +1,19 @@
 #pragma once
 
-#include <functional>
 #include <stddef.h>
 
-inline size_t standard(const void *_ptr, size_t _len,
+inline size_t standard(const void* _ptr,
+                       size_t _len,
                        size_t _seed = static_cast<size_t>(0xc70f6907UL)) {
   return std::_Hash_bytes(_ptr, _len, _seed);
 }
 
 // JENKINS HASH FUNCTION
-inline size_t jenkins(const void *_ptr, size_t _len,
-                      size_t _seed = 0xc70f6907UL) {
-  size_t i = 0;
-  size_t hash = 0;
-  const char *key = static_cast<const char *>(_ptr);
+inline size_t
+jenkins(const void* _ptr, size_t _len, size_t _seed = 0xc70f6907UL) {
+  size_t i        = 0;
+  size_t hash     = 0;
+  const char* key = static_cast<const char*>(_ptr);
   while (i != _len) {
     hash += key[i++];
     hash += hash << (10);
@@ -38,12 +38,12 @@ inline size_t jenkins(const void *_ptr, size_t _len,
 // 1. It will not work incrementally.
 // 2. It will not produce the same results on little-endian and big-endian
 //    machines.
-inline size_t murmur2(const void *key, size_t len, size_t seed = 0xc70f6907UL) {
+inline size_t murmur2(const void* key, size_t len, size_t seed = 0xc70f6907UL) {
   // 'm' and 'r' are mixing constants generated offline.
   // They're not really 'magic', they just happen to work well.
 
   const unsigned int m = 0x5bd1e995;
-  const int r = 24;
+  const int r          = 24;
 
   // Initialize the hash to a 'random' value
 
@@ -51,10 +51,10 @@ inline size_t murmur2(const void *key, size_t len, size_t seed = 0xc70f6907UL) {
 
   // Mix 4 bytes at a time into the hash
 
-  const unsigned char *data = (const unsigned char *)key;
+  const unsigned char* data = (const unsigned char*)key;
 
   while (len >= 4) {
-    unsigned int k = *(unsigned int *)data;
+    unsigned int k = *(unsigned int*)data;
 
     k *= m;
     k ^= k >> r;
@@ -98,8 +98,8 @@ inline size_t murmur2(const void *key, size_t len, size_t seed = 0xc70f6907UL) {
 #define hash_get64bits(x) hash_read64_align(x, align)
 #define hash_get32bits(x) hash_read32_align(x, align)
 #define shifting_hash(x, r) ((x << r) | (x >> (64 - r)))
-#define TO64(x) (((U64_INT *)(x))->v)
-#define TO32(x) (((U32_INT *)(x))->v)
+#define TO64(x) (((U64_INT*)(x))->v)
+#define TO32(x) (((U32_INT*)(x))->v)
 
 typedef struct U64_INT {
   uint64_t v;
@@ -109,32 +109,32 @@ typedef struct U32_INT {
   uint32_t v;
 } U32_INT;
 
-inline uint64_t hash_read64_align(const void *ptr, uint32_t align) {
+inline uint64_t hash_read64_align(const void* ptr, uint32_t align) {
   if (align == 0) {
     return TO64(ptr);
   }
-  return *(uint64_t *)ptr;
+  return *(uint64_t*)ptr;
 }
 
-inline uint32_t hash_read32_align(const void *ptr, uint32_t align) {
+inline uint32_t hash_read32_align(const void* ptr, uint32_t align) {
   if (align == 0) {
     return TO32(ptr);
   }
-  return *(uint32_t *)ptr;
+  return *(uint32_t*)ptr;
 }
 
-inline uint64_t hash_compute(const void *input, uint64_t length, uint64_t seed,
-                             uint32_t align) {
-  const uint8_t *p = (const uint8_t *)input;
-  const uint8_t *end = p + length;
+inline uint64_t hash_compute(
+    const void* input, uint64_t length, uint64_t seed, uint32_t align) {
+  const uint8_t* p   = (const uint8_t*)input;
+  const uint8_t* end = p + length;
   uint64_t hash;
 
   if (length >= 32) {
-    const uint8_t *const limitation = end - 32;
-    uint64_t v1 = seed + NUMBER64_1 + NUMBER64_2;
-    uint64_t v2 = seed + NUMBER64_2;
-    uint64_t v3 = seed + 0;
-    uint64_t v4 = seed - NUMBER64_1;
+    const uint8_t* const limitation = end - 32;
+    uint64_t v1                     = seed + NUMBER64_1 + NUMBER64_2;
+    uint64_t v2                     = seed + NUMBER64_2;
+    uint64_t v3                     = seed + 0;
+    uint64_t v4                     = seed - NUMBER64_1;
 
     do {
       v1 += hash_get64bits(p) * NUMBER64_2;
@@ -218,16 +218,16 @@ inline uint64_t hash_compute(const void *input, uint64_t length, uint64_t seed,
   return hash;
 }
 
-inline uint64_t xxhash(const void *data, size_t length, size_t seed) {
+inline uint64_t xxhash(const void* data, size_t length, size_t seed) {
   if ((((uint64_t)data) & 7) == 0) {
     return hash_compute(data, length, seed, 1);
   }
   return hash_compute(data, length, seed, 0);
 }
 
-static size_t (*hash_funcs[4])(const void *key, size_t len, size_t seed) = {
+static size_t (*hash_funcs[4])(const void* key, size_t len, size_t seed) = {
     standard, murmur2, jenkins, xxhash};
 
-inline size_t h(const void *key, size_t len, size_t seed = 0xc70697UL) {
+inline size_t h(const void* key, size_t len, size_t seed = 0xc70697UL) {
   return hash_funcs[0](key, len, seed);
 }

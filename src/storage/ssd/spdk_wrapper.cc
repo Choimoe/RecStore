@@ -5,16 +5,16 @@
 #include <folly/GLog.h>
 #include <folly/Likely.h>
 
-const char *using_ssd = "0000:17:00.0";
+const char* using_ssd = "0000:c2:00.0";
 
 namespace ssdps {
 
 class SpdkWrapperImplementation : public SpdkWrapper {
- private:
+private:
   static constexpr int MAX_QPAIR_NUM = 32;
   int queue_cnt;
 
- public:
+public:
   void Init() override {
     LOG(INFO) << "Initializing NVMe Controllers";
     spdk_env_opts_init(&opts_);
@@ -22,12 +22,14 @@ class SpdkWrapperImplementation : public SpdkWrapper {
     CHECK(spdk_env_init(&opts_) >= 0) << "Unable to initialize SPDK env\n";
 
     spdk_nvme_trid_populate_transport(&g_trid_, SPDK_NVME_TRANSPORT_PCIE);
-    snprintf(g_trid_.subnqn, sizeof(g_trid_.subnqn), "%s",
-             SPDK_NVMF_DISCOVERY_NQN);
+    snprintf(
+        g_trid_.subnqn, sizeof(g_trid_.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
 
-    CHECK_EQ(spdk_nvme_probe(
-                 &g_trid_, this, SpdkWrapperImplementation::ProbeCallBack,
-                 SpdkWrapperImplementation::AttachCallBack, nullptr),
+    CHECK_EQ(spdk_nvme_probe(&g_trid_,
+                             this,
+                             SpdkWrapperImplementation::ProbeCallBack,
+                             SpdkWrapperImplementation::AttachCallBack,
+                             nullptr),
              0)
         << "spdk_nvme_probe failed";
 
@@ -35,7 +37,7 @@ class SpdkWrapperImplementation : public SpdkWrapper {
     CHECK_EQ(g_namespaces_.size(), 1) << "KISS, now only support 1 namespace";
     LOG(INFO) << "Initialization complete";
 
-    for (auto &ns_entry : g_namespaces_) {
+    for (auto& ns_entry : g_namespaces_) {
       for (int i = 0; i < queue_cnt; i++) {
         ns_entry.qpair[i] =
             spdk_nvme_ctrlr_alloc_io_qpair(ns_entry.ctrlr, NULL, 0);
@@ -57,7 +59,7 @@ class SpdkWrapperImplementation : public SpdkWrapper {
       for (int qp_id = 0; qp_id < queue_cnt; qp_id++) {
         spdk_nvme_ctrlr_free_io_qpair(ns_entry.qpair[qp_id]);
       }
-      struct spdk_nvme_detach_ctx *detach_ctx = NULL;
+      struct spdk_nvme_detach_ctx* detach_ctx = NULL;
       spdk_nvme_detach_async(ns_entry.ctrlr, &detach_ctx);
       if (detach_ctx) {
         spdk_nvme_detach_poll(detach_ctx);
@@ -65,29 +67,49 @@ class SpdkWrapperImplementation : public SpdkWrapper {
     }
   }
 
-  int SubmitWriteCommand(const void *pinned_src, const int64_t bytes,
-                         const int64_t lba, spdk_nvme_cmd_cb func, void *ctx,
-                         int qp_id) override {
-    auto ns_entry = g_namespaces_[0];
+  int SubmitWriteCommand(
+      const void* pinned_src,
+      const int64_t bytes,
+      const int64_t lba,
+      spdk_nvme_cmd_cb func,
+      void* ctx,
+      int qp_id) override {
+    auto ns_entry      = g_namespaces_[0];
     uint32_t lba_count = (bytes + kLBASize_ - 1) / kLBASize_;
 
-    int ret = spdk_nvme_ns_cmd_write(ns_entry.ns, ns_entry.qpair[qp_id],
-                                     (void *)pinned_src, lba, lba_count, func,
-                                     ctx, 0);
+    int ret = spdk_nvme_ns_cmd_write(
+        ns_entry.ns,
+        ns_entry.qpair[qp_id],
+        (void*)pinned_src,
+        lba,
+        lba_count,
+        func,
+        ctx,
+        0);
 
     CHECK(ret == 0 || ret == -ENOMEM) << ret;
     return ret;
   }
 
-  void SubmitReadCommand(void *pinned_dst, const int64_t bytes,
-                         const int64_t lba, spdk_nvme_cmd_cb func, void *ctx,
-                         int qp_id) override {
-    auto ns_entry = g_namespaces_[0];
+  void SubmitReadCommand(
+      void* pinned_dst,
+      const int64_t bytes,
+      const int64_t lba,
+      spdk_nvme_cmd_cb func,
+      void* ctx,
+      int qp_id) override {
+    auto ns_entry      = g_namespaces_[0];
     uint32_t lba_count = (bytes + kLBASize_ - 1) / kLBASize_;
     while (1) {
-      auto ret =
-          spdk_nvme_ns_cmd_read(ns_entry.ns, ns_entry.qpair[qp_id], pinned_dst,
-                                lba, lba_count, func, ctx, 0);
+      auto ret = spdk_nvme_ns_cmd_read(
+          ns_entry.ns,
+          ns_entry.qpair[qp_id],
+          pinned_dst,
+          lba,
+          lba_count,
+          func,
+          ctx,
+          0);
       if (ret == 0) {
         return;
       } else if (ret == -ENOMEM) {
@@ -114,36 +136,46 @@ class SpdkWrapperImplementation : public SpdkWrapper {
     return capacity / GetLBASize();
   }
 
-  void SyncRead(void *pinned_dst, const int64_t bytes, const int64_t lba,
+  void SyncRead(void* pinned_dst,
+                const int64_t bytes,
+                const int64_t lba,
                 int qp_id) override {
     std::atomic_bool flag{false};
-    SubmitReadCommand(pinned_dst, bytes, lba, SyncCommandCompleteCB,
-                      (void *)&flag, qp_id);
+    SubmitReadCommand(
+        pinned_dst, bytes, lba, SyncCommandCompleteCB, (void*)&flag, qp_id);
     while (!flag.load()) {
       PollCompleteQueue(qp_id);
     }
   }
 
-  void SyncWrite(const void *pinned_src, const int64_t bytes, const int64_t lba,
+  void SyncWrite(const void* pinned_src,
+                 const int64_t bytes,
+                 const int64_t lba,
                  int qp_id) override {
     std::atomic_bool flag{false};
-    SubmitWriteCommand(pinned_src, bytes, lba, SyncCommandCompleteCB,
-                       (void *)&flag, qp_id);
+    SubmitWriteCommand(
+        pinned_src, bytes, lba, SyncCommandCompleteCB, (void*)&flag, qp_id);
     while (!flag.load()) {
       PollCompleteQueue(qp_id);
     }
   }
 
-  void Sync2Read(void *pinned_dst, const int64_t lba, int qp_id) override {
+  void Sync2Read(void* pinned_dst, const int64_t lba, int qp_id) override {
     LOG(FATAL)
         << "dont use this function, this function is only used for test nvme "
            "command fusion";
     std::atomic_bool flag{false};
     auto ns_entry = g_namespaces_[0];
 
-    auto ret = spdk_nvme_ns_cmd_read(ns_entry.ns, ns_entry.qpair[qp_id],
-                                     pinned_dst, lba, 1, nullptr, nullptr,
-                                     SPDK_NVME_CMD_FUSE_FIRST);
+    auto ret = spdk_nvme_ns_cmd_read(
+        ns_entry.ns,
+        ns_entry.qpair[qp_id],
+        pinned_dst,
+        lba,
+        1,
+        nullptr,
+        nullptr,
+        SPDK_NVME_CMD_FUSE_FIRST);
     if (ret == 0) {
       LOG(INFO) << "submit successful 1";
     } else if (ret == -ENOMEM) {
@@ -154,9 +186,15 @@ class SpdkWrapperImplementation : public SpdkWrapper {
       LOG(FATAL) << "SubmitReadCommand Error " << ret;
     }
 
-    ret = spdk_nvme_ns_cmd_read(ns_entry.ns, ns_entry.qpair[qp_id],
-                                (char *)pinned_dst + 512, lba + 1, 1, nullptr,
-                                nullptr, SPDK_NVME_CMD_FUSE_SECOND);
+    ret = spdk_nvme_ns_cmd_read(
+        ns_entry.ns,
+        ns_entry.qpair[qp_id],
+        (char*)pinned_dst + 512,
+        lba + 1,
+        1,
+        nullptr,
+        nullptr,
+        SPDK_NVME_CMD_FUSE_SECOND);
     if (ret == 0) {
       LOG(INFO) << "submit successful 2";
     } else if (ret == -ENOMEM) {
@@ -168,15 +206,15 @@ class SpdkWrapperImplementation : public SpdkWrapper {
     }
   }
 
- private:
-  static void SyncCommandCompleteCB(void *ctx,
-                                    const struct spdk_nvme_cpl *cpl) {
+private:
+  static void
+  SyncCommandCompleteCB(void* ctx, const struct spdk_nvme_cpl* cpl) {
     if (FOLLY_UNLIKELY(spdk_nvme_cpl_is_error(cpl))) {
       LOG(FATAL) << "I/O error status: "
                  << spdk_nvme_cpl_get_status_string(&cpl->status);
     }
-    std::atomic_bool *p = (std::atomic_bool *)ctx;
-    *p = true;
+    std::atomic_bool* p = (std::atomic_bool*)ctx;
+    *p                  = true;
   }
 
   // static void CmdCallBack(void *ctx, const struct spdk_nvme_cpl *cpl) {
@@ -188,9 +226,9 @@ class SpdkWrapperImplementation : public SpdkWrapper {
   //   f();
   // }
 
-  static bool ProbeCallBack(void *cb_ctx,
-                            const struct spdk_nvme_transport_id *trid,
-                            struct spdk_nvme_ctrlr_opts *opts) {
+  static bool ProbeCallBack(void* cb_ctx,
+                            const struct spdk_nvme_transport_id* trid,
+                            struct spdk_nvme_ctrlr_opts* opts) {
     if (strcmp(using_ssd, trid->traddr) != 0) {
       return false;
     }
@@ -198,11 +236,11 @@ class SpdkWrapperImplementation : public SpdkWrapper {
     return true;
   }
 
-  static void AttachCallBack(void *cb_ctx,
-                             const struct spdk_nvme_transport_id *trid,
-                             struct spdk_nvme_ctrlr *ctrlr,
-                             const struct spdk_nvme_ctrlr_opts *opts) {
-    SpdkWrapperImplementation *ptr = (SpdkWrapperImplementation *)(cb_ctx);
+  static void AttachCallBack(void* cb_ctx,
+                             const struct spdk_nvme_transport_id* trid,
+                             struct spdk_nvme_ctrlr* ctrlr,
+                             const struct spdk_nvme_ctrlr_opts* opts) {
+    SpdkWrapperImplementation* ptr = (SpdkWrapperImplementation*)(cb_ctx);
     LOG(INFO) << folly::format("Attached to {}", trid->traddr);
 
     /*
@@ -213,7 +251,7 @@ class SpdkWrapperImplementation : public SpdkWrapper {
      *  detailed information on the controller.  Refer to the NVMe
      *  specification for more details on IDENTIFY for NVMe controllers.
      */
-    const struct spdk_nvme_ctrlr_data *cdata = spdk_nvme_ctrlr_get_data(ctrlr);
+    const struct spdk_nvme_ctrlr_data* cdata = spdk_nvme_ctrlr_get_data(ctrlr);
 
     std::unique_ptr<char[]> buf(new char[1024]);
     std::snprintf(buf.get(), 1024, "%-20.20s (%-20.20s)", cdata->mn, cdata->sn);
@@ -230,32 +268,33 @@ class SpdkWrapperImplementation : public SpdkWrapper {
      * Note that in NVMe, namespace IDs start at 1, not 0.
      */
     for (int nsid = spdk_nvme_ctrlr_get_first_active_ns(ctrlr); nsid != 0;
-         nsid = spdk_nvme_ctrlr_get_next_active_ns(ctrlr, nsid)) {
-      struct spdk_nvme_ns *ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
+         nsid     = spdk_nvme_ctrlr_get_next_active_ns(ctrlr, nsid)) {
+      struct spdk_nvme_ns* ns = spdk_nvme_ctrlr_get_ns(ctrlr, nsid);
       if (ns == NULL || !spdk_nvme_ns_is_active(ns)) {
         continue;
       }
 
       ns_entry entry;
       entry.ctrlr = ctrlr;
-      entry.ns = ns;
+      entry.ns    = ns;
 
       ptr->g_namespaces_.push_back(entry);
 
-      LOG(INFO) << folly::format("Namespace ID: {} size: {} GB\n",
-                                 spdk_nvme_ns_get_id(ns),
-                                 spdk_nvme_ns_get_size(ns) / 1000000000);
+      LOG(INFO) << folly::format(
+          "Namespace ID: {} size: {} GB\n",
+          spdk_nvme_ns_get_id(ns),
+          spdk_nvme_ns_get_size(ns) / 1000000000);
     }
   }
   spdk_env_opts opts_;
   spdk_nvme_transport_id g_trid_ = {};
-  const int kLBASize_ = 512;
-  std::unordered_map<std::string, spdk_nvme_ctrlr *> g_controllers_;
+  const int kLBASize_            = 512;
+  std::unordered_map<std::string, spdk_nvme_ctrlr*> g_controllers_;
 
   struct ns_entry {
-    struct spdk_nvme_ctrlr *ctrlr;
-    struct spdk_nvme_ns *ns;
-    struct spdk_nvme_qpair *qpair[MAX_QPAIR_NUM];
+    struct spdk_nvme_ctrlr* ctrlr;
+    struct spdk_nvme_ns* ns;
+    struct spdk_nvme_qpair* qpair[MAX_QPAIR_NUM];
   };
 
   std::vector<ns_entry> g_namespaces_;
@@ -267,4 +306,4 @@ std::unique_ptr<SpdkWrapper> SpdkWrapper::create(int queue_cnt) {
   return ret;
 }
 
-}  // namespace ssdps
+} // namespace ssdps

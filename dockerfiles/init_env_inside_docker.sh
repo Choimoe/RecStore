@@ -18,7 +18,7 @@ MARKER_DIR="/tmp/env_setup_markers"
 
 step_base() {
     sudo apt update
-    sudo apt install -y libmemcached-dev ca-certificates lsb-release wget python3-dev liburing-dev
+    sudo apt install -y libmemcached-dev ca-certificates lsb-release wget python3-dev
     pip3 install pymemcache
 }
 
@@ -32,6 +32,14 @@ step_recover_bash() {
 
     ln -sf "${PROJECT_PATH}/dockerfiles/docker_config/.bashrc" "${target_dir}/.bashrc"
     source "${target_dir}/.bashrc"
+}
+
+step_liburing() {
+    cd ${PROJECT_PATH}/third_party/liburing
+    ./configure --cc=gcc --cxx=g++
+    make -j$(nproc)
+    make liburing.pc
+    sudo make install
 }
 
 step_glog() {
@@ -109,19 +117,27 @@ step_cityhash() {
 # sudo sed -i "s@http://.*security.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
 # sudo -E apt-get update
 
-# cd third_party/spdk
-# sudo PATH=$PATH which pip3
+step_spdk() {
+    sudo apt-get install libfuse-dev kmod
+    cd ${PROJECT_PATH}/third_party/spdk
+    rm -rf build
+    sudo PATH=$PATH which pip3
+    sudo apt-get update --fix-missing
 
-# # if failed, sudo su, and execute in root;
-# # the key is that which pip3 == /opt/bin/pip3
-# sudo -E PATH=$PATH scripts/pkgdep.sh --all
-# # exit sudo su
+    # # if failed, sudo su, and execute in root;
+    # # the key is that which pip3 == /opt/bin/pip3
+    export GO111MODULE=on
+    export GOPROXY=https://goproxy.cn,direct
+    sudo -E PATH=$PATH scripts/pkgdep.sh --all
+    # # exit sudo su
 
-# ./configure
-# sudo make clean
-# make -j20
-# sudo make install
-# # make clean
+    ./configure
+    sudo make clean
+    export PATH=$PATH:/var/spdk/dependencies/pip/bin
+    sudo pip3 install pyelftools
+    make -j20
+    sudo env "PATH=/var/spdk/dependencies/pip/bin:$PATH" make install
+}
 # #############################SPDK#############################
 
 # sudo rm /opt/conda/lib/libtinfo.so.6
