@@ -27,17 +27,7 @@ public:
     queue_size_ = config.json_config_.at("queue_size").get<int>();
 
     std::string path = config.json_config_.at("path").get<std::string>();
-    pending          = 0;
-    coros.clear();
-    auto fm = new FileManager(queue_size_);
-    coros.push_back(
-        std::make_unique<coroutine<void>::pull_type>([this, fm](auto& yield) {
-          hash_table_ = new CCEH(yield, 0, this->queue_size_, fm);
-        }));
-    struct spdk_nvme_qpair* qpair = fm->get_thread_qpair();
-    while (pending) {
-      spdk_nvme_qpair_process_completions(qpair, 0);
-    }
+    hash_table_      = new CCEH(this->queue_size_);
 
     uint64_t value_shm_size =
         config.json_config_.at("capacity").get<uint64_t>() *
@@ -56,16 +46,7 @@ public:
     base::PetKVData shmkv_data;
     Key_t hash_key     = key;
     Value_t read_value = NONE;
-    pending            = 0;
-    coros.clear();
-    coros.push_back(std::make_unique<coroutine<void>::pull_type>(
-        [this, &read_value, &hash_key](auto& yield) {
-          read_value = hash_table_->Get(yield, 0, hash_key);
-        }));
-    struct spdk_nvme_qpair* qpair = hash_table_->fm->get_thread_qpair();
-    while (pending) {
-      spdk_nvme_qpair_process_completions(qpair, 0);
-    }
+    read_value         = hash_table_->Get(hash_key);
 
     if (read_value == NONE) {
       value = std::string();
@@ -93,16 +74,7 @@ public:
     shmkv_data.SetShmMallocOffset(shm_malloc_.GetMallocOffset(sync_data));
     std::memcpy(sync_data, value.data(), value.size());
     Key_t hash_key = key;
-    pending        = 0;
-    coros.clear();
-    coros.push_back(std::make_unique<coroutine<void>::pull_type>(
-        [this, &hash_key, shmkv_data](auto& yield) {
-          hash_table_->Insert(yield, 0, hash_key, shmkv_data.data_value);
-        }));
-    struct spdk_nvme_qpair* qpair = hash_table_->fm->get_thread_qpair();
-    while (pending) {
-      spdk_nvme_qpair_process_completions(qpair, 0);
-    }
+    hash_table_->Insert(hash_key, shmkv_data.data_value);
   }
 
   void BatchGet(base::ConstArray<uint64_t> keys,
