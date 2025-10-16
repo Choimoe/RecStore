@@ -46,6 +46,7 @@ struct Segment {
 
   bool Insert4split(Key_t&, Value_t, size_t);
   PageID_t* Split(coroutine<void>::push_type& sink, int index, FileManager*);
+  PageID_t* Split(FileManager*);
   std::vector<std::pair<size_t, size_t>> find_path(size_t, size_t);
   void execute_path(
       FileManager*, std::vector<std::pair<size_t, size_t>>&, Key_t&, Value_t);
@@ -100,16 +101,14 @@ struct DirectoryHeader {
 
 class CCEH {
 public:
-  CCEH(coroutine<void>::push_type& sink,
-       int index,
-       int queue_size,
-       FileManager* _fm = nullptr);
+  CCEH(int queue_size = 512);
   ~CCEH(void);
 
   void Insert(coroutine<void>::push_type& sink, int index, Key_t&, Value_t);
-  bool InsertOnly(Key_t&, Value_t);
+  void Insert(Key_t&, Value_t);
   bool Delete(Key_t&);
   Value_t Get(coroutine<void>::push_type& sink, int index, const Key_t&);
+  Value_t Get(const Key_t&);
   Value_t FindAnyway(const Key_t&);
 
   double Utilization();
@@ -120,7 +119,7 @@ public:
   FileManager* fm;
 
 private:
-  void initCCEH(coroutine<void>::push_type& sink, int index, size_t);
+  void initCCEH(size_t);
   std::shared_mutex& get_segment_lock(PageID_t page_id) const;
 
   PageID_t dir_header_page_id;

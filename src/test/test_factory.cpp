@@ -17,76 +17,86 @@
 
 #include "base/json.h"
 #include "memory/shm_file.h"
-#include "storage/kv_engine/engine_extendable_hash.h"
+#include "storage/kv_engine/engine_extendible_hash.h"
 
 #include "storage/kv_engine/engine_factory.h"
 #include "storage/kv_engine/engine_selector.h"
 
 class KVEngineCartesianTest
-    : public ::testing::TestWithParam<std::tuple<const char*, const char*, const char*>> {
+    : public ::testing::TestWithParam<
+          std::tuple<const char*, const char*, const char*>> {
 public:
   static std::string Sanitize(std::string s) {
-    for (char& c : s) if (!std::isalnum((unsigned char)c)) c = '_';
+    for (char& c : s)
+      if (!std::isalnum((unsigned char)c))
+        c = '_';
     return s;
   }
+
 protected:
-  std::string CreateFixedLengthValue(const std::string &base_value) {
+  std::string CreateFixedLengthValue(const std::string& base_value) {
     std::string value = base_value;
-    value.resize(128); 
+    value.resize(128);
     return value;
   }
 
-  static const char* ExpectedEngine(const std::string& idx, const std::string& val) {
-    if (val == "HYBRID") return "KVEngineHybrid";
-    if (idx == "SSD")    return "KVEngineCCEH";
+  static const char*
+  ExpectedEngine(const std::string& idx, const std::string& val) {
+    if (val == "HYBRID")
+      return "KVEngineHybrid";
+    if (idx == "SSD")
+      return "KVEngineCCEH";
     return "KVEngineExtendibleHash";
   }
 
   void SetUp() override {
     const char *idx_c, *val_c, *mm_c;
     std::tie(idx_c, val_c, mm_c) = GetParam();
-    index_type_ = idx_c;
-    value_type_ = val_c;
-    mem_mgr_    = mm_c;
+    index_type_                  = idx_c;
+    value_type_                  = val_c;
+    mem_mgr_                     = mm_c;
 
-    test_dir_ = "/tmp/test_kv_engine_cartesian_" + std::to_string(getpid())
-              + "_" + index_type_ + "_" + value_type_ + "_" + mem_mgr_;
+    test_dir_ = "/tmp/test_kv_engine_cartesian_" + std::to_string(getpid()) +
+                "_" + index_type_ + "_" + value_type_ + "_" + mem_mgr_;
     std::filesystem::create_directories(test_dir_);
 
     base::PMMmapRegisterCenter::GetConfig().use_dram = true;
     base::PMMmapRegisterCenter::GetConfig().numa_id  = 0;
 
-    cfg_.num_threads_ = 8;
+    cfg_.num_threads_     = 8;
     const size_t capacity = 1000000;
-    const int    value_sz = 128;
+    const int value_sz    = 128;
 
     cfg_.json_config_ = {
-      {"path", test_dir_},
-      {"index_type",  index_type_},
-      {"value_type",  value_type_},
-      {"value_size",  value_sz},
-      {"capacity",    capacity},
-      {"value_memory_management", mem_mgr_}  
-    };
+        {"path", test_dir_},
+        {"index_type", index_type_},
+        {"value_type", value_type_},
+        {"value_size", value_sz},
+        {"capacity", capacity},
+        {"value_memory_management", mem_mgr_}};
 
-    if (value_type_ == "HYBRID") {             
+    if (value_type_ == "HYBRID") {
       cfg_.json_config_["shmcapacity"] = capacity * value_sz / 2;
       cfg_.json_config_["ssdcapacity"] = capacity * value_sz;
     }
 
-    auto r = base::ResolveEngine(cfg_);
+    auto r       = base::ResolveEngine(cfg_);
     engine_name_ = r.engine;
-    ASSERT_EQ(engine_name_, std::string(ExpectedEngine(index_type_, value_type_)))
-        << "selector derived mismatch for (" << index_type_ << "," << value_type_ << "," << mem_mgr_ << ")";
+    ASSERT_EQ(engine_name_,
+              std::string(ExpectedEngine(index_type_, value_type_)))
+        << "selector derived mismatch for (" << index_type_ << ","
+        << value_type_ << "," << mem_mgr_ << ")";
 
     try {
-      kv_engine_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(engine_name_, r.cfg));
+      kv_engine_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
+          engine_name_, r.cfg));
     } catch (const std::exception& e) {
-      GTEST_SKIP() << "Create engine failed for mem_mgr=" << mem_mgr_ << " : " << e.what();
+      GTEST_SKIP() << "Create engine failed for mem_mgr=" << mem_mgr_ << " : "
+                   << e.what();
     }
     if (!kv_engine_) {
-      GTEST_SKIP() << "Engine '" << engine_name_
-                   << "' or allocator '" << mem_mgr_ << "' not registered/linked.";
+      GTEST_SKIP() << "Engine '" << engine_name_ << "' or allocator '"
+                   << mem_mgr_ << "' not registered/linked.";
     }
   }
 
@@ -123,7 +133,7 @@ protected:
 };
 
 TEST_P(KVEngineCartesianTest, BasicPutAndGet) {
-  uint64_t key = 123;
+  uint64_t key      = 123;
   std::string value = CreateFixedLengthValue("test_value_123");
   std::string retrieved_value;
 
@@ -144,7 +154,7 @@ TEST_P(KVEngineCartesianTest, GetNonExistentKey) {
 }
 
 TEST_P(KVEngineCartesianTest, KeyOverwrite) {
-  uint64_t key = 100;
+  uint64_t key       = 100;
   std::string value1 = CreateFixedLengthValue("initial_value");
   std::string value2 = CreateFixedLengthValue("updated_value");
   std::string retrieved_value;
@@ -167,11 +177,11 @@ TEST_P(KVEngineCartesianTest, MultiplePutAndGet) {
         i, CreateFixedLengthValue("value_" + std::to_string(i)));
   }
 
-  for (const auto &pair : test_data) {
+  for (const auto& pair : test_data) {
     kv_engine_->Put(pair.first, pair.second, 0);
   }
 
-  for (const auto &pair : test_data) {
+  for (const auto& pair : test_data) {
     std::string retrieved_value;
     kv_engine_->Get(pair.first, retrieved_value, 0);
     EXPECT_EQ(retrieved_value, pair.second) << "Failed for key " << pair.first;
@@ -198,7 +208,7 @@ TEST_P(KVEngineCartesianTest, BatchGet) {
 
   for (int i = 0; i < num_keys; i++) {
     if (batch_values[i].Size() > 0) {
-      std::string retrieved_value((char *)batch_values[i].Data(),
+      std::string retrieved_value((char*)batch_values[i].Data(),
                                   batch_values[i].Size() * sizeof(float));
       size_t null_pos = retrieved_value.find('\0');
       if (null_pos != std::string::npos) {
@@ -219,7 +229,7 @@ TEST_P(KVEngineCartesianTest, BatchGetNonExistentKeys) {
   kv_engine_->BatchGet(keys_array, &batch_values, 0);
 
   EXPECT_EQ(batch_values.size(), 3);
-  for (const auto &value : batch_values) {
+  for (const auto& value : batch_values) {
     EXPECT_EQ(value.Size(), 0);
   }
 }
@@ -246,7 +256,7 @@ TEST_P(KVEngineCartesianTest, BatchGetMixedKeys) {
 }
 
 TEST_P(KVEngineCartesianTest, BoundaryValues) {
-  uint64_t key1 = 1;
+  uint64_t key1           = 1;
   std::string empty_value = CreateFixedLengthValue("");
   std::string retrieved_value;
 
@@ -254,13 +264,13 @@ TEST_P(KVEngineCartesianTest, BoundaryValues) {
   kv_engine_->Get(key1, retrieved_value, 0);
   EXPECT_EQ(retrieved_value, empty_value);
 
-  uint64_t key2 = 2;
+  uint64_t key2          = 2;
   std::string long_value = CreateFixedLengthValue(std::string(100, 'x'));
   kv_engine_->Put(key2, long_value, 0);
   kv_engine_->Get(key2, retrieved_value, 0);
   EXPECT_EQ(retrieved_value, long_value);
 
-  uint64_t key3 = 3;
+  uint64_t key3             = 3;
   std::string special_value = CreateFixedLengthValue("Hello\nWorld\t\0Test");
   kv_engine_->Put(key3, special_value, 0);
   kv_engine_->Get(key3, retrieved_value, 0);
@@ -291,7 +301,7 @@ TEST_P(KVEngineCartesianTest, RandomData) {
   std::unordered_map<uint64_t, std::string> expected_data;
 
   for (int i = 0; i < num_operations; i++) {
-    uint64_t key = key_dist(gen);
+    uint64_t key     = key_dist(gen);
     int value_length = value_length_dist(gen);
 
     std::string base_value;
@@ -301,10 +311,10 @@ TEST_P(KVEngineCartesianTest, RandomData) {
     std::string value = CreateFixedLengthValue(base_value);
 
     kv_engine_->Put(key, value, 0);
-    expected_data[key] = value; 
+    expected_data[key] = value;
   }
 
-  for (const auto &pair : expected_data) {
+  for (const auto& pair : expected_data) {
     std::string retrieved_value;
     kv_engine_->Get(pair.first, retrieved_value, 0);
     EXPECT_EQ(retrieved_value, pair.second) << "Failed for key " << pair.first;
@@ -367,13 +377,14 @@ TEST_P(KVEngineCartesianTest, StressTest) {
     std::string retrieved_value;
     kv_engine_->Get(i, retrieved_value, 0);
     EXPECT_FALSE(retrieved_value.empty()) << "Failed for key " << i;
-    EXPECT_TRUE(retrieved_value.find("stress_test_value_" +
-                                     std::to_string(i)) != std::string::npos);
+    EXPECT_TRUE(
+        retrieved_value.find("stress_test_value_" + std::to_string(i)) !=
+        std::string::npos);
   }
 }
 
 TEST_P(KVEngineCartesianTest, ConcurrentPutTest) {
-  const int num_threads = 16;
+  const int num_threads           = 16;
   const int operations_per_thread = 1000;
   std::vector<std::thread> threads;
   std::atomic<int> failed_operations(0);
@@ -383,7 +394,7 @@ TEST_P(KVEngineCartesianTest, ConcurrentPutTest) {
   for (int t = 0; t < num_threads; t++) {
     threads.emplace_back(
         [this, t, operations_per_thread, &barrier, &failed_operations]() {
-          barrier.wait(); 
+          barrier.wait();
 
           for (int i = 0; i < operations_per_thread; i++) {
             uint64_t key = t * operations_per_thread + i;
@@ -393,14 +404,14 @@ TEST_P(KVEngineCartesianTest, ConcurrentPutTest) {
 
             try {
               kv_engine_->Put(key, value, 0);
-            } catch (const std::exception &e) {
+            } catch (const std::exception& e) {
               failed_operations++;
             }
           }
         });
   }
 
-  for (auto &thread : threads) {
+  for (auto& thread : threads) {
     thread.join();
   }
 
@@ -421,13 +432,13 @@ TEST_P(KVEngineCartesianTest, ConcurrentPutTest) {
 }
 
 TEST_P(KVEngineCartesianTest, ConcurrentGetTest) {
-  const int num_data = 200;
-  const int num_threads = 16;
+  const int num_data         = 200;
+  const int num_threads      = 16;
   const int reads_per_thread = 1000;
 
   for (int i = 0; i < num_data; i++) {
     std::string base_value = "concurrent_get_value_" + std::to_string(i);
-    std::string value = CreateFixedLengthValue(base_value);
+    std::string value      = CreateFixedLengthValue(base_value);
     kv_engine_->Put(i, value, 0);
   }
 
@@ -438,33 +449,39 @@ TEST_P(KVEngineCartesianTest, ConcurrentGetTest) {
   SimpleBarrier barrier(num_threads);
 
   for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back([this, t, reads_per_thread, num_data, &barrier,
-                          &successful_reads, &failed_reads]() {
-      barrier.wait();
+    threads.emplace_back(
+        [this,
+         t,
+         reads_per_thread,
+         num_data,
+         &barrier,
+         &successful_reads,
+         &failed_reads]() {
+          barrier.wait();
 
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<int> dist(0, num_data - 1);
+          std::random_device rd;
+          std::mt19937 gen(rd());
+          std::uniform_int_distribution<int> dist(0, num_data - 1);
 
-      for (int i = 0; i < reads_per_thread; i++) {
-        uint64_t key = dist(gen);
-        std::string retrieved_value;
+          for (int i = 0; i < reads_per_thread; i++) {
+            uint64_t key = dist(gen);
+            std::string retrieved_value;
 
-        try {
-          kv_engine_->Get(key, retrieved_value, 0);
-          if (!retrieved_value.empty()) {
-            successful_reads++;
-          } else {
-            failed_reads++;
+            try {
+              kv_engine_->Get(key, retrieved_value, 0);
+              if (!retrieved_value.empty()) {
+                successful_reads++;
+              } else {
+                failed_reads++;
+              }
+            } catch (const std::exception& e) {
+              failed_reads++;
+            }
           }
-        } catch (const std::exception &e) {
-          failed_reads++;
-        }
-      }
-    });
+        });
   }
 
-  for (auto &thread : threads) {
+  for (auto& thread : threads) {
     thread.join();
   }
 
@@ -474,7 +491,7 @@ TEST_P(KVEngineCartesianTest, ConcurrentGetTest) {
 }
 
 TEST_P(KVEngineCartesianTest, ConcurrentReadWriteTest) {
-  const int num_threads = 16;
+  const int num_threads           = 16;
   const int operations_per_thread = 1000;
   std::vector<std::thread> threads;
   std::atomic<int> successful_operations(0);
@@ -483,39 +500,44 @@ TEST_P(KVEngineCartesianTest, ConcurrentReadWriteTest) {
   SimpleBarrier barrier(num_threads);
 
   for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back([this, t, operations_per_thread, &barrier,
-                          &successful_operations, &failed_operations]() {
-      barrier.wait();
+    threads.emplace_back(
+        [this,
+         t,
+         operations_per_thread,
+         &barrier,
+         &successful_operations,
+         &failed_operations]() {
+          barrier.wait();
 
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<int> op_dist(0, 1); // 0: Put, 1: Get
-      std::uniform_int_distribution<uint64_t> key_dist(0, 199);
+          std::random_device rd;
+          std::mt19937 gen(rd());
+          std::uniform_int_distribution<int> op_dist(0, 1); // 0: Put, 1: Get
+          std::uniform_int_distribution<uint64_t> key_dist(0, 199);
 
-      for (int i = 0; i < operations_per_thread; i++) {
-        uint64_t key = key_dist(gen);
-        bool is_put = op_dist(gen) == 0;
+          for (int i = 0; i < operations_per_thread; i++) {
+            uint64_t key = key_dist(gen);
+            bool is_put  = op_dist(gen) == 0;
 
-        try {
-          if (is_put) {
-            std::string base_value = "mixed_thread_" + std::to_string(t) +
-                                     "_value_" + std::to_string(i);
-            std::string value = CreateFixedLengthValue(base_value);
-            kv_engine_->Put(key, value, 0);
-            successful_operations++;
-          } else {
-            std::string retrieved_value;
-            kv_engine_->Get(key, retrieved_value, 0);
-            successful_operations++;
+            try {
+              if (is_put) {
+                std::string base_value = "mixed_thread_" + std::to_string(t) +
+                                         "_value_" + std::to_string(i);
+                std::string value = CreateFixedLengthValue(base_value);
+                kv_engine_->Put(key, value, 0);
+                successful_operations++;
+              } else {
+                std::string retrieved_value;
+                kv_engine_->Get(key, retrieved_value, 0);
+                successful_operations++;
+              }
+            } catch (const std::exception& e) {
+              failed_operations++;
+            }
           }
-        } catch (const std::exception &e) {
-          failed_operations++;
-        }
-      }
-    });
+        });
   }
 
-  for (auto &thread : threads) {
+  for (auto& thread : threads) {
     thread.join();
   }
 
@@ -524,13 +546,13 @@ TEST_P(KVEngineCartesianTest, ConcurrentReadWriteTest) {
 }
 
 TEST_P(KVEngineCartesianTest, ConcurrentBatchGetTest) {
-  const int num_data = 100;
+  const int num_data    = 100;
   const int num_threads = 16;
-  const int batch_size = 10;
+  const int batch_size  = 10;
 
   for (int i = 0; i < num_data; i++) {
     std::string base_value = "batch_get_value_" + std::to_string(i);
-    std::string value = CreateFixedLengthValue(base_value);
+    std::string value      = CreateFixedLengthValue(base_value);
     kv_engine_->Put(i, value, 0);
   }
 
@@ -541,38 +563,44 @@ TEST_P(KVEngineCartesianTest, ConcurrentBatchGetTest) {
   SimpleBarrier barrier(num_threads);
 
   for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back([this, t, batch_size, num_data, &barrier,
-                          &successful_batches, &failed_batches]() {
-      barrier.wait(); 
+    threads.emplace_back(
+        [this,
+         t,
+         batch_size,
+         num_data,
+         &barrier,
+         &successful_batches,
+         &failed_batches]() {
+          barrier.wait();
 
-      std::random_device rd;
-      std::mt19937 gen(rd());
-      std::uniform_int_distribution<int> dist(0, num_data - 1);
+          std::random_device rd;
+          std::mt19937 gen(rd());
+          std::uniform_int_distribution<int> dist(0, num_data - 1);
 
-      for (int batch = 0; batch < 5; batch++) {
-        std::vector<uint64_t> keys;
-        for (int i = 0; i < batch_size; i++) {
-          keys.push_back(dist(gen));
-        }
+          for (int batch = 0; batch < 5; batch++) {
+            std::vector<uint64_t> keys;
+            for (int i = 0; i < batch_size; i++) {
+              keys.push_back(dist(gen));
+            }
 
-        try {
-          base::ConstArray<uint64_t> keys_array(keys.data(), keys.size());
-          std::vector<base::ConstArray<float>> batch_values;
-          kv_engine_->BatchGet(keys_array, &batch_values, 0);
+            try {
+              base::ConstArray<uint64_t> keys_array(keys.data(), keys.size());
+              std::vector<base::ConstArray<float>> batch_values;
+              kv_engine_->BatchGet(keys_array, &batch_values, 0);
 
-          if (batch_values.size() == keys.size()) {
-            successful_batches++;
-          } else {
-            failed_batches++;
+              if (batch_values.size() == keys.size()) {
+                successful_batches++;
+              } else {
+                failed_batches++;
+              }
+            } catch (const std::exception& e) {
+              failed_batches++;
+            }
           }
-        } catch (const std::exception &e) {
-          failed_batches++;
-        }
-      }
-    });
+        });
   }
 
-  for (auto &thread : threads) {
+  for (auto& thread : threads) {
     thread.join();
   }
 
@@ -581,8 +609,8 @@ TEST_P(KVEngineCartesianTest, ConcurrentBatchGetTest) {
 }
 
 TEST_P(KVEngineCartesianTest, DataConsistencyTest) {
-  const int num_threads = 16;
-  const int num_keys = 1000;
+  const int num_threads     = 16;
+  const int num_keys        = 1000;
   const int updates_per_key = 10;
 
   std::vector<std::thread> threads;
@@ -591,28 +619,28 @@ TEST_P(KVEngineCartesianTest, DataConsistencyTest) {
   SimpleBarrier barrier(num_threads);
 
   for (int t = 0; t < num_threads; t++) {
-    threads.emplace_back([this, t, num_keys, updates_per_key, &barrier,
-                          &total_updates]() {
-      barrier.wait(); 
+    threads.emplace_back(
+        [this, t, num_keys, updates_per_key, &barrier, &total_updates]() {
+          barrier.wait();
 
-      for (int update = 0; update < updates_per_key; update++) {
-        for (int key = 0; key < num_keys; key++) {
-          std::string base_value = "consistency_thread_" + std::to_string(t) +
-                                   "_update_" + std::to_string(update) +
-                                   "_key_" + std::to_string(key);
-          std::string value = CreateFixedLengthValue(base_value);
+          for (int update = 0; update < updates_per_key; update++) {
+            for (int key = 0; key < num_keys; key++) {
+              std::string base_value =
+                  "consistency_thread_" + std::to_string(t) + "_update_" +
+                  std::to_string(update) + "_key_" + std::to_string(key);
+              std::string value = CreateFixedLengthValue(base_value);
 
-          try {
-            kv_engine_->Put(key, value, 0);
-            total_updates++;
-          } catch (const std::exception &e) {
+              try {
+                kv_engine_->Put(key, value, 0);
+                total_updates++;
+              } catch (const std::exception& e) {
+              }
+            }
           }
-        }
-      }
-    });
+        });
   }
 
-  for (auto &thread : threads) {
+  for (auto& thread : threads) {
     thread.join();
   }
 
@@ -622,8 +650,8 @@ TEST_P(KVEngineCartesianTest, DataConsistencyTest) {
     kv_engine_->Get(key, retrieved_value, 0);
     if (!retrieved_value.empty()) {
       valid_keys++;
-      EXPECT_TRUE(retrieved_value.find("consistency_thread_") !=
-                  std::string::npos)
+      EXPECT_TRUE(
+          retrieved_value.find("consistency_thread_") != std::string::npos)
           << "Invalid value for key " << key;
     }
   }
@@ -633,19 +661,19 @@ TEST_P(KVEngineCartesianTest, DataConsistencyTest) {
 }
 
 INSTANTIATE_TEST_SUITE_P(
-  AllCombos, KVEngineCartesianTest,
-  ::testing::Combine(
-    ::testing::Values("DRAM", "SSD"),                 // index_type
-    ::testing::Values("DRAM", "SSD","HYBRID"),                 // value_type
-    ::testing::Values("R2ShmMalloc", "PersistLoopShmMalloc")  
-  ),
-  [](const testing::TestParamInfo<KVEngineCartesianTest::ParamType>& info) {
-    auto idx = std::get<0>(info.param);
-    auto val = std::get<1>(info.param);
-    auto mm  = std::get<2>(info.param);
-    std::string name = KVEngineCartesianTest::Sanitize(idx) + "_"
-                     + KVEngineCartesianTest::Sanitize(val) + "_"
-                     + KVEngineCartesianTest::Sanitize(mm);
-    return name;
-  }
-);
+    AllCombos,
+    KVEngineCartesianTest,
+    ::testing::Combine(
+        ::testing::Values("DRAM", "SSD"),           // index_type
+        ::testing::Values("DRAM", "SSD", "HYBRID"), // value_type
+        ::testing::Values("R2ShmMalloc", "PersistLoopShmMalloc")),
+    [](const testing::TestParamInfo<KVEngineCartesianTest::ParamType>& info) {
+      auto idx = std::get<0>(info.param);
+      auto val = std::get<1>(info.param);
+      auto mm  = std::get<2>(info.param);
+      std::string name =
+          KVEngineCartesianTest::Sanitize(idx) + "_" +
+          KVEngineCartesianTest::Sanitize(val) + "_" +
+          KVEngineCartesianTest::Sanitize(mm);
+      return name;
+    });
