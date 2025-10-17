@@ -319,7 +319,7 @@ RETRY:
     timer.Start();
     Block** s = target->Split();
     timer.Stop();
-    breakdown += timer.GetSeconds();
+    //breakdown += timer.GetSeconds();
     if (s == nullptr) {
       // another thread is doing split
       goto RETRY;

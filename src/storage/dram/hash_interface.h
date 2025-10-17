@@ -18,6 +18,6 @@ public:
   virtual double Utilization(void)         = 0;
   virtual size_t Capacity(void)            = 0;
 
-  Timer timer;
+  recstore::Timer timer;
   double breakdown = 0;
 };

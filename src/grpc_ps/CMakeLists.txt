@@ -40,6 +40,9 @@ target_link_libraries(grpc_ps_server PUBLIC
     protobuf::libprotobuf
     stdc++fs
     kv_engine
+    gflags
+    glog
+    TBB::tbb
 )
 
 # add_executable(grpc_ps_server_async

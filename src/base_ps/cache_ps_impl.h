@@ -13,7 +13,8 @@
 #include "base/timer.h"
 #include "parameters.h"
 #include "storage/kv_engine/base_kv.h"
-
+#include "storage/kv_engine/engine_factory.h"
+#include "storage/kv_engine/engine_selector.h"
 using boost::coroutines2::coroutine;
 
 static const int KEY_CNT = 12543670;
@@ -41,9 +42,8 @@ class CachePS {
     BaseKVConfig kv_config;
     kv_config.num_threads_ = config["num_threads"].get<int>();
     kv_config.json_config_ = config["base_kv_config"];
-    auto p = base::Factory<BaseKV, const BaseKVConfig &>::NewInstance(
-        config["base_kv_config"]["kv_type"].get<std::string>(), kv_config);
-    base_kv_.reset(p);
+    auto r = base::ResolveEngine(kv_config);
+    base_kv_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(r.engine, r.cfg));
   }
 
   ~CachePS() {}

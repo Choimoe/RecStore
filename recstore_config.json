@@ -17,11 +17,12 @@
             }
         ],
         "base_kv_config": {
-            "kv_type": "KVEngineMap",
-            "path": "/dev/shm/KVEngineMap",
+            "path": "/tmp/recstore_data",
             "capacity": 1000000,
-            "value_pool_size": 1073741824,
-            "corotine_per_thread": 1
+            "value_size": 128,
+            "value_type": "DRAM"},
+            "index_type" : "DRAM",      
+            "value_memory_management": "PersistLoopShmMalloc"
         }
     },
     "distributed_client": {

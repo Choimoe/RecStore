@@ -2,6 +2,7 @@
 
 #include <time.h>
 
+namespace recstore {
 class Timer {
 public:
   Timer(void) : elapsed{0} {}
@@ -28,3 +29,5 @@ private:
   struct timespec start, end, now;
   size_t elapsed;
 };
+
+}

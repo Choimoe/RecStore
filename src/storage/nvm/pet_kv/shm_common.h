@@ -3,7 +3,7 @@
 
 #include "base/async_time.h"
 #include "memory/malloc.h"
-
+#include "storage/nvm/pet_kv/persistence.h"
 namespace base {
 
 typedef std::function<uint64()> TimestampGetter;
