@@ -9,56 +9,56 @@ protected:
   void TearDown() override {}
 };
 
-// TEST_F(CCEHTest, SimpleInsertAndGet) {
-//   CCEH cceh;
+TEST_F(CCEHTest, SimpleInsertAndGet) {
+  CCEH cceh;
 
-//   Key_t key     = 100;
-//   Value_t value = 200;
-//   cceh.Insert(key, value);
+  Key_t key     = 100;
+  Value_t value = 200;
+  cceh.Insert(key, value);
 
-//   Value_t ret_val = cceh.Get(key);
-//   EXPECT_EQ(ret_val, value);
+  Value_t ret_val = cceh.Get(key);
+  EXPECT_EQ(ret_val, value);
 
-//   Key_t not_exist_key = 101;
-//   ret_val             = cceh.Get(not_exist_key);
-//   EXPECT_EQ(ret_val, NONE);
-// }
+  Key_t not_exist_key = 101;
+  ret_val             = cceh.Get(not_exist_key);
+  EXPECT_EQ(ret_val, NONE);
+}
 
-// TEST_F(CCEHTest, SplitTest) {
-//   CCEH cceh;
+TEST_F(CCEHTest, SplitTest) {
+  CCEH cceh;
 
-//   const int num_to_insert = 10000;
-//   std::vector<Key_t> keys;
-//   for (int i = 0; i < num_to_insert; ++i) {
-//     Key_t key = i;
-//     keys.push_back(key);
-//     cceh.Insert(key, key * 2);
-//   }
+  const int num_to_insert = 10000;
+  std::vector<Key_t> keys;
+  for (int i = 0; i < num_to_insert; ++i) {
+    Key_t key = i;
+    keys.push_back(key);
+    cceh.Insert(key, key * 2);
+  }
 
-//   for (const auto& key : keys) {
-//     Value_t ret_val = cceh.Get(key);
-//     EXPECT_EQ(ret_val, key * 2);
-//   }
-// }
+  for (const auto& key : keys) {
+    Value_t ret_val = cceh.Get(key);
+    EXPECT_EQ(ret_val, key * 2);
+  }
+}
 
-// TEST_F(CCEHTest, DirectoryExpansionTest) {
-//   CCEH cceh;
+TEST_F(CCEHTest, DirectoryExpansionTest) {
+  CCEH cceh;
 
-//   const int num_to_insert = 100000;
-//   std::vector<Key_t> keys;
-//   for (int i = 0; i < num_to_insert; ++i) {
-//     Key_t key = i * 3;
-//     keys.push_back(key);
-//     cceh.Insert(key, key * 2);
-//   }
+  const int num_to_insert = 100000;
+  std::vector<Key_t> keys;
+  for (int i = 0; i < num_to_insert; ++i) {
+    Key_t key = i * 3;
+    keys.push_back(key);
+    cceh.Insert(key, key * 2);
+  }
 
-//   for (const auto& key : keys) {
-//     Value_t ret_val = cceh.Get(key);
-//     if (ret_val != key * 2) {
-//       EXPECT_EQ(ret_val, key * 2) << "Failed for key: " << key;
-//     }
-//   }
-// }
+  for (const auto& key : keys) {
+    Value_t ret_val = cceh.Get(key);
+    if (ret_val != key * 2) {
+      EXPECT_EQ(ret_val, key * 2) << "Failed for key: " << key;
+    }
+  }
+}
 
 TEST_F(CCEHTest, ConcurrentInsertTest) {
   CCEH cceh;

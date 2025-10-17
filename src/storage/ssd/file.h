@@ -4,6 +4,8 @@
 #include "spdk/nvme.h"
 #include "spdk/vmd.h"
 #include <boost/coroutine2/all.hpp>
+#include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -11,8 +13,10 @@
 #include <folly/GLog.h>
 #include <folly/Likely.h>
 #include <glog/logging.h>
+#include <mutex>
 #include <stdexcept>
 #include <sys/user.h>
+#include <vector>
 
 typedef uint64_t PageID_t;
 const PageID_t INVALID_PAGE = -1;
@@ -34,28 +38,45 @@ static void io_complete(void* arg, const struct spdk_nvme_cpl* cpl) {
 class FileManager {
 public:
   FileManager(int queue_size) : next_page_id(0), queue_size(queue_size) {
-    LOG(INFO) << "Initializing NVMe Controllers";
-    spdk_env_opts_init(&opts);
-    spdk_nvme_trid_populate_transport(&trid, SPDK_NVME_TRANSPORT_PCIE);
-    snprintf(trid.subnqn, sizeof(trid.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
-    snprintf(trid.traddr, sizeof(trid.traddr), "%s", pcie_address);
-    CHECK(spdk_env_init(&opts) >= 0) << "Unable to initialize SPDK env\n";
-    CHECK_EQ(spdk_vmd_init(), 0) << "Failed to initialize VMD";
-    CHECK_EQ(spdk_nvme_probe(&trid, this, probe_cb, attach_cb, NULL), 0)
-        << "Failed to probe NVMe device";
-    CHECK_NE(ns_entry.ns, nullptr) << "Namespace is not initialized";
-    CHECK_NE(ns_entry.ctrlr, nullptr) << "Controller is not initialized";
-    empty_page = (char*)spdk_zmalloc(
-        PAGE_SIZE, 64, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+    std::lock_guard<std::mutex> lock(env_mutex_);
+    if (!env_initialized_) {
+      LOG(INFO) << "Initializing NVMe Controllers";
+      opts           = {};
+      opts.opts_size = sizeof(spdk_env_opts);
+      spdk_env_opts_init(&opts);
+      trid = {};
+      spdk_nvme_trid_populate_transport(&trid, SPDK_NVME_TRANSPORT_PCIE);
+      snprintf(trid.subnqn, sizeof(trid.subnqn), "%s", SPDK_NVMF_DISCOVERY_NQN);
+      snprintf(trid.traddr, sizeof(trid.traddr), "%s", pcie_address);
+      CHECK(spdk_env_init(&opts) >= 0) << "Unable to initialize SPDK env\n";
+      CHECK_EQ(spdk_vmd_init(), 0) << "Failed to initialize VMD";
+      CHECK_EQ(spdk_nvme_probe(&trid, this, probe_cb, attach_cb, NULL), 0)
+          << "Failed to probe NVMe device";
+      CHECK_NE(ns_entry.ns, nullptr) << "Namespace is not initialized";
+      CHECK_NE(ns_entry.ctrlr, nullptr) << "Controller is not initialized";
+      shared_ns_entry_   = ns_entry;
+      shared_empty_page_ = (char*)spdk_zmalloc(
+          PAGE_SIZE, 64, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+      CHECK_NE(shared_empty_page_, nullptr) << "Failed to allocate empty page";
+      empty_page = shared_empty_page_;
+      controller_active_.store(true, std::memory_order_release);
+      env_initialized_ = true;
+    } else {
+      ns_entry   = shared_ns_entry_;
+      empty_page = shared_empty_page_;
+      CHECK_NE(empty_page, nullptr) << "Shared empty page is not initialized";
+      controller_active_.store(true, std::memory_order_release);
+    }
+    instance_count_.fetch_add(1, std::memory_order_acq_rel);
   }
 
   ~FileManager() {
-    struct spdk_nvme_detach_ctx* detach_ctx = NULL;
-    spdk_nvme_detach_async(ns_entry.ctrlr, &detach_ctx);
-    if (detach_ctx)
-      spdk_nvme_detach_poll(detach_ctx);
+    int remaining = instance_count_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    if (remaining == 0) {
+      release_all_thread_qpairs();
+      controller_active_.store(false, std::memory_order_release);
+    }
   }
-
   PageID_t AllocatePage(coroutine<void>::push_type& sink, uint64_t index) {
     PageID_t new_page_id = next_page_id++;
     WritePageAsync(sink, index, new_page_id, empty_page);
@@ -123,11 +144,18 @@ public:
   }
 
   struct spdk_nvme_qpair* get_thread_qpair() {
-    static thread_local ThreadQpair thread_qpair;
+    ThreadQpair& thread_qpair = ThreadQpair::instance();
     return thread_qpair.get(ns_entry.ctrlr, queue_size);
   }
 
 private:
+  inline static std::atomic<bool> controller_active_{false};
+  inline static std::mutex env_mutex_;
+  inline static bool env_initialized_ = false;
+  struct ThreadQpair;
+  inline static std::mutex thread_qpair_mutex_;
+  inline static std::vector<ThreadQpair*> active_thread_qpairs_;
+
   PageID_t next_page_id;
   char* empty_page = nullptr;
   int queue_size;
@@ -138,14 +166,25 @@ private:
     struct spdk_nvme_ctrlr* ctrlr;
     struct spdk_nvme_ns* ns;
   } ns_entry;
+  inline static struct ns_entry shared_ns_entry_ = {};
+  inline static char* shared_empty_page_         = nullptr;
+  inline static std::atomic<int> instance_count_{0};
 
   struct ThreadQpair {
     struct spdk_nvme_qpair* qpair = NULL;
     bool initialized              = false;
+    bool registered               = false;
     ThreadQpair()                 = default;
     ~ThreadQpair() {
-      if (initialized)
-        spdk_nvme_ctrlr_free_io_qpair(qpair);
+      if (registered)
+        FileManager::unregister_thread_qpair(this);
+      if (FileManager::controller_active_.load(std::memory_order_acquire))
+        release();
+    }
+
+    static ThreadQpair& instance() {
+      static thread_local ThreadQpair thread_qpair;
+      return thread_qpair;
     }
 
     struct spdk_nvme_qpair* get(struct spdk_nvme_ctrlr* ctrlr, int queue_size) {
@@ -158,10 +197,49 @@ private:
         qpair = spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, &opts, sizeof(opts));
         CHECK_NE(qpair, nullptr) << "Failed to allocate IO qpair";
         initialized = true;
+        FileManager::register_thread_qpair(this);
       }
       return qpair;
     }
+
+    void release() {
+      if (initialized && qpair != nullptr) {
+        spdk_nvme_ctrlr_free_io_qpair(qpair);
+        qpair       = nullptr;
+        initialized = false;
+      }
+    }
   };
+
+  static void register_thread_qpair(ThreadQpair* thread_qpair) {
+    std::lock_guard<std::mutex> lock(thread_qpair_mutex_);
+    if (!thread_qpair->registered) {
+      active_thread_qpairs_.push_back(thread_qpair);
+      thread_qpair->registered = true;
+    }
+  }
+
+  static void unregister_thread_qpair(ThreadQpair* thread_qpair) {
+    std::lock_guard<std::mutex> lock(thread_qpair_mutex_);
+    auto it = std::find(active_thread_qpairs_.begin(),
+                        active_thread_qpairs_.end(),
+                        thread_qpair);
+    if (it != active_thread_qpairs_.end())
+      active_thread_qpairs_.erase(it);
+    thread_qpair->registered = false;
+  }
+
+  static void release_all_thread_qpairs() {
+    std::vector<ThreadQpair*> to_release;
+    {
+      std::lock_guard<std::mutex> lock(thread_qpair_mutex_);
+      to_release.swap(active_thread_qpairs_);
+      for (ThreadQpair* thread_qpair : to_release)
+        thread_qpair->registered = false;
+    }
+    for (ThreadQpair* thread_qpair : to_release)
+      thread_qpair->release();
+  }
 
   void ReadPageAsync(coroutine<void>::push_type& sink,
                      uint64_t index,
