@@ -19,13 +19,11 @@ struct EngineResolved {
 inline EngineResolved ResolveEngine(BaseKVConfig cfg) {
   auto& j = cfg.json_config_;
 
-  // 读取两关键项（默认给个合理值，便于你当前用例不写 index_type 也能跑）
   std::string idx = Upper(j.value("index_type", "DRAM"));   // 缺省按 DRAM 索引
   std::string val = Upper(j.value("value_type", ""));       // 必填：DRAM / SSD / HYBRID
   if (val.empty())
     throw std::invalid_argument("value_type is required (DRAM/SSD/HYBRID)");
 
-  // 推导 engine_type
   std::string engine;
   if (val == "HYBRID") {
     engine = "KVEngineHybrid";
@@ -33,7 +31,7 @@ inline EngineResolved ResolveEngine(BaseKVConfig cfg) {
     if (!j.contains("shmcapacity") || !j.contains("ssdcapacity")) {
       throw std::invalid_argument("Hybrid requires shmcapacity and ssdcapacity");
     }
-    // 纯 Hybrid 不需要 value_size/capacity？按你项目需要保留或剔除
+    // 纯 Hybrid 不需要 value_size/capacity
   } else if (val == "DRAM" || val == "SSD") {
     if (idx == "DRAM") engine = "KVEngineExtendibleHash";
     else if (idx == "SSD") engine = "KVEngineCCEH";
@@ -43,7 +41,7 @@ inline EngineResolved ResolveEngine(BaseKVConfig cfg) {
     if (!j.contains("capacity") || !j.contains("value_size")) {
       throw std::invalid_argument("Non-HYBRID requires capacity and value_size");
     }
-    // 可选：剔除和该引擎无关的字段，避免误传
+
     j.erase("shmcapacity");
     j.erase("ssdcapacity");
   } else {
