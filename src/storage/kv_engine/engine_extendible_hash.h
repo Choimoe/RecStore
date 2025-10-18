@@ -13,7 +13,7 @@ class KVEngineExtendibleHash : public BaseKV {
 
 public:
   KVEngineExtendibleHash(const BaseKVConfig& config) : BaseKV(config) {
-    LOG(INFO) << "init engint";
+    LOG(INFO) << "--------------init KVEngineExtendibleHash--------------------";
     const std::string value_path =
         config.json_config_.at("path").get<std::string>() + "/value";
     const auto cap_bytes = static_cast<int64>(std::llround(

@@ -25,7 +25,7 @@ public:
                 config.json_config_.at("value_size").get<size_t>()) {
     value_size_ = config.json_config_.at("value_size").get<int>();
     queue_size_ = config.json_config_.at("queue_size").get<int>();
-
+  LOG(INFO) << "--------------init KVEngineCCEH--------------------";
     std::string path = config.json_config_.at("path").get<std::string>();
     hash_table_      = new CCEH(this->queue_size_);
 
