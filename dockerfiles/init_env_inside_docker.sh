@@ -118,7 +118,7 @@ step_cityhash() {
 # sudo -E apt-get update
 
 step_spdk() {
-    sudo apt-get install libfuse-dev kmod
+    sudo apt-get install -y libfuse-dev kmod
     cd ${PROJECT_PATH}/third_party/spdk
     rm -rf build
     sudo PATH=$PATH which pip3
