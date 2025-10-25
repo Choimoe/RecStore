@@ -16,22 +16,21 @@ CUDA_VERSION="cu118"
 
 MARKER_DIR="/tmp/env_setup_markers"
 
+if [ "$USER" = "root" ]; then
+    target_dir="/root"
+else
+    target_dir="/home/$USER"
+fi
+
+ln -sf "${PROJECT_PATH}/dockerfiles/docker_config/.bashrc" "${target_dir}/.bashrc"
+source "${target_dir}/.bashrc"
+
+# ===============================================
+
 step_base() {
     sudo apt update
     sudo apt install -y libmemcached-dev ca-certificates lsb-release wget python3-dev
     pip3 install pymemcache
-}
-
-step_recover_bash() {
-    local target_dir
-    if [ "$USER" = "root" ]; then
-        target_dir="/root"
-    else
-        target_dir="/home/$USER"
-    fi
-
-    ln -sf "${PROJECT_PATH}/dockerfiles/docker_config/.bashrc" "${target_dir}/.bashrc"
-    source "${target_dir}/.bashrc"
 }
 
 step_liburing() {
