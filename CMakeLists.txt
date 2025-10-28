@@ -65,6 +65,7 @@ if (OPENMP_FOUND)
 endif()
 
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -g -O0")
 
 
 # setting compiler flags
@@ -109,6 +110,9 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -fPIC -g -ggdb3 -O3 -Wall")
 set(CMAKE_CXX_FLAGS_RELEASE   "${CMAKE_C_FLAGS_RELEASE} -fPIC -g -ggdb3 -O3 ${CC_WARNING_FLAG}")
 set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE}  -g -Xptxas -O3 -lineinfo -O3 -Xcompiler -O3,${NVCC_WARNING_FLAG},-g,-ggdb3,-fPIC")
 
+
+set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -g -O0")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0")
 
 # setting output folder
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)

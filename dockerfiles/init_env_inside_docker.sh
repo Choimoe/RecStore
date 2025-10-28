@@ -33,6 +33,11 @@ step_base() {
     pip3 install pymemcache
 }
 
+step_benchmark() {
+    sudo apt update
+    sudo apt install -y valgrind
+}
+
 step_liburing() {
     cd ${PROJECT_PATH}/third_party/liburing
     ./configure --cc=gcc --cxx=g++
