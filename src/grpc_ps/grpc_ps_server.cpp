@@ -44,6 +44,15 @@ class ParameterServiceImpl final
     cache_ps_ = cache_ps; 
     start_time_ = std::chrono::steady_clock::now();
   }
+  void ResetMetrics() {
+    total_get_requests_ = 0;
+    total_put_requests_ = 0;
+    total_get_keys_ = 0;
+    total_put_keys_ = 0;
+    total_get_bytes_ = 0;
+    total_put_bytes_ = 0;
+    start_time_ = std::chrono::steady_clock::now();
+  }
   void PrintMetrics(const std::string& table_name = "grpc_ps_server_metrics", 
     const std::string& unique_id = "default_server") {
     auto now = std::chrono::steady_clock::now();
@@ -53,9 +62,6 @@ class ParameterServiceImpl final
       double overall_qps = (total_get_requests_ + total_put_requests_) / elapsed_s;
       double overall_throughput_mbps = ((total_get_bytes_ + total_put_bytes_) / 1024.0 / 1024.0) / elapsed_s;
 
-
-      std::cout << "Get QPS: " << overall_qps << " ops/s" << std::endl;
-      std::cout<< "throughput: " << overall_throughput_mbps << " MB/s" << std::endl;
       // Report QPS and throughput metrics
       
       report(table_name.c_str(), unique_id.c_str(), "overall_qps", overall_qps);
@@ -226,6 +232,7 @@ class GRPCParameterServer : public BaseParameterServer {
             while (metrics_running) {
                 std::this_thread::sleep_for(std::chrono::seconds(10));
                 service.PrintMetrics();
+                service.ResetMetrics();
             }
         });
 

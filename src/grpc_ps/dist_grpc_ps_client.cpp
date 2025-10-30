@@ -9,9 +9,21 @@
 #include "base/log.h"
 #include "base/timer.h"
 
-FACTORY_REGISTER(recstore::BasePSClient, distributed_grpc, recstore::DistributedGRPCParameterClient, json);
+using grpc::Channel;
+using grpc::ClientAsyncResponseReader;
+using grpc::ClientContext;
+using grpc::Status;
+using recstoreps::CommandRequest;
+using recstoreps::CommandResponse;
+using recstoreps::GetParameterRequest;
+using recstoreps::GetParameterResponse;
+using recstoreps::PSCommand;
+using recstoreps::PutParameterRequest;
+using recstoreps::PutParameterResponse;
 
 namespace recstore {
+
+FACTORY_REGISTER(BasePSClient, distributed_grpc, DistributedGRPCParameterClient, json);
 
 DistributedGRPCParameterClient::DistributedGRPCParameterClient(json config) : BasePSClient(config) {
   json client_config;
@@ -144,7 +156,7 @@ bool DistributedGRPCParameterClient::GetParameter(const base::ConstArray<uint64_
   PartitionKeys(keys, partitioned_keys);
 
 
-  std::vector<std::future<bool>> futures;
+  std::vector<std::future<int>> futures;
   std::vector<std::vector<std::vector<float>>> partitioned_results(num_shards_);
 
   for (int shard_id = 0; shard_id < num_shards_; ++shard_id) {
@@ -268,7 +280,7 @@ int DistributedGRPCParameterClient::PutParameter(const base::ConstArray<uint64_t
   }
 
   // 并发put到各个分片
-  std::vector<std::future<bool>> futures;
+  std::vector<std::future<int>> futures;
 
   for (int shard_id = 0; shard_id < num_shards_; ++shard_id) {
     if (partitioned_keys[shard_id].empty()) {
@@ -286,13 +298,13 @@ int DistributedGRPCParameterClient::PutParameter(const base::ConstArray<uint64_t
 
     futures.push_back(std::async(std::launch::async, [=, &partitioned_keys, &partitioned_values]() {
       base::ConstArray<uint64_t> shard_keys(partitioned_keys[shard_id]);
-      return client->PutParameter(shard_keys, partitioned_values[shard_id]) == 0;
+      return client->PutParameter(shard_keys, partitioned_values[shard_id]);
     }));
   }
 
   // 等待所有请求完成
   for (auto& future : futures) {
-    if (!future.get()) {
+    if (future.get() != 1) {
       LOG(ERROR) << "Failed to put parameters to one of the shards";
       return -1;
     }
@@ -350,6 +362,29 @@ bool DistributedGRPCParameterClient::LoadCkpt(const std::vector<std::string>& mo
   }
 
   return all_success;
+}
+
+// Prefetch 接口实现
+uint64_t DistributedGRPCParameterClient::PrefetchParameter(const base::ConstArray<uint64_t>& keys) {
+  // 对于分布式客户端，暂时不支持Prefetch，直接返回0表示无效ID
+  LOG(WARNING) << "PrefetchParameter not fully implemented for distributed client";
+  return 0;
+}
+
+bool DistributedGRPCParameterClient::IsPrefetchDone(uint64_t prefetch_id) {
+  // 暂时返回true，表示总是完成
+  return true;
+}
+
+void DistributedGRPCParameterClient::WaitForPrefetch(uint64_t prefetch_id) {
+  // 暂时空实现
+  return;
+}
+
+bool DistributedGRPCParameterClient::GetPrefetchResult(uint64_t prefetch_id, std::vector<std::vector<float>>* values) {
+  // 暂时返回false，表示不支持
+  LOG(WARNING) << "GetPrefetchResult not fully implemented for distributed client";
+  return false;
 }
 
 } // namespace recstore
