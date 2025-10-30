@@ -8,6 +8,12 @@ add_library(grpc_ps_client
     grpc_ps_client.cpp grpc_ps_client.h
 )
 
+find_library(REPORT_LIB report PATHS ${CMAKE_CURRENT_SOURCE_DIR} NO_DEFAULT_PATH)
+if(NOT REPORT_LIB)
+    message(WARNING "libreport.so not found in ${CMAKE_CURRENT_SOURCE_DIR}, performance reporting will not work")
+    set(REPORT_LIB "")
+endif()
+
 target_link_libraries(
     grpc_ps_client PUBLIC
     base
@@ -16,6 +22,7 @@ target_link_libraries(
     gRPC::grpc++_reflection
     gRPC::grpc++
     protobuf::libprotobuf
+    ${REPORT_LIB}
 )
 
 add_executable(grpc_ps_client_test
@@ -43,6 +50,7 @@ target_link_libraries(grpc_ps_server PUBLIC
     gflags
     glog
     TBB::tbb
+    ${REPORT_LIB}
 )
 
 # add_executable(grpc_ps_server_async
