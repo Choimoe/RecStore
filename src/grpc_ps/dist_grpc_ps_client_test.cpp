@@ -1,12 +1,15 @@
 #include "dist_grpc_ps_client.h"
 
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/init/Init.h>
 #include <random>
 
 #include "base/array.h"
 #include "base/factory.h"
 #include "base/timer.h"
 #include "base_ps/base_client.h"
+
+using namespace xmh;
 
 using namespace recstore;
 
@@ -66,11 +69,18 @@ void TestFactoryClient() {
     }}
   };
 
-  std::unique_ptr<BasePSClient> client(
+  std::unique_ptr<BasePSClient> base_client(
       base::Factory<BasePSClient, json>::NewInstance("distributed_grpc", config));
 
-  if (!client) {
+  if (!base_client) {
     std::cerr << "Failed to create distributed PS client via factory!" << std::endl;
+    return;
+  }
+
+  // 转换为子类指针以访问扩展接口
+  auto* client = dynamic_cast<DistributedGRPCParameterClient*>(base_client.get());
+  if (!client) {
+    std::cerr << "Failed to cast to DistributedGRPCParameterClient!" << std::endl;
     return;
   }
 
@@ -79,8 +89,9 @@ void TestFactoryClient() {
   try {
     client->ClearPS();
     // assert empty
-    std::vector<uint64_t> keys = {1, 2, 3};
-    std::vector<std::vector<float>> emptyvalues(keys.size());
+    std::vector<uint64_t> keys_vec = {1, 2, 3};
+    base::ConstArray<uint64_t> keys(keys_vec);
+    std::vector<std::vector<float>> emptyvalues(keys_vec.size());
     std::vector<std::vector<float>> rightvalues = {{1}, {2, 2}, {3, 3, 3}};
     std::vector<std::vector<float>> values;
     client->GetParameter(keys, &values);
@@ -199,7 +210,7 @@ void TestLargeBatch() {
 
 int main(int argc, char** argv) {
   folly::Init(&argc, &argv);
-  base::Reporter::StartReportThread(2000);
+  Reporter::StartReportThread(2000);
 
   std::cout << "=== 分布式gRPC客户端测试 ===" << std::endl;
   std::cout << std::endl;

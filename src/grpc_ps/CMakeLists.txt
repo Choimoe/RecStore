@@ -53,6 +53,27 @@ target_link_libraries(grpc_ps_server PUBLIC
     ${REPORT_LIB}
 )
 
+add_library(dist_grpc_ps_client
+    dist_grpc_ps_client.cpp dist_grpc_ps_client.h
+)
+target_link_libraries(dist_grpc_ps_client PUBLIC
+    base
+    base_ps
+    grpc_ps_client
+    ps_proto
+    gRPC::grpc++_reflection
+    gRPC::grpc++
+    protobuf::libprotobuf
+    ${REPORT_LIB}
+)
+
+add_executable(dist_grpc_ps_client_test
+    dist_grpc_ps_client_test.cpp
+)
+target_link_libraries(dist_grpc_ps_client_test PUBLIC
+    dist_grpc_ps_client
+)
+
 # add_executable(grpc_ps_server_async
 #     grpc_ps_server_async.cpp 
 #     grpc_ps_server_async.h 

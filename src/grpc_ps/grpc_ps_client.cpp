@@ -423,10 +423,11 @@ int GRPCParameterClient::PutParameter(const base::ConstArray<uint64_t>& keys,
                                       const std::vector<std::vector<float>>& values) {
   std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
   bool success = PutParameter(key_vec, values);
+  std::cout<<success<<std::endl;
   return success ? 1 : 0;
 }
 
-//这个的作用是什么，需要如何修改
+
 void GRPCParameterClient::Command(recstore::PSCommand command) {
   switch (command) {
   case recstore::PSCommand::CLEAR_PS:

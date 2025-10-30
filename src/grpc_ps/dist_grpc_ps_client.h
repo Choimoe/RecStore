@@ -39,6 +39,12 @@ public:
 
   void Command(PSCommand command) override;
 
+  // Prefetch 接口实现
+  uint64_t PrefetchParameter(const base::ConstArray<uint64_t>& keys) override;
+  bool IsPrefetchDone(uint64_t prefetch_id) override;
+  void WaitForPrefetch(uint64_t prefetch_id) override;
+  bool GetPrefetchResult(uint64_t prefetch_id, std::vector<std::vector<float>>* values) override;
+
   // 扩展接口
   bool GetParameter(const base::ConstArray<uint64_t>& keys, std::vector<std::vector<float>>* values);
 
