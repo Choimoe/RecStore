@@ -83,6 +83,37 @@ public:
            unsigned tid) override {
     base::PetKVData shmkv_data;
     char* sync_data = shm_malloc_->New(value.size());
+
+    if (sync_data == nullptr) {
+      std::ifstream status_file("/proc/self/status");
+      std::string line;
+      std::ostringstream oss;
+      oss << "shm_malloc_->New returned nullptr when allocating " << value.size()
+          << " bytes. Process memory info:\n";
+      if (status_file.is_open()) {
+        while (std::getline(status_file, line)) {
+          if (line.rfind("VmSize:", 0) == 0 || line.rfind("VmRSS:", 0) == 0 ||
+              line.rfind("VmPeak:", 0) == 0 || line.rfind("VmHWM:", 0) == 0) {
+            oss << line << "\n";
+          }
+        }
+      } else {
+        oss << "Could not open /proc/self/status\n";
+      }
+
+      if (shm_malloc_) {
+        try {
+          oss << "shm_malloc_->GetInfo(): " << shm_malloc_->GetInfo() << "\n";
+        } catch (...) {
+          oss << "shm_malloc_->GetInfo() threw an exception\n";
+        }
+      }
+
+      LOG(ERROR) << oss.str();
+
+      return;
+    }
+
     shmkv_data.SetShmMallocOffset(shm_malloc_->GetMallocOffset(sync_data));
     memcpy(sync_data, value.data(), value.size());
     _mm_mfence();
