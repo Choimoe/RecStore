@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <fstream>
+#include <atomic>
+#include <csignal>
+#include <iomanip>
 
 #include "base/array.h"
 #include "base/base.h"
@@ -36,6 +40,66 @@ using recstoreps::PutParameterResponse;
 
 DEFINE_string(config_path, RECSTORE_PATH "/recstore_config.json",
               "config file path");
+DEFINE_string(perf_report_path, "/tmp/ps_perf.log",
+              "path to write periodic xmh::Timer/PerfCounter reports");
+DEFINE_int32(perf_report_interval_ms, 5000,
+             "interval (ms) to write periodic perf reports");
+
+namespace {
+std::atomic<bool> g_stop_reporting{false};
+std::unique_ptr<std::thread> g_reporter_thread;
+
+void AppendToFile(const std::string &path, const std::string &content) {
+  std::ofstream ofs(path, std::ios::app);
+  if (!ofs.is_open()) {
+    FB_LOG_EVERY_MS(ERROR, 5000) << "Failed to open perf report file: " << path;
+    return;
+  }
+  ofs << content << std::endl;
+}
+
+void StartPerfReportThread(const std::string &path, int interval_ms) {
+  g_stop_reporting.store(false, std::memory_order_release);
+  g_reporter_thread = std::make_unique<std::thread>([path, interval_ms]() {
+    while (!g_stop_reporting.load(std::memory_order_acquire)) {
+      std::stringstream ss;
+      auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+      ss << "\n===== Perf Report @ " << std::put_time(std::localtime(&now), "%F %T")
+         << " =====\n";
+      ss << xmh::Timer::Report();
+      ss << "\n";
+      ss << xmh::PerfCounter::Report();
+      AppendToFile(path, ss.str());
+      std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+  });
+}
+
+void StopPerfReportThread() {
+  g_stop_reporting.store(true, std::memory_order_release);
+  if (g_reporter_thread && g_reporter_thread->joinable()) {
+    g_reporter_thread->join();
+  }
+}
+
+void WriteFinalPerfReport(const std::string &path) {
+  std::stringstream ss;
+  auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+  ss << "\n===== Final Perf Report @ " << std::put_time(std::localtime(&now), "%F %T")
+     << " =====\n";
+  ss << xmh::Timer::Report();
+  ss << "\n";
+  ss << xmh::PerfCounter::Report();
+  AppendToFile(path, ss.str());
+}
+
+void SignalHandler(int signum) {
+  WriteFinalPerfReport(FLAGS_perf_report_path);
+  StopPerfReportThread();
+  ProfilerStop();
+  std::_Exit(0);
+}
+}  // namespace
 
 class ParameterServiceImpl final
     : public recstoreps::ParameterService::Service {
@@ -51,13 +115,17 @@ class ParameterServiceImpl final
     if (isPerf) {
       xmh::PerfCounter::Record("PS Get Keys", keys_array.Size());
     }
-    xmh::Timer timer_ps_get_req("PS GetParameter Req");
+    xmh::Timer timer_ps_get_req("PS.GetParameter.Handle");
+    if (isPerf) {
+      xmh::PerfCounter::Record("PS.GetParameter.RequestBytes",
+                               keys_array.Size() * sizeof(uint64_t));
+    }
     ParameterCompressor compressor;
     std::vector<std::string> blocks;
     FB_LOG_EVERY_MS(INFO, 1000)
         << "[PS] Getting " << keys_array.Size() << " keys";
 
-    xmh::Timer timer_cache_get("CachePS GetParameter");
+    xmh::Timer timer_cache_get("PS.GetParameter.CacheGet");
     for (auto each : keys_array) {
       ParameterPack parameter_pack;
       cache_ps_->GetParameterRun2Completion(each, parameter_pack, 0);
@@ -69,9 +137,15 @@ class ParameterServiceImpl final
       timer_cache_get.destroy();
     }
 
+    xmh::Timer timer_compress("PS.GetParameter.Serialize");
     compressor.ToBlock(&blocks);
+    if (isPerf) timer_compress.end(); else timer_compress.destroy();
     CHECK_EQ(blocks.size(), 1);
     reply->mutable_parameter_value()->swap(blocks[0]);
+    if (isPerf) {
+      xmh::PerfCounter::Record("PS.GetParameter.ReplyBytes",
+                               reply->parameter_value().size());
+    }
 
     if (isPerf) {
       timer_ps_get_req.end();
@@ -114,13 +188,20 @@ class ParameterServiceImpl final
   Status PutParameter(ServerContext *context,
                       const PutParameterRequest *request,
                       PutParameterResponse *reply) override {
+    xmh::Timer timer_ps_put_req("PS.PutParameter.Handle");
+    xmh::PerfCounter::Record("PS.PutParameter.RequestBytes",
+                             request->parameter_value().size());
     const ParameterCompressReader *reader =
         reinterpret_cast<const ParameterCompressReader *>(
             request->parameter_value().data());
     int size = reader->item_size();
+    xmh::PerfCounter::Record("PS.PutParameter.Items", size);
+    xmh::Timer timer_kv_put_all("PS.PutParameter.KVPutAll");
     for (int i = 0; i < size; i++) {
       cache_ps_->PutSingleParameter(reader->item(i), 0);
     }
+    timer_kv_put_all.end();
+    timer_ps_put_req.end();
     return Status::OK;
   }
 
@@ -211,7 +292,11 @@ int main(int argc, char **argv) {
   if (prof && prof[0]) {
     ProfilerStart(prof);
   }
+  std::signal(SIGINT, SignalHandler);
+  std::signal(SIGTERM, SignalHandler);
+
   xmh::Reporter::StartReportThread(2000);
+  StartPerfReportThread(FLAGS_perf_report_path, FLAGS_perf_report_interval_ms);
   std::ifstream config_file(FLAGS_config_path);
   nlohmann::json ex;
   config_file >> ex;
@@ -223,5 +308,7 @@ int main(int argc, char **argv) {
   if (prof && prof[0]) {
     ProfilerStop();
   }
+  StopPerfReportThread();
+  WriteFinalPerfReport(FLAGS_perf_report_path);
   return 0;
 }
