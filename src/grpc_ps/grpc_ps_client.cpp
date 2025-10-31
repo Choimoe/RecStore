@@ -79,6 +79,8 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t> &keys,
                                        float *values) {
   xmh::Timer timer_total("Client.GetParameter.Total");
   xmh::PerfCounter::Record("Client.GetParameter.Keys", keys.Size());
+  xmh::PerfCounter::Record("Client.GetParameter.Batches",
+                           (keys.Size() + MAX_PARAMETER_BATCH - 1) / MAX_PARAMETER_BATCH);
   if (FLAGS_parameter_client_random_init) {
     CHECK(0) << "todo implement";
     return true;
@@ -179,6 +181,8 @@ int GRPCParameterClient::GetParameter(
     const base::ConstArray<uint64_t>& keys, std::vector<std::vector<float>> *values) {
   xmh::Timer timer_total("Client.GetParameterVec.Total");
   xmh::PerfCounter::Record("Client.GetParameterVec.Keys", keys.Size());
+  xmh::PerfCounter::Record("Client.GetParameterVec.Batches",
+                           (keys.Size() + MAX_PARAMETER_BATCH - 1) / MAX_PARAMETER_BATCH);
   if (FLAGS_parameter_client_random_init) {
     values->clear();
     values->reserve(keys.Size());
@@ -427,9 +431,11 @@ bool GRPCParameterClient::PutParameter(
   const std::vector<uint64_t> &keys,
   const std::vector<std::vector<float>> &values) {
   xmh::Timer t_total("Client.PutParameter.Total");
+  xmh::PerfCounter::Record("Client.PutParameter.Keys", keys.size());
   for (int start = 0, index = 0; start < keys.size();
        start += MAX_PARAMETER_BATCH, ++index) {
     int key_size = std::min((int)(keys.size() - start), MAX_PARAMETER_BATCH);
+    xmh::PerfCounter::Record("Client.PutParameter.Items", key_size);
     auto ret = std::make_shared<std::promise<bool>>();
     PutParameterRequest request;
     PutParameterResponse response;

@@ -113,7 +113,7 @@ class ParameterServiceImpl final
     base::ConstArray<uint64_t> keys_array(request->keys());
     bool isPerf = request->has_perf() && request->perf();
     if (isPerf) {
-      xmh::PerfCounter::Record("PS Get Keys", keys_array.Size());
+      xmh::PerfCounter::Record("PS.GetParameter.Keys", keys_array.Size());
     }
     xmh::Timer timer_ps_get_req("PS.GetParameter.Handle");
     if (isPerf) {

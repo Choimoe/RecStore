@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <string>
 #include <fstream>
+// perf
+#include "base/timer.h"
 
 // Assuming InitStrategyType is defined in base/tensor.h
 #include "base/tensor.h"
@@ -193,6 +195,7 @@ void KVClientOp::EmbRead(const RecTensor& keys, RecTensor& values) {
     throw std::runtime_error("PS client is not initialized. Please call "
                              "KVClientOp::SetPSClient() first.");
   }
+  xmh::Timer t_total("ClientOp.EmbRead.Total");
 
   RECSTORE_LOG(0,
                "[DEBUG][op.cc] EmbRead: keys.shape="
@@ -236,16 +239,24 @@ void KVClientOp::EmbRead(const RecTensor& keys, RecTensor& values) {
 
   const int64_t D = values.shape(1);
   const size_t total = static_cast<size_t>(L) * static_cast<size_t>(D);
-  std::fill_n(values_data, total, 0.0f);
+  {
+    xmh::Timer t_prep("ClientOp.EmbRead.PrepareOutput");
+    std::fill_n(values_data, total, 0.0f);
+  }
 
   
   // std::cout << "[EmbRead] Reading " << L << " embeddings of dimension " <<
   // base::EMBEDDING_DIMENSION_D << std::endl;
 
-  bool success = ps_client_->GetParameter(keys_array, values_data);
+  bool success;
+  {
+    xmh::Timer t_ps("ClientOp.EmbRead.PSClient");
+    success = ps_client_->GetParameter(keys_array, values_data);
+  }
   if (!success) {
     throw std::runtime_error("Failed to read embeddings from PS client.");
   }
+  t_total.end();
   // std::cout << "[EmbRead] Read operation complete." << std::endl;
 }
 
@@ -259,6 +270,7 @@ void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
     throw std::runtime_error("PS client is not initialized. Please call "
                              "KVClientOp::SetPSClient() first.");
   }
+  xmh::Timer t_total("ClientOp.EmbWrite.Total");
 
   validate_keys(keys);
   validate_embeddings(values, "Values");
@@ -291,6 +303,7 @@ void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
         "Invalid embedding dimension D: " + std::to_string(D));
   }
 
+  xmh::Timer t_build("ClientOp.EmbWrite.BuildVector");
   std::vector<std::vector<float>> values_vector;
   values_vector.reserve(L);
   for (int64_t i = 0; i < L; ++i) {
@@ -300,6 +313,7 @@ void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
     _mm_mfence();
     values_vector.push_back(std::move(row));
   }
+  t_build.end();
 
   RECSTORE_LOG(2, "=== Keys Array Info ===");
   RECSTORE_LOG(2, "Keys size: " << L);
@@ -328,10 +342,15 @@ void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
     RECSTORE_LOG(2, values_stream.str());
   }
 
-  bool success = ps_client_->PutParameter(keys_array, values_vector);
+  bool success;
+  {
+    xmh::Timer t_ps("ClientOp.EmbWrite.PSClient");
+    success = ps_client_->PutParameter(keys_array, values_vector);
+  }
   if (!success) {
     throw std::runtime_error("Failed to write embeddings to PS client.");
   }
+  t_total.end();
   // std::cout << "[EmbRead] Read operation complete." << std::endl;
 }
 
