@@ -7,6 +7,7 @@
 #include <future>
 #include <string>
 #include <vector>
+#include <chrono>
 
 #include "base/array.h"
 #include "base/factory.h"
@@ -76,6 +77,10 @@ GRPCParameterClient::GRPCParameterClient(const std::string& host, int port, int 
 
 int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t> &keys,
                                        float *values) {
+  xmh::Timer timer_total("Client.GetParameter.Total");
+  xmh::PerfCounter::Record("Client.GetParameter.Keys", keys.Size());
+  xmh::PerfCounter::Record("Client.GetParameter.Batches",
+                           (keys.Size() + MAX_PARAMETER_BATCH - 1) / MAX_PARAMETER_BATCH);
   if (FLAGS_parameter_client_random_init) {
     CHECK(0) << "todo implement";
     return true;
@@ -93,6 +98,11 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t> &keys,
   get_param_requests_.resize(request_num);
   get_param_responses_.resize(request_num);
 
+  size_t request_bytes = 0;
+  size_t response_bytes = 0;
+  xmh::Timer timer_build_req("Client.GetParameter.BuildRequests");
+  std::vector<std::chrono::steady_clock::time_point> req_start_ts;
+  req_start_ts.resize((keys.Size() + MAX_PARAMETER_BATCH - 1) / MAX_PARAMETER_BATCH);
   for (int start = 0, index = 0; start < keys.Size();
        start += MAX_PARAMETER_BATCH, ++index) {
     int key_size = std::min((int)(keys.Size() - start), MAX_PARAMETER_BATCH);
@@ -102,13 +112,17 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t> &keys,
     auto &response = get_param_responses_[index];
     request.set_keys(reinterpret_cast<const char *>(&keys[start]),
                      sizeof(uint64_t) * key_size);
+    request_bytes += sizeof(uint64_t) * key_size;
     // rpc
     grpc::ClientContext context;
     std::unique_ptr<ClientAsyncResponseReader<GetParameterResponse>> rpc =
         stubs_[0]->AsyncGetParameter(&context, request, &cq);
+    req_start_ts[index] = std::chrono::steady_clock::now();
     rpc->Finish(&response, &status, reinterpret_cast<void *>(index));
   }
+  timer_build_req.end();
   int get = 0;
+  xmh::Timer timer_wait("Client.GetParameter.AsyncWait");
   while (get != request_num) {
     void *got_tag;
     bool ok = false;
@@ -116,13 +130,22 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t> &keys,
     if (!ok) {
       LOG(ERROR) << "error";
     }
+    // roundtrip per batch
+    int idx = static_cast<int>(reinterpret_cast<intptr_t>(got_tag));
+    double rt_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - req_start_ts[idx])
+                        .count();
+    xmh::PerfCounter::Record("Client.GetParameter.RPC_Roundtrip_ms", rt_ms);
     get++;
   }
+  timer_wait.end();
   size_t get_embedding_acc = 0;
   int old_dimension = -1;
 
+  xmh::Timer timer_deser("Client.GetParameter.Deserialize");
   for (int i = 0; i < get_param_responses_.size(); ++i) {
     auto &response = get_param_responses_[i];
+    response_bytes += response.parameter_value().size();
     int key_size = get_param_key_sizes_[i];
     auto parameters = reinterpret_cast<const ParameterCompressReader *>(
         response.parameter_value().data());
@@ -147,11 +170,19 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t> &keys,
       get_embedding_acc++;
     }
   }
+  timer_deser.end();
+  xmh::PerfCounter::Record("Client.GetParameter.RequestBytes", request_bytes);
+  xmh::PerfCounter::Record("Client.GetParameter.ResponseBytes", response_bytes);
+  timer_total.end();
   return true;
 }
 
 int GRPCParameterClient::GetParameter(
     const base::ConstArray<uint64_t>& keys, std::vector<std::vector<float>> *values) {
+  xmh::Timer timer_total("Client.GetParameterVec.Total");
+  xmh::PerfCounter::Record("Client.GetParameterVec.Keys", keys.Size());
+  xmh::PerfCounter::Record("Client.GetParameterVec.Batches",
+                           (keys.Size() + MAX_PARAMETER_BATCH - 1) / MAX_PARAMETER_BATCH);
   if (FLAGS_parameter_client_random_init) {
     values->clear();
     values->reserve(keys.Size());
@@ -177,6 +208,11 @@ int GRPCParameterClient::GetParameter(
   get_param_requests_.resize(request_num);
   get_param_responses_.resize(request_num);
 
+  size_t request_bytes = 0;
+  size_t response_bytes = 0;
+  xmh::Timer timer_build_req("Client.GetParameterVec.BuildRequests");
+  std::vector<std::chrono::steady_clock::time_point> req_start_ts;
+  req_start_ts.resize(request_num);
   for (int start = 0, index = 0; start < keys.Size();
        start += MAX_PARAMETER_BATCH, ++index) {
     int key_size = std::min((int)(keys.Size() - start), MAX_PARAMETER_BATCH);
@@ -186,16 +222,20 @@ int GRPCParameterClient::GetParameter(
     auto &response = get_param_responses_[index];
     request.set_keys(reinterpret_cast<const char *>(&keys[start]),
                      sizeof(uint64_t) * key_size);
+    request_bytes += sizeof(uint64_t) * key_size;
     // rpc
     grpc::ClientContext context;
     get_param_resonse_readers_.emplace_back(
         stubs_[0]->AsyncGetParameter(&context, request, &cq));
     auto &rpc = get_param_resonse_readers_.back();
+    req_start_ts[index] = std::chrono::steady_clock::now();
     // GetParameter(&context, request, &response);
     rpc->Finish(&response, &status, reinterpret_cast<void *>(index));
   }
+  timer_build_req.end();
 
   int get = 0;
+  xmh::Timer timer_wait("Client.GetParameterVec.AsyncWait");
   while (get != request_num) {
     void *got_tag;
     bool ok = false;
@@ -203,11 +243,19 @@ int GRPCParameterClient::GetParameter(
     if (unlikely(!ok)) {
       LOG(ERROR) << "error";
     }
+    int idx = static_cast<int>(reinterpret_cast<intptr_t>(got_tag));
+    double rt_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - req_start_ts[idx])
+                        .count();
+    xmh::PerfCounter::Record("Client.GetParameterVec.RPC_Roundtrip_ms", rt_ms);
     get++;
   }
+  timer_wait.end();
 
+  xmh::Timer timer_deser("Client.GetParameterVec.Deserialize");
   for (int i = 0; i < get_param_responses_.size(); ++i) {
     auto &response = get_param_responses_[i];
+    response_bytes += response.parameter_value().size();
     int key_size = get_param_key_sizes_[i];
     auto parameters = reinterpret_cast<const ParameterCompressReader *>(
         response.parameter_value().data());
@@ -228,12 +276,16 @@ int GRPCParameterClient::GetParameter(
       }
     }
   }
+  timer_deser.end();
+  xmh::PerfCounter::Record("Client.GetParameterVec.RequestBytes", request_bytes);
+  xmh::PerfCounter::Record("Client.GetParameterVec.ResponseBytes", response_bytes);
+  timer_total.end();
   return true;
 }
 
 // return prefetch id
 uint64_t GRPCParameterClient::PrefetchParameter(const base::ConstArray<uint64_t>& keys) {
-
+  xmh::Timer timer_prefetch("Client.Prefetch.Enqueue");
   uint64_t prefetch_id = next_prefetch_id_++;
   int request_num =
       (keys.Size() + MAX_PARAMETER_BATCH - 1) / MAX_PARAMETER_BATCH;
@@ -258,7 +310,7 @@ uint64_t GRPCParameterClient::PrefetchParameter(const base::ConstArray<uint64_t>
     rpc->Finish(&response, &status, reinterpret_cast<void *>(index));
   }
   prefetch_batches_.emplace(prefetch_id, std::move(pb));
-
+  timer_prefetch.end();
   return prefetch_id;
 }
 
@@ -289,12 +341,14 @@ bool GRPCParameterClient::IsPrefetchDone(uint64_t prefetch_id) {
 }
 
 void GRPCParameterClient::WaitForPrefetch(uint64_t prefetch_id) {
-    while (!IsPrefetchDone(prefetch_id)) {
-        // std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+  xmh::Timer t("Client.Prefetch.Wait");
+  while (!IsPrefetchDone(prefetch_id)) {
+    // busy wait intentionally to measure readiness latency
+  }
 }
 
 bool GRPCParameterClient::GetPrefetchResult(uint64_t prefetch_id, std::vector<std::vector<float>> *values) {
+  xmh::Timer t("Client.Prefetch.Deserialize");
   auto it = prefetch_batches_.find(prefetch_id);
   if (it == prefetch_batches_.end()) {
     LOG(ERROR) << "Invalid prefetch_id: " << prefetch_id;
@@ -376,13 +430,17 @@ bool GRPCParameterClient::LoadCkpt(
 bool GRPCParameterClient::PutParameter(
   const std::vector<uint64_t> &keys,
   const std::vector<std::vector<float>> &values) {
+  xmh::Timer t_total("Client.PutParameter.Total");
+  xmh::PerfCounter::Record("Client.PutParameter.Keys", keys.size());
   for (int start = 0, index = 0; start < keys.size();
        start += MAX_PARAMETER_BATCH, ++index) {
     int key_size = std::min((int)(keys.size() - start), MAX_PARAMETER_BATCH);
+    xmh::PerfCounter::Record("Client.PutParameter.Items", key_size);
     auto ret = std::make_shared<std::promise<bool>>();
     PutParameterRequest request;
     PutParameterResponse response;
     ParameterCompressor compressor;
+    xmh::Timer t_comp("Client.PutParameter.Serialize");
     std::vector<std::string> blocks;
     for (int i = start; i < start + key_size; i++) {
       auto each_key = keys[i];
@@ -394,10 +452,14 @@ bool GRPCParameterClient::PutParameter(
       compressor.AddItem(parameter_pack, &blocks);
     }
     compressor.ToBlock(&blocks);
+    t_comp.end();
     CHECK_EQ(blocks.size(), 1);
     request.mutable_parameter_value()->swap(blocks[0]);
+    xmh::PerfCounter::Record("Client.PutParameter.RequestBytes", request.parameter_value().size());
+    xmh::Timer t_rpc("Client.PutParameter.RPC");
     grpc::ClientContext context;
     grpc::Status status = stubs_[0]->PutParameter(&context, request, &response);
+    t_rpc.end();
     if (status.ok()) {
       ret->set_value(true);
     } else {
@@ -406,6 +468,7 @@ bool GRPCParameterClient::PutParameter(
       ret->set_value(false);
     }
   }
+  t_total.end();
   return true;
 }
 
