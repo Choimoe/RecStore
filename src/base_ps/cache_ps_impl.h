@@ -71,8 +71,10 @@ class CachePS {
 
   void PutSingleParameter(const uint64_t key, const void *data, const int dim,
                           const int tid) {
+    xmh::Timer timer_kv_put("KV PutSingle");
     base_kv_->Put(key, std::string_view((char *)data, dim * sizeof(float)),
                   tid);
+    timer_kv_put.end();
   }
 
   void PutSingleParameter(const ParameterCompressItem *item, int tid) {
@@ -92,8 +94,9 @@ class CachePS {
                           reader->item(i)->dim);
     }
     base::ConstArray<uint64_t> keys(keys_vec);
-
+    xmh::Timer timer_kv_batchput("KV BatchPut");
     base_kv_->BatchPut(sink, keys, &values, tid);
+    timer_kv_batchput.end();
   }
 
   bool GetParameterRun2Completion(key_t key, ParameterPack &pack, int tid) {
@@ -101,7 +104,9 @@ class CachePS {
     base::ConstArray<uint64_t> keys_array(keys);
     std::vector<base::ConstArray<float>> values;
 
-    base_kv_->BatchGet(keys_array, &values, tid);
+  xmh::Timer timer_kv_batchget_single("KV BatchGet (single)");
+  base_kv_->BatchGet(keys_array, &values, tid);
+  timer_kv_batchget_single.end();
     base::ConstArray<float> value = values[0];
 
     if (value.Size() == 0) {
@@ -123,7 +128,9 @@ class CachePS {
                                   std::vector<ParameterPack> &pack, int tid) {
     std::vector<base::ConstArray<float>> values;
 
+    xmh::Timer timer_kv_batchget("KV BatchGet");
     base_kv_->BatchGet(sink, keys, &values, tid);
+    timer_kv_batchget.end();
 
     for (int i = 0; i < keys.Size(); i++) {
       pack.emplace_back(keys[i], values[i].Size(), values[i].Data());

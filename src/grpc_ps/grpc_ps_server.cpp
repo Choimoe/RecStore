@@ -19,6 +19,7 @@
 #include "ps.grpc.pb.h"
 #include "ps.pb.h"
 #include "recstore_config.h"
+#include <gperftools/profiler.h>
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -56,10 +57,16 @@ class ParameterServiceImpl final
     FB_LOG_EVERY_MS(INFO, 1000)
         << "[PS] Getting " << keys_array.Size() << " keys";
 
+    xmh::Timer timer_cache_get("CachePS GetParameter");
     for (auto each : keys_array) {
       ParameterPack parameter_pack;
       cache_ps_->GetParameterRun2Completion(each, parameter_pack, 0);
       compressor.AddItem(parameter_pack, &blocks);
+    }
+    if (isPerf) {
+      timer_cache_get.end();
+    } else {
+      timer_cache_get.destroy();
     }
 
     compressor.ToBlock(&blocks);
@@ -200,6 +207,10 @@ FACTORY_REGISTER(BaseParameterServer, GRPCParameterServer, GRPCParameterServer);
 
 int main(int argc, char **argv) {
   folly::Init(&argc, &argv);
+  const char *prof = std::getenv("CPUPROFILE");
+  if (prof && prof[0]) {
+    ProfilerStart(prof);
+  }
   xmh::Reporter::StartReportThread(2000);
   std::ifstream config_file(FLAGS_config_path);
   nlohmann::json ex;
@@ -208,5 +219,9 @@ int main(int argc, char **argv) {
   std::cout << "Parameter server config: " << ex.dump(2) << std::endl;
   ps.Init(ex);
   ps.Run();
+
+  if (prof && prof[0]) {
+    ProfilerStop();
+  }
   return 0;
 }
