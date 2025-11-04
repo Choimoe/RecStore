@@ -26,6 +26,7 @@ class DistTensor:
         self._name = name
         self._kv_client = get_kv_client()
         self._is_gdata = is_gdata
+        self._persistent = persistent
 
         if part_policy is not None:
             print("Warning: part_policy is ignored in the current ops-based implementation.")
@@ -110,8 +111,7 @@ class DistTensor:
 
     @property
     def tensor_name(self) -> str:
-        """Return the tensor name."""
-        return self._tensor_name
+        return self._name
 
     def count_nonzero(self) -> int:
         """Count and return the number of nonzero value."""

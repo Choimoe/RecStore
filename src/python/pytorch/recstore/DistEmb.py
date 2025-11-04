@@ -27,9 +27,16 @@ class _DistEmbFunction(torch.autograd.Function):
         """
         ids, = ctx.saved_tensors
         module_instance = ctx.module_instance
-        
-        module_instance._trace.append((ids.detach(), grad_output.detach()))
-
+        ids_cpu = ids.detach().to(torch.int64).cpu()
+        grad_cpu = grad_output.detach().to(torch.float32).cpu()
+        if ids_cpu.numel() > 0:
+            unique_ids, inverse = torch.unique(ids_cpu, return_inverse=True)
+            grad_sum = torch.zeros((unique_ids.size(0), grad_cpu.size(1)), dtype=grad_cpu.dtype)
+            grad_sum.index_add_(0, inverse, grad_cpu)
+            current = module_instance._tensor[unique_ids]
+            updated = current - module_instance._lr * grad_sum
+            module_instance._tensor[unique_ids] = updated
+            module_instance._trace.append((unique_ids, grad_sum))
         return None, None, None, None
 
 class DistEmbedding(torch.nn.Module):
@@ -62,6 +69,7 @@ class DistEmbedding(torch.nn.Module):
         init_func: Optional[Callable] = None,
         # part_policy is kept for API compatibility but not used in this backend
         part_policy: Any = None, 
+        lr: float = 0.01,
     ):
         super(DistEmbedding, self).__init__()
         if not name:
@@ -79,6 +87,7 @@ class DistEmbedding(torch.nn.Module):
         self._trace = []
         self._num_embeddings = num_embeddings
         self._embedding_dim = embedding_dim
+        self._lr = lr
 
     def forward(self, ids):
         """
