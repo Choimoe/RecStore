@@ -228,7 +228,14 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         if args.in_memory_binary_criteo_path is None:
             raise ValueError("--in_memory_binary_criteo_path must be specified for single day mode")
         if args.num_embeddings_per_feature is None:
-            args.num_embeddings_per_feature = "40000000,39060,17295,7424,20265,3,7122,1543,63,40000000,3067956,405282,10,2209,11938,155,4,976,14,40000000,40000000,40000000,590152,12973,108,36"
+            LIMIT_FEATURE = 100000
+            orig_list = [
+                40000000, 39060, 17295, 7424, 20265, 3, 7122, 1543, 63,
+                40000000, 3067956, 405282, 10, 2209, 11938, 155, 4, 976,
+                14, 40000000, 40000000, 40000000, 590152, 12973, 108, 36,
+            ]
+            clamped = [str(min(v, LIMIT_FEATURE)) for v in orig_list]
+            args.num_embeddings_per_feature = ",".join(clamped)
         if not args.adagrad:
             args.learning_rate = 0.005
             args.adagrad = True
