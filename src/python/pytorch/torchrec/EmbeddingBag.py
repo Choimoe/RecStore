@@ -90,12 +90,13 @@ class _RecStoreEBCFunction(Function):
 
 
 class RecStoreEmbeddingBagCollection(torch.nn.Module):
-    def __init__(self, embedding_bag_configs: List[Dict[str, Any]]):
+    def __init__(self, embedding_bag_configs: List[Dict[str, Any]], lr: float = 0.01):
         super().__init__()
         self._embedding_bag_configs = [
             EmbeddingBagConfig(**c) for c in embedding_bag_configs
         ]
         self.kv_client: RecStoreClient = get_kv_client()
+        self._lr = lr
         
         self.feature_keys: List[str] = []
         self._config_names: Dict[str, str] = {}
@@ -138,9 +139,17 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 all_embeddings.requires_grad_()
 
                 def grad_hook(grad, name=config_name, ids=values):
-                    self._trace.append(
-                        (name, ids.detach().cpu(), grad.detach().cpu())
-                    )
+                    ids_cpu = ids.detach().to(torch.int64).cpu()
+                    grad_cpu = grad.detach().to(torch.float32).cpu()
+                    if ids_cpu.numel() == 0:
+                        return
+                    unique_ids, inverse = torch.unique(ids_cpu, return_inverse=True)
+                    grad_sum = torch.zeros((unique_ids.size(0), grad_cpu.size(1)), dtype=grad_cpu.dtype)
+                    grad_sum.index_add_(0, inverse, grad_cpu)
+                    current = self.kv_client.pull(name=name, ids=unique_ids)
+                    updated = current - self._lr * grad_sum
+                    self.kv_client.push(name=name, ids=unique_ids, data=updated)
+                    self._trace.append((name, unique_ids, grad_sum))
                 all_embeddings.register_hook(grad_hook)
 
                 local_indices = torch.arange(len(values), device=values.device, dtype=torch.long)
