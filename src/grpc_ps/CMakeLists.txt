@@ -43,6 +43,7 @@ target_link_libraries(grpc_ps_server PUBLIC
     gflags
     glog
     TBB::tbb
+    profiler
 )
 
 # add_executable(grpc_ps_server_async
