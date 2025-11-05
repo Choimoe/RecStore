@@ -19,6 +19,7 @@
 #include "ps.grpc.pb.h"
 #include "ps.pb.h"
 #include "recstore_config.h"
+#include "report_client.h"
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -39,8 +40,35 @@ DEFINE_string(config_path, RECSTORE_PATH "/recstore_config.json",
 class ParameterServiceImpl final
     : public recstoreps::ParameterService::Service {
  public:
-  ParameterServiceImpl(CachePS *cache_ps) { cache_ps_ = cache_ps; }
+  ParameterServiceImpl(CachePS *cache_ps) { 
+    cache_ps_ = cache_ps; 
+    start_time_ = std::chrono::steady_clock::now();
+  }
+  void ResetMetrics() {
+    total_get_requests_ = 0;
+    total_put_requests_ = 0;
+    total_get_keys_ = 0;
+    total_put_keys_ = 0;
+    total_get_bytes_ = 0;
+    total_put_bytes_ = 0;
+    start_time_ = std::chrono::steady_clock::now();
+  }
+  void PrintMetrics(const std::string& table_name = "grpc_ps_server_metrics", 
+    const std::string& unique_id = "default_server") {
+    auto now = std::chrono::steady_clock::now();
+    double elapsed_s = std::chrono::duration<double>(now - start_time_).count();
+    if (elapsed_s > 0) {
 
+      double overall_qps = (total_get_requests_ + total_put_requests_) / elapsed_s;
+      double overall_throughput_mbps = ((total_get_bytes_ + total_put_bytes_) / 1024.0 / 1024.0) / elapsed_s;
+
+      // Report QPS and throughput metrics
+      
+      report(table_name.c_str(), unique_id.c_str(), "overall_qps", overall_qps);
+      report(table_name.c_str(), unique_id.c_str(), "overall_throughput_mbps", overall_throughput_mbps);
+    }
+    
+    }
  private:
   Status GetParameter(ServerContext *context,
                       const GetParameterRequest *request,
@@ -55,16 +83,20 @@ class ParameterServiceImpl final
     std::vector<std::string> blocks;
     FB_LOG_EVERY_MS(INFO, 1000)
         << "[PS] Getting " << keys_array.Size() << " keys";
-
+    int total_dim = 0;
     for (auto each : keys_array) {
       ParameterPack parameter_pack;
       cache_ps_->GetParameterRun2Completion(each, parameter_pack, 0);
       compressor.AddItem(parameter_pack, &blocks);
+      total_dim += parameter_pack.dim;
     }
 
     compressor.ToBlock(&blocks);
     CHECK_EQ(blocks.size(), 1);
     reply->mutable_parameter_value()->swap(blocks[0]);
+    total_get_requests_++;
+    total_get_keys_ += keys_array.Size();
+    total_get_bytes_ += total_dim * sizeof(float);
 
     if (isPerf) {
       timer_ps_get_req.end();
@@ -111,14 +143,26 @@ class ParameterServiceImpl final
         reinterpret_cast<const ParameterCompressReader *>(
             request->parameter_value().data());
     int size = reader->item_size();
+    uint64_t total_bytes = 0;
     for (int i = 0; i < size; i++) {
       cache_ps_->PutSingleParameter(reader->item(i), 0);
+      total_bytes += reader->item(i)->dim * sizeof(float);
     }
+    total_put_requests_++;
+    total_put_keys_ += size;
+    total_put_bytes_ += total_bytes;
     return Status::OK;
   }
 
  private:
   CachePS *cache_ps_;
+  std::atomic<uint64_t> total_get_requests_{0};
+  std::atomic<uint64_t> total_put_requests_{0};
+  std::atomic<uint64_t> total_get_keys_{0};
+  std::atomic<uint64_t> total_put_keys_{0};
+  std::atomic<uint64_t> total_get_bytes_{0};
+  std::atomic<uint64_t> total_put_bytes_{0};
+  std::chrono::steady_clock::time_point start_time_;
 };
 
 namespace recstore {
@@ -182,6 +226,16 @@ class GRPCParameterServer : public BaseParameterServer {
         std::string server_address("0.0.0.0:15000");
         auto cache_ps = std::make_unique<CachePS>(config_["cache_ps"]);
         ParameterServiceImpl service(cache_ps.get());
+
+        std::atomic<bool> metrics_running{true};
+        std::thread metrics_thread([&service, &metrics_running]() {
+            while (metrics_running) {
+                std::this_thread::sleep_for(std::chrono::seconds(10));
+                service.PrintMetrics();
+                service.ResetMetrics();
+            }
+        });
+
         grpc::EnableDefaultHealthCheckService(true);
         grpc::reflection::InitProtoReflectionServerBuilderPlugin();
         ServerBuilder builder;
@@ -190,6 +244,11 @@ class GRPCParameterServer : public BaseParameterServer {
         std::unique_ptr<Server> server(builder.BuildAndStart());
         std::cout << "Server listening on " << server_address << std::endl;
         server->Wait();
+
+        metrics_running = false;
+        if (metrics_thread.joinable()) {
+            metrics_thread.join();
+        }
     }
   }
 };
