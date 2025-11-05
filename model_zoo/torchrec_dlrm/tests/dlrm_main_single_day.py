@@ -280,39 +280,43 @@ def main(argv: List[str]) -> None:
     val_dataloader = get_dataloader(args, "nccl" if torch.cuda.is_available() else "gloo", "val")
     
     def custom_collate(batch):
-        if not batch:
-            return batch
-        
-        dense_features = []
-        sparse_features = []
-        labels = []
-        
-        for dense, sparse, label in batch:
-            dense_features.append(torch.as_tensor(dense, dtype=torch.float32))
-            sparse_features.append(sparse)
-            labels.append(torch.as_tensor(label, dtype=torch.float32))
-        
-        dense_batch = torch.stack(dense_features)
-        
-        from torchrec import KeyedJaggedTensor
-        feature_names = DEFAULT_CAT_NAMES
-        
-        sparse_mat = torch.stack([s.to(torch.long) for s in sparse_features], dim=0)
-        B = sparse_mat.shape[0]
-        values_list = [sparse_mat[:, i] for i in range(26)]
-        values = torch.cat(values_list, dim=0)
-        one_lengths = torch.ones(B, dtype=torch.int32, device=values.device)
-        lengths_list = [one_lengths for _ in range(26)]
-        lengths = torch.cat(lengths_list, dim=0)
-        sparse_batch = KeyedJaggedTensor.from_lengths_sync(
-            keys=feature_names,
-            values=values,
-            lengths=lengths,
-        )
-        
-        labels_batch = torch.stack(labels)
-        
-        return dense_batch, sparse_batch, labels_batch
+        with record_function("dataloader.collate"):
+            if not batch:
+                return batch
+
+            dense_features = []
+            sparse_features = []
+            labels = []
+
+            for dense, sparse, label in batch:
+                dense_features.append(torch.as_tensor(dense, dtype=torch.float32))
+                sparse_features.append(sparse)
+                labels.append(torch.as_tensor(label, dtype=torch.float32))
+
+            with record_function("stack_dense"):
+                dense_batch = torch.stack(dense_features)
+
+            from torchrec import KeyedJaggedTensor
+            feature_names = DEFAULT_CAT_NAMES
+
+            with record_function("build_kjt"):
+                sparse_mat = torch.stack([s.to(torch.long) for s in sparse_features], dim=0)
+                B = sparse_mat.shape[0]
+                values_list = [sparse_mat[:, i] for i in range(26)]
+                values = torch.cat(values_list, dim=0)
+                one_lengths = torch.ones(B, dtype=torch.int32, device=values.device)
+                lengths_list = [one_lengths for _ in range(26)]
+                lengths = torch.cat(lengths_list, dim=0)
+                sparse_batch = KeyedJaggedTensor.from_lengths_sync(
+                    keys=feature_names,
+                    values=values,
+                    lengths=lengths,
+                )
+
+            with record_function("stack_labels"):
+                labels_batch = torch.stack(labels)
+
+            return dense_batch, sparse_batch, labels_batch
     
     train_dataloader = DataLoader(
         train_dataloader.dataset,
@@ -384,7 +388,7 @@ def main(argv: List[str]) -> None:
     
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        schedule=schedule(wait=1, warmup=1, active=3, repeat=1),
+        schedule=schedule(wait=1, warmup=2, active=2, repeat=2),
         on_trace_ready=tensorboard_trace_handler("./logs_recstore") if dist.get_rank() == 0 else None,
         record_shapes=True,
         profile_memory=True,
@@ -399,25 +403,36 @@ def main(argv: List[str]) -> None:
             num_batches = 0
             
             for batch_idx, batch in enumerate(tqdm(train_dataloader, desc="Training")):
-                dense_features = batch[0].to(device)
-                sparse_features = batch[1].to(device)
-                labels = batch[2].to(device)
-                
-                optimizer.zero_grad()
-                outputs = model(dense_features, sparse_features)
-                loss = criterion(outputs, labels.float())
-                
-                loss.backward()
-                optimizer.step()
-                prof.step()
-                
-                train_loss += loss.item()
-                auroc_score = auroc(outputs.squeeze(), labels)
-                train_auroc += auroc_score.item()
-                num_batches += 1
-                
-                if batch_idx % 100 == 0:
-                    print(f"Batch {batch_idx}: Loss = {loss.item():.4f}, AUROC = {auroc_score.item():.4f}")
+                with record_function("train.batch"):
+                    with record_function("move_to_device"):
+                        dense_features = batch[0].to(device)
+                        sparse_features = batch[1].to(device)
+                        labels = batch[2].to(device)
+
+                    optimizer.zero_grad()
+
+                    with record_function("forward"):
+                        outputs = model(dense_features, sparse_features)
+
+                    with record_function("loss"):
+                        loss = criterion(outputs, labels.float())
+
+                    with record_function("backward"):
+                        loss.backward()
+
+                    with record_function("optimizer.step"):
+                        optimizer.step()
+
+                    prof.step()
+
+                    train_loss += loss.item()
+                    with record_function("metrics"):
+                        auroc_score = auroc(outputs.squeeze(), labels)
+                    train_auroc += auroc_score.item()
+                    num_batches += 1
+
+                    if batch_idx % 100 == 0:
+                        print(f"Batch {batch_idx}: Loss = {loss.item():.4f}, AUROC = {auroc_score.item():.4f}")
             
             avg_train_loss = train_loss / num_batches
             avg_train_auroc = train_auroc / num_batches
@@ -431,17 +446,22 @@ def main(argv: List[str]) -> None:
             
             with torch.no_grad():
                 for batch in tqdm(val_dataloader, desc="Validation"):
-                    dense_features = batch[0].to(device)
-                    sparse_features = batch[1].to(device)
-                    labels = batch[2].to(device)
-                    
-                    outputs = model(dense_features, sparse_features)
-                    loss = criterion(outputs, labels.float())
-                    
-                    val_loss += loss.item()
-                    auroc_score = auroc(outputs.squeeze(), labels)
-                    val_auroc += auroc_score.item()
-                    val_num_batches += 1
+                    with record_function("val.batch"):
+                        with record_function("move_to_device"):
+                            dense_features = batch[0].to(device)
+                            sparse_features = batch[1].to(device)
+                            labels = batch[2].to(device)
+
+                        with record_function("forward"):
+                            outputs = model(dense_features, sparse_features)
+                        with record_function("loss"):
+                            loss = criterion(outputs, labels.float())
+
+                        val_loss += loss.item()
+                        with record_function("metrics"):
+                            auroc_score = auroc(outputs.squeeze(), labels)
+                        val_auroc += auroc_score.item()
+                        val_num_batches += 1
             
             avg_val_loss = val_loss / val_num_batches
             avg_val_auroc = val_auroc / val_num_batches
@@ -451,6 +471,24 @@ def main(argv: List[str]) -> None:
             model.train()
             auroc.reset()
     
+        # Print a simple percentage breakdown (rank 0 only)
+        if dist.get_rank() == 0:
+            try:
+                events = prof.key_averages()
+                total_cpu = sum(getattr(e, "self_cpu_time_total", 0.0) for e in events)
+                total_cuda = sum(getattr(e, "self_cuda_time_total", 0.0) for e in events)
+                print("\n==== Profiler self-time breakdown (approx.) ====")
+                top_events = sorted(events, key=lambda e: (getattr(e, "self_cpu_time_total", 0.0) + getattr(e, "self_cuda_time_total", 0.0)), reverse=True)[:30]
+                for e in top_events:
+                    cpu_self = getattr(e, "self_cpu_time_total", 0.0)
+                    cuda_self = getattr(e, "self_cuda_time_total", 0.0)
+                    cpu_pct = (cpu_self / total_cpu * 100.0) if total_cpu > 0 else 0.0
+                    cuda_pct = (cuda_self / total_cuda * 100.0) if total_cuda > 0 else 0.0
+                    print(f"{e.key:40s} | CPU self: {cpu_pct:6.2f}% | CUDA self: {cuda_pct:6.2f}%")
+                print("==============================================\n")
+            except Exception as _:
+                pass
+
         print("Training completed!")
 
     dist.destroy_process_group()

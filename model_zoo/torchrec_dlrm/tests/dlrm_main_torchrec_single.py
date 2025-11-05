@@ -331,19 +331,25 @@ def main(argv: List[str]) -> None:
     val_dataloader = get_dataloader(args, "nccl" if torch.cuda.is_available() else "gloo", "val")
 
     def custom_collate(batch):
-        if not batch: return None
-        dense, sparse, labels = zip(*batch)
-        dense_batch = torch.stack([torch.as_tensor(d, dtype=torch.float32) for d in dense])
-        labels_batch = torch.stack([torch.as_tensor(l, dtype=torch.float32).view(1) for l in labels])
-        
-        from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
-        feature_names = DEFAULT_CAT_NAMES
-        sparse_mat = torch.stack([s.to(torch.long) for s in sparse], dim=0)
-        B = sparse_mat.shape[0]
-        values = torch.cat([sparse_mat[:, i] for i in range(26)], dim=0)
-        lengths = torch.ones(B * len(feature_names), dtype=torch.int32)
-        
-        return dense_batch, KeyedJaggedTensor.from_lengths_sync(keys=feature_names, values=values, lengths=lengths), labels_batch
+        with record_function("dataloader.collate"):
+            if not batch:
+                return None
+            dense, sparse, labels = zip(*batch)
+
+            with record_function("stack_dense"):
+                dense_batch = torch.stack([torch.as_tensor(d, dtype=torch.float32) for d in dense])
+            with record_function("stack_labels"):
+                labels_batch = torch.stack([torch.as_tensor(l, dtype=torch.float32).view(1) for l in labels])
+
+            from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
+            feature_names = DEFAULT_CAT_NAMES
+            with record_function("build_kjt"):
+                sparse_mat = torch.stack([s.to(torch.long) for s in sparse], dim=0)
+                B = sparse_mat.shape[0]
+                values = torch.cat([sparse_mat[:, i] for i in range(26)], dim=0)
+                lengths = torch.ones(B * len(feature_names), dtype=torch.int32)
+
+            return dense_batch, KeyedJaggedTensor.from_lengths_sync(keys=feature_names, values=values, lengths=lengths), labels_batch
     
     train_dataloader = DataLoader(train_dataloader.dataset, batch_size=args.batch_size, shuffle=True, drop_last=args.drop_last_training_batch, pin_memory=args.pin_memory, collate_fn=custom_collate, num_workers=0)
     val_dataloader = DataLoader(val_dataloader.dataset, batch_size=args.test_batch_size or args.batch_size, shuffle=False, drop_last=False, pin_memory=args.pin_memory, collate_fn=custom_collate, num_workers=0)
@@ -382,7 +388,7 @@ def main(argv: List[str]) -> None:
     
     with profile(
         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        schedule=schedule(wait=1, warmup=1, active=3, repeat=1),
+        schedule=schedule(wait=1, warmup=2, active=2, repeat=2),
         on_trace_ready=tensorboard_trace_handler("./logs_torchrec") if dist.get_rank() == 0 else None,
         record_shapes=True,
         profile_memory=True,
@@ -393,18 +399,24 @@ def main(argv: List[str]) -> None:
             print(f"Epoch {epoch + 1}/{args.epochs}")
             
             for batch in tqdm(train_dataloader, desc="Training"):
-                dense, sparse, labels = batch
-                dense = dense.to(device)
-                sparse = sparse.to(device)
-                labels = labels.to(device)
-                
-                optimizer.zero_grad()
-                outputs = model(dense, sparse)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
+                with record_function("train.batch"):
+                    with record_function("move_to_device"):
+                        dense, sparse, labels = batch
+                        dense = dense.to(device)
+                        sparse = sparse.to(device)
+                        labels = labels.to(device)
 
-                prof.step()
+                    optimizer.zero_grad()
+                    with record_function("forward"):
+                        outputs = model(dense, sparse)
+                    with record_function("loss"):
+                        loss = criterion(outputs, labels)
+                    with record_function("backward"):
+                        loss.backward()
+                    with record_function("optimizer.step"):
+                        optimizer.step()
+
+                    prof.step()
 
             print(f"Epoch {epoch + 1} training finished.")
 
@@ -412,16 +424,38 @@ def main(argv: List[str]) -> None:
             auroc.reset()
             with torch.no_grad():
                 for batch in tqdm(val_dataloader, desc="Validation"):
-                    dense, sparse, labels = batch
-                    dense = dense.to(device)
-                    sparse = sparse.to(device)
-                    labels = labels.to(device)
+                    with record_function("val.batch"):
+                        with record_function("move_to_device"):
+                            dense, sparse, labels = batch
+                            dense = dense.to(device)
+                            sparse = sparse.to(device)
+                            labels = labels.to(device)
 
-                    outputs = model(dense, sparse)
-                    auroc.update(outputs.squeeze(), labels.squeeze().long())
+                        with record_function("forward"):
+                            outputs = model(dense, sparse)
+                        with record_function("metrics"):
+                            auroc.update(outputs.squeeze(), labels.squeeze().long())
             
             val_auroc = auroc.compute().item()
             print(f"Validation AUROC for Epoch {epoch + 1}: {val_auroc:.4f}")
+
+        # Rank-0: print simple CPU/CUDA self-time percentage summary
+        if dist.get_rank() == 0:
+            try:
+                events = prof.key_averages()
+                total_cpu = sum(getattr(e, "self_cpu_time_total", 0.0) for e in events)
+                total_cuda = sum(getattr(e, "self_cuda_time_total", 0.0) for e in events)
+                print("\n==== TorchRec profiler self-time breakdown (approx.) ====")
+                top_events = sorted(events, key=lambda e: (getattr(e, "self_cpu_time_total", 0.0) + getattr(e, "self_cuda_time_total", 0.0)), reverse=True)[:30]
+                for e in top_events:
+                    cpu_self = getattr(e, "self_cpu_time_total", 0.0)
+                    cuda_self = getattr(e, "self_cuda_time_total", 0.0)
+                    cpu_pct = (cpu_self / total_cpu * 100.0) if total_cpu > 0 else 0.0
+                    cuda_pct = (cuda_self / total_cuda * 100.0) if total_cuda > 0 else 0.0
+                    print(f"{e.key:40s} | CPU self: {cpu_pct:6.2f}% | CUDA self: {cuda_pct:6.2f}%")
+                print("=======================================================\n")
+            except Exception:
+                pass
 
         print("Training completed!")
     
