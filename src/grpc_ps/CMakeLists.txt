@@ -51,6 +51,7 @@ target_link_libraries(grpc_ps_server PUBLIC
     glog
     TBB::tbb
     ${REPORT_LIB}
+    profiler
 )
 
 add_library(dist_grpc_ps_client
