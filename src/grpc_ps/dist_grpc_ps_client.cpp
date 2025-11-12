@@ -256,9 +256,6 @@ int DistributedGRPCParameterClient::GetParameter(const base::ConstArray<uint64_t
   return 0;
 }
 
-int DistributedGRPCParameterClient::AsyncGetParameter(const base::ConstArray<uint64_t>& keys, float* values) {
-  return GetParameter(keys, values);
-}
 
 int DistributedGRPCParameterClient::PutParameter(const base::ConstArray<uint64_t>& keys,
                                                  const std::vector<std::vector<float>>& values) {

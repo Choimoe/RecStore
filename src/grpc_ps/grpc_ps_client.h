@@ -75,6 +75,46 @@ struct PrefetchBatch {
     std::unique_ptr<grpc::CompletionQueue> cqs_;
 };
 
+struct PrewriteBatch {
+    PrewriteBatch(int request_num) {
+        batch_size_ = request_num;
+        key_sizes_.resize(request_num);
+        status_.resize(request_num);
+        requests_.resize(request_num);
+        responses_.resize(request_num);
+        response_readers_.resize(request_num);
+        cqs_ = std::make_unique<grpc::CompletionQueue>();
+        completed_count_ = 0;
+    }
+
+    PrewriteBatch(PrewriteBatch&& other) noexcept
+        : key_sizes_(std::move(other.key_sizes_)),
+          status_(std::move(other.status_)),
+          requests_(std::move(other.requests_)),
+          responses_(std::move(other.responses_)),
+          response_readers_(std::move(other.response_readers_)),
+          batch_size_(other.batch_size_),
+          cqs_(std::move(other.cqs_)),
+          completed_count_(other.completed_count_) 
+    {
+        other.batch_size_ = 0;
+    }
+    PrewriteBatch(const PrewriteBatch&) = delete;
+    PrewriteBatch& operator=(const PrewriteBatch&) = delete;
+
+    std::vector<int> key_sizes_;
+    std::vector<Status> status_;
+    std::vector<PutParameterRequest> requests_;
+    std::vector<PutParameterResponse> responses_;
+    std::vector<
+      std::unique_ptr<grpc::ClientAsyncResponseReader<PutParameterResponse>>>
+      response_readers_;
+
+    int batch_size_;
+    int completed_count_;
+    std::unique_ptr<grpc::CompletionQueue> cqs_;
+};
+
 class GRPCParameterClient : public recstore::BasePSClient {
 public:
   // 新的构造函数，接收 json 配置参数
@@ -87,8 +127,6 @@ public:
 
   // 实现 BasePSClient 的纯虚函数
   virtual int GetParameter(const base::ConstArray<uint64_t>& keys, float* values) override;
-
-  int AsyncGetParameter(const base::ConstArray<uint64_t>& keys, float* values) override;
 
   int PutParameter(const base::ConstArray<uint64_t>& keys, const std::vector<std::vector<float>>& values) override;
 
@@ -116,7 +154,8 @@ public:
   void WaitForPrefetch(uint64_t prefetch_id);
   bool GetPrefetchResult(uint64_t prefetch_id, std::vector<std::vector<float>>* values);
 
-  virtual uint64_t EmbWriteAsync(const base::RecTensor& keys, const base::RecTensor& values);
+  // 注意这里的value是应用，不同于Get时的指针。Get是兼容之前的写法
+  virtual uint64_t EmbWriteAsync(const base::ConstArray<uint64_t>& keys, const std::vector<std::vector<float>>&  values);
   virtual bool IsWriteDone(uint64_t write_id);
   virtual void WaitForWrite(uint64_t write_id);
 
@@ -142,6 +181,8 @@ public:
  private:
     
     std::unordered_map<uint64_t, struct PrefetchBatch> prefetch_batches_; 
+    std::unordered_map<uint64_t, struct PrewriteBatch> prewrite_batches_; 
     // start from 1
     uint64_t next_prefetch_id_ = 1; 
+    uint64_t next_prewrite_id_ = 1; 
 };

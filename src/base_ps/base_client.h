@@ -20,9 +20,6 @@ class BasePSClient {
   virtual int GetParameter(const base::ConstArray<uint64_t> &keys,
                            float *values) = 0;
 
-  virtual int AsyncGetParameter(const base::ConstArray<uint64_t> &keys,
-                                float *values) = 0;
-
   virtual int PutParameter(const base::ConstArray<uint64_t> &keys,
                            const std::vector<std::vector<float>> &values) = 0;
 

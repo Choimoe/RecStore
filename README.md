@@ -25,6 +25,9 @@ In ubuntu, simply:
 	sudo apt-get update
 	sudo apt-get install -y nvidia-container-toolkit
 
+Download git submodule:
+	git submodule update --init --recursive
+
 After installing docker and nvidia-docker, build the Docker image by running the following command in the `dockerfiles` directory:
 
 	cd dockerfiles
@@ -33,11 +36,12 @@ After installing docker and nvidia-docker, build the Docker image by running the
 
 And then start this container, by running the following commands. **Please modify corresponding pathes below**.
 
-	sudo docker run --cap-add=SYS_ADMIN --privileged --security-opt seccomp=unconfined --runtime=nvidia --name recstore --net=host -v /home/xieminhui/RecStore:/home/xieminhui/RecStore  -v /dev/shm:/dev/shm -v /dev/hugepages:/dev/hugepages -v /home/xieminhui/FrugalDataset:/home/xieminhui/FrugalDataset -v /home/xieminhui/dgl-data:/home/xieminhui/dgl-data -v /dev:/dev -w /home/xieminhui/RecStore --rm -it --gpus all -d recStore
+	sudo docker run --cap-add=SYS_ADMIN --privileged --security-opt seccomp=unconfined --runtime=nvidia --name recstore --net=host -v /home/xieminhui/RecStore:/home/xieminhui/RecStore  -v /dev/shm:/dev/shm -v /dev/hugepages:/dev/hugepages -v /home/xieminhui/FrugalDataset:/home/xieminhui/FrugalDataset -v /home/xieminhui/dgl-data:/home/xieminhui/dgl-data -v /dev:/dev -w /home/xieminhui/RecStore --rm -it --gpus all -d recstore
 
 or 
 	
-	cd dockerfiles && bash start_docker.sh && cd -
+	1: modify variable in start_docker.sh
+	2: cd dockerfiles && bash start_docker.sh && cd -
 
 Enter the container.
 
@@ -45,15 +49,18 @@ Enter the container.
 
 **We provide a script for one-click environment initialization**. Simply run the following command **in the docker** to set up the environment:
 
-	(inside docker) cd dockerfiles
-	(inside docker) bash init_env_inside_docker.sh
-
+	(inside docker) cd binary && pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple torch-2.5.0a0+git*.whl
+	(inside docker) cd ../dockerfiles
+	(inside docker) bash init_env_inside_docker.sh > init_env.log 2>&1
 
 ## Build RecStore
 
+	(inside docker) cd ..
 	(inside docker) mkdir build
 	(inside docker) cd build
-	(inside docker) cmake .. -DCMAKE_BUILD_TYPE=Release
+	(inside docker) find /usr -name "pybind11Config.cmake"
+	(inside docker) cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Dpybind11_DIR=/usr/local/lib/python3.10/dist-packages/pybind11/share/cmake/pybind11 .. -DCMAKE_BUILD_TYPE=Debug
+	(inside docker) make -j
 
 
 

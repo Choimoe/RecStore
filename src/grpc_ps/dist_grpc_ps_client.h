@@ -33,8 +33,6 @@ public:
   // 实现 BasePSClient 的纯虚函数
   int GetParameter(const base::ConstArray<uint64_t>& keys, float* values) override;
 
-  int AsyncGetParameter(const base::ConstArray<uint64_t>& keys, float* values) override;
-
   int PutParameter(const base::ConstArray<uint64_t>& keys, const std::vector<std::vector<float>>& values) override;
 
   void Command(PSCommand command) override;
