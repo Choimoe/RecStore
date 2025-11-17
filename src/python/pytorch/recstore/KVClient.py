@@ -82,7 +82,7 @@ class RecStoreClient:
         """Register UDF pull function."""
         raise NotImplementedError("register_pull_handler is not implemented for the ops-based client.")
 
-    def init_data(self, name: str, shape: Tuple[int, int], dtype: torch.dtype, part_policy: Any = None, init_func: Optional[Callable] = None, is_gdata: bool = True):
+    def init_data(self, name: str, shape: Tuple[int, int], dtype: torch.dtype, part_policy: Any = None, init_func: Optional[Callable] = None, is_gdata: bool = True, base_offset: int = 0):
         """Send message to kvserver to initialize new data tensor and mapping this
         data from server side to client side.
 
@@ -105,8 +105,8 @@ class RecStoreClient:
             print(f"Tensor '{name}' already exists. Skipping initialization.")
             return
 
-        print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype}.")
-        print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype}.")
+        print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype} (base_offset={base_offset}).")
+        print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype} (base_offset={base_offset}).")
         self._tensor_meta[name] = {'shape': shape, 'dtype': dtype}
         self._full_data_shape[name] = shape
         self._data_name_list.add(name)
@@ -119,6 +119,8 @@ class RecStoreClient:
             initial_data = torch.zeros(shape, dtype=dtype)
         
         all_keys = torch.arange(shape[0], dtype=torch.int64)
+        if base_offset != 0:
+            all_keys = all_keys + int(base_offset)
         self.ops.emb_write(all_keys, initial_data)
 
 
@@ -189,9 +191,16 @@ class RecStoreClient:
         embedding_dim = meta['shape'][1]
         
         # Ensure ids are on the correct device and dtype
+        # Normalize ids: force CPU, int64, contiguous
+        if not isinstance(ids, torch.Tensor):
+            raise TypeError("ids must be a torch.Tensor")
         if ids.dtype != torch.int64:
             ids = ids.to(dtype=torch.int64)
-        
+        if not ids.is_contiguous():
+            ids = ids.contiguous()
+        # Some upstream code may pass CUDA tensors; backend ops are CPU-only.
+        if ids.device.type != 'cpu':
+            ids = ids.to('cpu')
         return self.ops.emb_read(ids, embedding_dim)
 
     def push(self, name: str, ids: torch.Tensor, data: torch.Tensor):
@@ -218,8 +227,14 @@ class RecStoreClient:
 
         The returned handle should be consumed soon (same batch) to avoid cache pressure.
         """
+        if not isinstance(ids, torch.Tensor):
+            raise TypeError("ids must be a torch.Tensor")
         if ids.dtype != torch.int64:
             ids = ids.to(dtype=torch.int64)
+        if not ids.is_contiguous():
+            ids = ids.contiguous()
+        if ids.device.type != 'cpu':
+            ids = ids.to('cpu')
         return int(self.ops.emb_prefetch(ids))
 
     def wait_and_get(self, prefetch_id: int, embedding_dim: int, device: torch.device = torch.device("cpu")) -> torch.Tensor:

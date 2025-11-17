@@ -239,6 +239,25 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         default=2,
         help="Prefetch queue depth (batches)",
     )
+    parser.add_argument(
+        "--fuse-emb-tables",
+        dest="fuse_emb_tables",
+        action="store_true",
+        help="Enable embedding table fusion (single pull + prefix encoding).",
+    )
+    parser.add_argument(
+        "--no-fuse-emb-tables",
+        dest="fuse_emb_tables",
+        action="store_false",
+        help="Disable embedding table fusion and use per-feature pulls.",
+    )
+    parser.set_defaults(fuse_emb_tables=True)
+    parser.add_argument(
+        "--fuse-k",
+        type=int,
+        default=30,
+        help="Bit prefix shift (k) used for fusion: fused_id=(table_idx<<k)|row_id",
+    )
     
     args = parser.parse_args(argv)
     
@@ -361,7 +380,12 @@ def main(argv: List[str]) -> None:
         }
         for feature_idx, feature_name in enumerate(DEFAULT_CAT_NAMES)
     ]
-    embedding_bag_collection = RecStoreEmbeddingBagCollection(eb_configs)
+    embedding_bag_collection = RecStoreEmbeddingBagCollection(
+        eb_configs,
+        enable_fusion=args.fuse_emb_tables,
+        fusion_k=args.fuse_k,
+    )
+    print(f"Embedding fusion enabled: {args.fuse_emb_tables}; fusion_k={args.fuse_k}")
     prefetch_enabled = args.enable_prefetch
     if prefetch_enabled:
         try:

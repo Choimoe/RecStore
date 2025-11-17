@@ -13,6 +13,8 @@ DEFAULT_EPOCHS=1
 DEFAULT_DATASET_SIZE=4194304
 DEFAULT_ENABLE_PREFETCH=true
 DEFAULT_PREFETCH_DEPTH=2
+DEFAULT_FUSE_EMB=true
+DEFAULT_FUSE_K=30
 
 DLRM_PATH="$(pwd)"
 VENV_BASH="${DLRM_PATH}/dlrm_venv/bin/activate"
@@ -27,6 +29,8 @@ learning_rate=$DEFAULT_LEARNING_RATE
 epochs=$DEFAULT_EPOCHS
 enable_prefetch=$DEFAULT_ENABLE_PREFETCH
 prefetch_depth=$DEFAULT_PREFETCH_DEPTH
+fuse_emb_tables=$DEFAULT_FUSE_EMB
+fuse_k=$DEFAULT_FUSE_K
 
 show_help() {
     echo "DLRM Training Script with Performance Metrics"
@@ -50,6 +54,11 @@ show_help() {
     echo "  --enable-prefetch           Enable async prefetch (default: $DEFAULT_ENABLE_PREFETCH)"
     echo "  --disable-prefetch          Disable async prefetch"
     echo "  --prefetch-depth N          Prefetch queue depth (default: $DEFAULT_PREFETCH_DEPTH)"
+    echo ""
+    echo "RecStore Fusion (RecStore mode only):"
+    echo "  --enable-fuse-emb           Enable embedding table fusion (default: $DEFAULT_FUSE_EMB)"
+    echo "  --disable-fuse-emb          Disable embedding table fusion"
+    echo "  --fuse-k K                  Bit prefix shift k (default: $DEFAULT_FUSE_K)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -134,6 +143,24 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --enable-fuse-emb)
+            fuse_emb_tables=true
+            shift
+            ;;
+        --disable-fuse-emb|--no-fuse-emb)
+            fuse_emb_tables=false
+            shift
+            ;;
+        --fuse-k)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                fuse_k="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                show_help
+                exit 1
+            fi
+            ;;
         *)
             echo "Error: Unknown option $1" >&2
             show_help
@@ -164,6 +191,8 @@ echo "Env. Path:                $VENV_BASH"
 if [ "$mode" = "RecStore" ]; then
 echo "Enable Prefetch:         $enable_prefetch"
 echo "Prefetch Depth:          $prefetch_depth"
+echo "Fusion Enabled:          $fuse_emb_tables"
+echo "Fusion k (shift):        $fuse_k"
 fi
 echo "=========================================="
 
@@ -202,6 +231,12 @@ if [ "$mode" = "RecStore" ]; then
         extra_args+=(--enable_prefetch)
         extra_args+=(--prefetch_depth "$prefetch_depth")
     fi
+    if [ "$fuse_emb_tables" = true ]; then
+        extra_args+=(--fuse-emb-tables)
+    else
+        extra_args+=(--no-fuse-emb-tables)
+    fi
+    extra_args+=(--fuse-k "$fuse_k")
 fi
 torchrun --nnodes 1 \
     --nproc_per_node 1 \
