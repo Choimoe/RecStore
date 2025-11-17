@@ -11,6 +11,8 @@ DEFAULT_BATCH_SIZE=1024
 DEFAULT_LEARNING_RATE=0.005
 DEFAULT_EPOCHS=1
 DEFAULT_DATASET_SIZE=4194304
+DEFAULT_ENABLE_PREFETCH=true
+DEFAULT_PREFETCH_DEPTH=2
 
 DLRM_PATH="$(pwd)"
 VENV_BASH="${DLRM_PATH}/dlrm_venv/bin/activate"
@@ -23,6 +25,8 @@ processed_dataset_path=$DEFAULT_PROCESSED_DATASET_PATH
 batch_size=$DEFAULT_BATCH_SIZE
 learning_rate=$DEFAULT_LEARNING_RATE
 epochs=$DEFAULT_EPOCHS
+enable_prefetch=$DEFAULT_ENABLE_PREFETCH
+prefetch_depth=$DEFAULT_PREFETCH_DEPTH
 
 show_help() {
     echo "DLRM Training Script with Performance Metrics"
@@ -41,6 +45,11 @@ show_help() {
     echo "Mode Selection (choose one):"
     echo "  --torchrec                  Use TorchRec baseline (default: custom recstore)"
     echo "  --custom                    Use custom recstore (default behavior)"
+    echo ""
+    echo "RecStore Prefetch (RecStore mode only):"
+    echo "  --enable-prefetch           Enable async prefetch (default: $DEFAULT_ENABLE_PREFETCH)"
+    echo "  --disable-prefetch          Disable async prefetch"
+    echo "  --prefetch-depth N          Prefetch queue depth (default: $DEFAULT_PREFETCH_DEPTH)"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -107,6 +116,24 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --enable-prefetch)
+            enable_prefetch=true
+            shift
+            ;;
+        --disable-prefetch|--no-prefetch)
+            enable_prefetch=false
+            shift
+            ;;
+        --prefetch-depth)
+            if [[ -n "$2" && "$2" != -* ]]; then
+                prefetch_depth="$2"
+                shift 2
+            else
+                echo "Error: Argument for $1 is missing" >&2
+                show_help
+                exit 1
+            fi
+            ;;
         *)
             echo "Error: Unknown option $1" >&2
             show_help
@@ -134,6 +161,10 @@ echo "Learning Rate:            $learning_rate"
 echo "Epochs:                   $epochs"
 echo "Script Path:              $script_to_run"
 echo "Env. Path:                $VENV_BASH"
+if [ "$mode" = "RecStore" ]; then
+echo "Enable Prefetch:         $enable_prefetch"
+echo "Prefetch Depth:          $prefetch_depth"
+fi
 echo "=========================================="
 
 source ${VENV_BASH}
@@ -165,6 +196,13 @@ start_time=$(date +%s.%N)
 start_seconds=$(date +%s)
 
 echo "Starting training..."
+extra_args=()
+if [ "$mode" = "RecStore" ]; then
+    if [ "$enable_prefetch" = true ]; then
+        extra_args+=(--enable_prefetch)
+        extra_args+=(--prefetch_depth "$prefetch_depth")
+    fi
+fi
 torchrun --nnodes 1 \
     --nproc_per_node 1 \
     --rdzv_backend c10d \
@@ -179,6 +217,7 @@ torchrun --nnodes 1 \
     --pin_memory \
     --mmap_mode \
     --embedding_dim 128 \
+    "${extra_args[@]}" \
     --adagrad > training_output.$dataset_size.$mode.$(date +%Y%m%d%H%M%S).log 2>&1
 
 
