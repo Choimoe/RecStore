@@ -88,7 +88,7 @@ struct EmbeddingTableConfig {
 
 ## 配置
 
-参数服务器通过 JSON 配置文件指定后端类型和参数。详见 [config.md](./config.md)。
+参数服务器通过 JSON 配置文件指定后端类型和参数。详见 [config.md](../config.md)。
 
 基本配置结构：
 

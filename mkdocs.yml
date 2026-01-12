@@ -1,0 +1,82 @@
+site_name: RecStore Documentation
+site_description: RecStore is a high-performance, distributed parameter server system designed for machine learning applications.
+site_author: RecStore Team
+repo_url: https://github.com/RecStore/RecStore
+repo_name: RecStore
+edit_uri: 'https://github.com/RecStore/RecStore/edit/main/docs'
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+  font:
+    text: 'Fira Sans'
+    code: 'Fira Mono'
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - 首页: README.md
+  - 配置: config.md
+  - 参数服务器:
+    - 总览: parameter_server/index.md
+    - 基础抽象: parameter_server/base.md
+    - gRPC 实现: parameter_server/grpc.md
+    - bRPC 实现: parameter_server/brpc.md
+    - 协议定义: parameter_server/proto.md
+    - RDMA 模块: parameter_server/rdma.md
+  - 存储:
+    - 架构总览: storage/index.md
+    - CachePS 层: storage/cacheps.md
+    - BaseKV 抽象: storage/basekv.md
+    - KV 引擎实现: storage/kv_engines.md
+    - 内存管理: storage/memory.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/RecStore/RecStore
