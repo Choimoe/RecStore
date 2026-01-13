@@ -14,6 +14,8 @@
 #include <string>
 #include <fstream>
 
+// test for update
+
 // Assuming InitStrategyType is defined in base/tensor.h
 #include "base/tensor.h"
 #include "op.h"
