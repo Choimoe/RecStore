@@ -46,6 +46,17 @@ jobs:
             submodules-${{ runner.os }}-${{ hashFiles('.gitmodules') }}
             submodules-${{ runner.os }}-
 
+      - name: Cache init env artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/grpc-install
+            third_party/brpc-install
+            third_party/libtorch
+          key: init-env-${{ runner.os }}-${{ hashFiles('dockerfiles/init_env_inside_docker.sh', '.gitmodules') }}
+          restore-keys: |
+            init-env-${{ runner.os }}-
+
       - name: Update submodules
         run: |
           set -euo pipefail

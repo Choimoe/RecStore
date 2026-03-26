@@ -6,14 +6,7 @@ set -x
 set -e
 
 USER="$(whoami)"
-PROJECT_PATH="$(cd .. && pwd)"
-
-LOG_TS="$(date +%Y%m%d_%H%M%S)"
-LOG_FILE="${PROJECT_PATH}/init_env_${LOG_TS}.log"
-echo "Init env log: ${LOG_FILE}"
-exec > >(tee -a "${LOG_FILE}") 2>&1
-
-sudo service ssh start
+PROJECT_PATH="${PROJECT_PATH_OVERRIDE:-$(cd .. && pwd)}"
 
 CMAKE_REQUIRE="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 GPU_ARCH="80"
@@ -31,7 +24,77 @@ LIBTORCH_VARIANT="${LIBTORCH_VARIANT:-${CUDA_VERSION}}"  # default to CUDA varia
 
 MARKER_DIR="/tmp/env_setup_markers"
 
-if [ "$USER" = "root" ]; then
+all_steps() {
+    grep -oE '^step_[a-zA-Z0-9_]+\(\)' "$SCRIPT_PATH" | cut -d '(' -f1
+}
+
+selected_steps() {
+    if [ "${CI_MINIMAL_DEPS:-0}" = "1" ]; then
+        cat <<'EOF'
+step_base
+step_liburing
+step_glog
+step_gperftools
+step_cityhash
+step_torch
+step_arrow
+step_cpptrace
+step_libtorch_abi
+step_GRPC
+step_brpc
+EOF
+    else
+        all_steps
+    fi
+}
+
+step_cache_status() {
+    case "$1" in
+        step_libtorch_abi)
+            local libtorch_dir="${PROJECT_PATH}/third_party/libtorch"
+            if [ -f "${libtorch_dir}/libtorch.zip" ] && [ -d "${libtorch_dir}/libtorch" ]; then
+                echo "CACHED"
+            else
+                echo "RUN"
+            fi
+            ;;
+        step_GRPC)
+            if [ -f "${PROJECT_PATH}/third_party/grpc-install/lib/libgrpc++.so" ] || \
+               [ -f "${PROJECT_PATH}/third_party/grpc-install/lib64/libgrpc++.so" ]; then
+                echo "CACHED"
+            else
+                echo "RUN"
+            fi
+            ;;
+        step_brpc)
+            if [ -f "${PROJECT_PATH}/third_party/brpc-install/lib/libbrpc.so" ] || \
+               [ -f "${PROJECT_PATH}/third_party/brpc-install/lib64/libbrpc.so" ]; then
+                echo "CACHED"
+            else
+                echo "RUN"
+            fi
+            ;;
+        *)
+            echo "RUN"
+            ;;
+    esac
+}
+
+if [ -n "${LIST_STEP_ACTION_ONLY:-}" ]; then
+    step_cache_status "${LIST_STEP_ACTION_ONLY}"
+    exit 0
+fi
+
+LOG_TS="$(date +%Y%m%d_%H%M%S)"
+LOG_FILE="${PROJECT_PATH}/init_env_${LOG_TS}.log"
+echo "Init env log: ${LOG_FILE}"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+sudo service ssh start
+
+if [ -n "${TARGET_DIR_OVERRIDE:-}" ]; then
+    target_dir="${TARGET_DIR_OVERRIDE}"
+elif [ "$USER" = "root" ]; then
     target_dir="/root"
 else
     target_dir="/home/$USER"
@@ -184,6 +247,10 @@ step_cpptrace() {
 }
 
 step_libtorch_abi() {
+    if [ "$(step_cache_status step_libtorch_abi)" = "CACHED" ]; then
+        echo "Skipping libtorch ABI download because cached artifacts already exist"
+        return 0
+    fi
     local libtorch_dir="${PROJECT_PATH}/third_party/libtorch"
     local zip_file="${libtorch_dir}/libtorch.zip"
     local extracted_marker="${libtorch_dir}/libtorch"
@@ -242,6 +309,10 @@ step_HugeCTR() {
 
 # GRPC
 step_GRPC() {
+    if [ "$(step_cache_status step_GRPC)" = "CACHED" ]; then
+        echo "Skipping gRPC build because cached install artifacts already exist"
+        return 0
+    fi
     cd ${PROJECT_PATH}/third_party/grpc
     export MY_INSTALL_DIR=${PROJECT_PATH}/third_party/grpc-install
     rm -rf cmake/build
@@ -290,6 +361,10 @@ step_libibverbs() {
 }
 
 step_brpc() {
+    if [ "$(step_cache_status step_brpc)" = "CACHED" ]; then
+        echo "Skipping brpc build because cached install artifacts already exist"
+        return 0
+    fi
 
     sudo apt install -y libleveldb-dev
     # protobuf
@@ -330,7 +405,13 @@ step_brpc() {
 mkdir -p "${MARKER_DIR}"
 [ "$1" = "--clean" ]&&{ echo "Cleaning all markers..."; rm -rf "${MARKER_DIR:?}"; exit 0; };
 marker_path(){ echo "${MARKER_DIR}/${1}.done"; }
-steps=($(grep -oE '^step_[a-zA-Z0-9_]+\(\)' "$SCRIPT_PATH" | cut -d '(' -f1))
+steps=($(selected_steps))
+
+if [ "${LIST_STEPS_ONLY:-0}" = "1" ]; then
+    printf '%s\n' "${steps[@]}"
+    exit 0
+fi
+
 declare -a step_names=()
 declare -A step_status=()
 declare -A step_duration_sec=()
