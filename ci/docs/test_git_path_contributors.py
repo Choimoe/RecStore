@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 
@@ -26,6 +27,46 @@ time 2024-02-03 04:05:06 +0000
 4\t0\tsrc/a.py
 
 """
+
+
+REVIEWER_COMMITS = [
+    {
+        "commit": "c1",
+        "author": "Alice",
+        "author_email": "alice@example.com",
+        "time": "2024-01-04 00:00:00 +0000",
+        "added_lines": 1,
+        "deleted_lines": 0,
+        "files": ["src/a.py"],
+    },
+    {
+        "commit": "c2",
+        "author": "Alice",
+        "author_email": "alice@example.com",
+        "time": "2024-01-03 00:00:00 +0000",
+        "added_lines": 2,
+        "deleted_lines": 1,
+        "files": ["src/a.py"],
+    },
+    {
+        "commit": "c3",
+        "author": "Bob",
+        "author_email": "bob@example.com",
+        "time": "2024-01-02 00:00:00 +0000",
+        "added_lines": 3,
+        "deleted_lines": 0,
+        "files": ["src/a.py", "src/b.py"],
+    },
+    {
+        "commit": "c4",
+        "author": "Carol",
+        "author_email": "carol@example.com",
+        "time": "2024-01-01 00:00:00 +0000",
+        "added_lines": 4,
+        "deleted_lines": 0,
+        "files": ["src/b.py"],
+    },
+]
 
 
 class GitPathContributorsTest(unittest.TestCase):
@@ -65,6 +106,92 @@ class GitPathContributorsTest(unittest.TestCase):
         self.assertIn("Time: 2024-01-02 03:04:05 +0000", report)
         self.assertIn("Lines: +13 -3", report)
         self.assertIn("Files: src/a.py, src/b.py", report)
+
+    def test_collect_top_reviewers_skips_pr_author_and_deduplicates(self):
+        def resolve_login(candidate):
+            return {
+                "alice@example.com": "alice-gh",
+                "bob@example.com": "bob-gh",
+                "carol@example.com": "carol-gh",
+            }.get(candidate["author_email"])
+
+        reviewers = MODULE.collect_top_reviewers(
+            ["src/a.py", "src/b.py"],
+            REVIEWER_COMMITS,
+            pr_author_login="alice-gh",
+            resolve_login=resolve_login,
+        )
+
+        self.assertEqual(
+            [
+                {
+                    "login": "bob-gh",
+                    "source_file": "src/a.py",
+                    "author": "Bob",
+                    "author_email": "bob@example.com",
+                    "commit": "c3",
+                    "commit_count": 1,
+                },
+            ],
+            reviewers,
+        )
+
+    def test_collect_top_reviewers_skips_unresolved_candidates(self):
+        def resolve_login(candidate):
+            return {
+                "carol@example.com": "carol-gh",
+            }.get(candidate["author_email"])
+
+        reviewers = MODULE.collect_top_reviewers(
+            ["src/b.py"],
+            REVIEWER_COMMITS,
+            pr_author_login="pr-author",
+            resolve_login=resolve_login,
+        )
+
+        self.assertEqual(
+            [
+                {
+                    "login": "carol-gh",
+                    "source_file": "src/b.py",
+                    "author": "Carol",
+                    "author_email": "carol@example.com",
+                    "commit": "c4",
+                    "commit_count": 1,
+                }
+            ],
+            reviewers,
+        )
+
+    def test_render_reviewer_payload_outputs_json(self):
+        payload = MODULE.render_reviewer_payload(
+            [
+                {
+                    "login": "bob-gh",
+                    "source_file": "src/a.py",
+                    "author": "Bob",
+                    "author_email": "bob@example.com",
+                    "commit": "c3",
+                    "commit_count": 1,
+                }
+            ]
+        )
+
+        self.assertEqual(
+            {
+                "reviewers": [
+                    {
+                        "login": "bob-gh",
+                        "source_file": "src/a.py",
+                        "author": "Bob",
+                        "author_email": "bob@example.com",
+                        "commit": "c3",
+                        "commit_count": 1,
+                    }
+                ]
+            },
+            json.loads(payload),
+        )
 
 
 if __name__ == "__main__":

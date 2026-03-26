@@ -1,0 +1,135 @@
+name: Auto Reviewers
+
+on:
+  pull_request_target:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  request-reviewers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Get changed files
+        id: changes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+
+            const changedFiles = files.map((file) => file.filename);
+            fs.writeFileSync('/tmp/changed_files.txt', changedFiles.join('\n'));
+            core.setOutput('count', String(changedFiles.length));
+
+      - name: Select reviewers
+        id: reviewers
+        if: steps.changes.outputs.count != '0'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 ci/docs/git_path_contributors.py \
+            --changed-files-file /tmp/changed_files.txt \
+            --pr-author-login "${{ github.event.pull_request.user.login }}" \
+            > /tmp/reviewers.json
+          cat /tmp/reviewers.json
+
+          echo "payload<<EOF" >> $GITHUB_OUTPUT
+          cat /tmp/reviewers.json >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("/tmp/reviewers.json", "r", encoding="utf-8") as handle:
+              payload = json.load(handle)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(
+                  "has_reviewers={}\n".format(
+                      "true" if payload.get("reviewers") else "false"
+                  )
+              )
+          PY
+
+      - name: Request reviewers
+        if: steps.reviewers.outputs.has_reviewers == 'true'
+        uses: actions/github-script@v7
+        env:
+          REVIEWER_PAYLOAD: ${{ steps.reviewers.outputs.payload }}
+        with:
+          script: |
+            const payload = JSON.parse(process.env.REVIEWER_PAYLOAD);
+            const prAuthor = context.payload.pull_request.user.login;
+
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            const existingRequested = new Set(
+              (pullRequest.requested_reviewers || []).map((reviewer) => reviewer.login),
+            );
+
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+            const existingReviewed = new Set(
+              reviews
+                .map((review) => review.user && review.user.login)
+                .filter(Boolean),
+            );
+
+            const resolved = [];
+            for (const reviewer of payload.reviewers) {
+              const login = reviewer.login;
+              if (!login || login === prAuthor || existingRequested.has(login) || existingReviewed.has(login)) {
+                continue;
+              }
+
+              try {
+                await github.rest.repos.checkCollaborator({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  username: login,
+                });
+                resolved.push(login);
+              } catch (error) {
+                core.info(`Skip non-collaborator reviewer candidate: ${login}`);
+              }
+            }
+
+            const reviewers = [...new Set(resolved)];
+            if (reviewers.length === 0) {
+              core.info('No eligible reviewers to request.');
+              return;
+            }
+
+            await github.rest.pulls.requestReviewers({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              reviewers,
+            });
