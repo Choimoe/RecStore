@@ -1,42 +1,18 @@
-ARG IMAGE_VERSION=23.06-tf2-py3
-FROM nvcr.io/nvidia/tensorflow:${IMAGE_VERSION} AS devel
-ARG username=xieminhui
-ARG uid=1000
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04 AS devel
 
-ARG UBUNTU_VERSION
-
-ARG RELEASE=false
-ARG SM="60;61;70;75;80"
-ARG VAL_MODE=OFF
-ARG ENABLE_MULTINODES=ON
-
-RUN apt-get remove --auto-remove -y cmake  && \
-    rm -rfv /usr/local/mpi /usr/local/ucx
-
-
-# ENV http_proxy=http://127.0.0.1:7890
-# ENV https_proxy=http://127.0.0.1:7890
-
-ENV no_proxy=localhost,127.0.0.1,kwaidc.com
+ENV no_proxy=localhost,127.0.0.1
 ENV CC=/usr/bin/gcc
 ENV CXX=/usr/bin/g++
-
-
 
 RUN sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
 RUN sed -i "s@http://.*security.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
 
-
-
 RUN apt-get update -y && \
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-setuptools python3-wheel \
+      gcc g++ \
       vim gdb git wget tar unzip curl clang-format libboost-all-dev && \
       rm -rf /var/lib/apt/lists/*
-
-# 不要装conda，要用docker image自带的TF
-
-
-RUN rm -rfv /opt/conda/include/nccl.h /opt/conda/lib/libnccl* /opt/conda/include/google /opt/conda/include/*cudnn* /opt/conda/lib/*cudnn* /opt/conda/lib/libcudart*
 
 
 RUN pip3 install "cmake"
@@ -48,7 +24,9 @@ OMPI_MCA_osc="ucx" \
 UCX_MEMTYPE_CACHE=n
 
 
-RUN ln -s /usr/lib/x86_64-linux-gnu/libibverbs.so.1.11.32.1 /usr/lib/x86_64-linux-gnu/libibverbs.so
+RUN if [ ! -e /usr/lib/x86_64-linux-gnu/libibverbs.so ] && [ -e /usr/lib/x86_64-linux-gnu/libibverbs.so.1 ]; then \
+      ln -s /usr/lib/x86_64-linux-gnu/libibverbs.so.1 /usr/lib/x86_64-linux-gnu/libibverbs.so; \
+    fi
 
 
 RUN apt-get update -y && \
@@ -56,7 +34,6 @@ RUN apt-get update -y && \
   libboost-all-dev \
   libevent-dev \
   libdouble-conversion-dev \
-  libgoogle-glog-dev \
   libgflags-dev \
   libiberty-dev \
   liblz4-dev \
@@ -75,46 +52,17 @@ RUN apt-get update -y && \
   check \
   sudo \
   libtbb-dev \
-  libmemcached-dev 
-
-RUN apt remove -y libgoogle-glog-dev
-
-RUN mkdir /var/run/dbus
-
-RUN apt-get update -y && \
-  apt-get install -y zsh fzf google-perftools openssh-server software-properties-common
+  libmemcached-dev \
+  libaio-dev \
+  zsh fzf google-perftools openssh-server software-properties-common kmod
 
 
-# create user
-RUN echo "${username} ALL=(ALL) NOPASSWD:ALL" >>/etc/sudoers
-RUN echo "root:1234" | chpasswd
-RUN useradd --uid=${uid} ${username}
-RUN mkdir /home/${username}
-RUN chown -R ${uid}:${uid} /home/${username}
-
-RUN service ssh restart
-RUN apt-get install -y kmod
-
-
-RUN  ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo 'Asia/Shanghai' >/etc/timezone
+RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo 'Asia/Shanghai' >/etc/timezone
 RUN sed -i 's/#Port 22/Port 22222/g' /etc/ssh/sshd_config
 
 RUN pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple numpy pandas scikit-learn ortools jupyter tqdm && \
 pip3 cache purge
 
-USER ${uid}:${uid}
-WORKDIR /home/${username}
-
-RUN mkdir .ssh
-RUN chmod 600 .ssh/authorized_keys || true
-
 RUN alias sudo='sudo PATH="$PATH" HOME="$HOME" LD_LIBRARY_PATH="$LD_LIBRARY_PATH"'
-RUN sudo rm -f /opt/conda/lib/libtinfo*
-RUN sudo rm -rf /opt/conda/include/grpc*
-
-RUN sudo chown -R ${uid}:${uid} /opt/conda/ || true
-
 ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
-ENV PATH=/opt/hpcx/ompi/bin/:$PATH
-
-RUN sudo apt-get install -y libaio-dev
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

@@ -4,6 +4,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 cd "$SCRIPT_DIR"
 set -x
 set -e
+git config --global --add safe.directory '*'
 
 USER="$(whoami)"
 PROJECT_PATH="$(cd .. && pwd)"
@@ -154,6 +155,11 @@ step_spdk() {
 # "
 
 step_torch() {
+    if [ "${CI:-}" = "1" ] || [ "${CI:-}" = "true" ] || [ "${GITHUB_ACTIONS:-}" = "true" ] || [ -n "${GITLAB_CI:-}" ] || [ -n "${JENKINS_URL:-}" ] || [ -n "${BUILD_BUILDID:-}" ]; then
+        echo "Skipping torch install because CI environment detected"
+        return 0
+    fi
+
     mkdir -p ${PROJECT_PATH}/binary
     cd ${PROJECT_PATH}/binary
     ################################################################################
@@ -161,7 +167,7 @@ step_torch() {
     #     (binary/pytorch/dist/torch-2.5.0a0+gita8d6afb-cp310-cp310-linux_x86_64.whl)
     #     TODO: Manually compile and install torch commands or share wheel files.
     ################################################################################
-    # pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple torch-2.5.0a0+git*.whl
+    pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple torch-2.6.0a0+git2236df1-cp310-cp310-linux_x86_64.whl
     # pip install torch==${TORCH_VERSION} --index-url https://download.pytorch.org/whl/cu118
 }
 

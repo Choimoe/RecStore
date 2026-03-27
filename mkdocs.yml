@@ -69,6 +69,7 @@ nav:
     - 介绍: index.md
     - 快速开始:
       - 搭建指南: quickstart.md
+      - 快速运行: quick_run.md
       - 常见问题: faq.md
   - 配置:
       - 项目配置: config.md

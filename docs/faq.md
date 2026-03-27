@@ -91,3 +91,18 @@
 
 ??? failure "E20260117 01:49:19.761556 970021 engine_extendible_hash.h:88] shm malloc failed (OOM?), key: 93068 size: 512"
     配置文件中 `cache_ps.base_kv_config.capacity` 设置过小，导致无法分配足够的共享内存，可以尝试调大该值。
+
+
+??? failure "Fail to listen 127.0.0.1:xxxxx/xxxxx"
+    说明端口已被旧进程占用，先检查并清理：
+
+    ```bash
+    ps aux | grep ps_server
+    ```
+
+??? failure "run_single_day.sh: ... bc: command not found"
+    该问题只影响 `run_single_day.sh` 的耗时上报，不影响训练主体。可安装：
+
+    ```bash
+    sudo apt-get update && sudo apt-get install -y bc
+    ```
