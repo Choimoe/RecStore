@@ -51,6 +51,10 @@ step_base() {
 
 step_liburing() {
     cd ${PROJECT_PATH}/third_party/liburing
+    if [ ! -x ./configure ]; then
+        echo "Missing third_party/liburing/configure. Please run: git submodule update --init --recursive" >&2
+        return 1
+    fi
     ./configure --cc=gcc --cxx=g++
     make ${MAKE_OPTS}
     make liburing.pc
