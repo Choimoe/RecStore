@@ -1,0 +1,3 @@
+SingleDayLaunchConfig.batch_size = 128
+SingleDayLaunchConfig.epochs = 1
+SingleDayLaunchConfig.run_name = "debug"

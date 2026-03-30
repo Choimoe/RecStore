@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import types
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -77,6 +79,43 @@ class LaunchConfigMergeTest(unittest.TestCase):
         self.assertEqual(config.batch_size, 1024)
         self.assertFalse(config.enable_prefetch)
 
+    def test_multi_config_layer_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir) / "base.gin"
+            backend = Path(tmpdir) / "backend.gin"
+            preset = Path(tmpdir) / "preset.gin"
+            base.write_text(
+                "\n".join(
+                    [
+                        "SingleDayLaunchConfig.batch_size = 256",
+                        "SingleDayLaunchConfig.use_torchrec = False",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            backend.write_text(
+                "\n".join(
+                    [
+                        "SingleDayLaunchConfig.use_torchrec = True",
+                        "SingleDayLaunchConfig.embedding_storage = 'uvm'",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            preset.write_text(
+                "SingleDayLaunchConfig.batch_size = 1024",
+                encoding="utf-8",
+            )
+
+            config = build_config_from_sources(
+                gin_configs=[str(base), str(backend), str(preset)],
+                gin_bindings=[],
+                cli_overrides={},
+            )
+        self.assertTrue(config.use_torchrec)
+        self.assertEqual(config.embedding_storage, "uvm")
+        self.assertEqual(config.batch_size, 1024)
+
 
 class LaunchConfigApplyTest(unittest.TestCase):
     def test_apply_config_only_sets_missing_values(self) -> None:
@@ -125,6 +164,9 @@ class LaunchConfigApplyTest(unittest.TestCase):
 
 class LaunchConfigParserIntegrationTest(unittest.TestCase):
     def test_parser_accepts_gin_flags(self) -> None:
+        sys.modules["report_uploader"] = types.SimpleNamespace(
+            report_metric=lambda *args, **kwargs: True
+        )
         from model_zoo.torchrec_dlrm.tests import dlrm_main_single_day
 
         with tempfile.TemporaryDirectory() as tmpdir:

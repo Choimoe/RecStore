@@ -22,6 +22,12 @@ class SingleDayLaunchConfig:
     trace_file: str = ""
     allow_tf32: bool = False
     embedding_storage: str = "hbm"
+    log_dir: str = "runs"
+    run_name: str = ""
+    nproc_per_node: int = 1
+    rdzv_backend: str = "c10d"
+    rdzv_endpoint: str = "localhost"
+    rdzv_id: str = ""
 
 
 _CONFIG_FIELDS = {
@@ -37,6 +43,12 @@ _CONFIG_FIELDS = {
     "trace_file",
     "allow_tf32",
     "embedding_storage",
+    "log_dir",
+    "run_name",
+    "nproc_per_node",
+    "rdzv_backend",
+    "rdzv_endpoint",
+    "rdzv_id",
 }
 
 _ARG_TO_CONFIG_KEY = {
@@ -51,6 +63,12 @@ _ARG_TO_CONFIG_KEY = {
     "trace_file": "trace_file",
     "allow_tf32": "allow_tf32",
     "embedding_storage": "embedding_storage",
+    "log_dir": "log_dir",
+    "run_name": "run_name",
+    "nproc_per_node": "nproc_per_node",
+    "rdzv_backend": "rdzv_backend",
+    "rdzv_endpoint": "rdzv_endpoint",
+    "rdzv_id": "rdzv_id",
 }
 
 _CLI_OPTION_TO_CONFIG_KEY = {
@@ -77,6 +95,18 @@ _CLI_OPTION_TO_CONFIG_KEY = {
     "--trace_file": "trace_file",
     "--prefetch_depth": "prefetch_depth",
     "--embedding_storage": "embedding_storage",
+    "--log-dir": "log_dir",
+    "--run-name": "run_name",
+    "--nproc-per-node": "nproc_per_node",
+    "--rdzv-backend": "rdzv_backend",
+    "--rdzv-endpoint": "rdzv_endpoint",
+    "--rdzv-id": "rdzv_id",
+    "--log_dir": "log_dir",
+    "--run_name": "run_name",
+    "--nproc_per_node": "nproc_per_node",
+    "--rdzv_backend": "rdzv_backend",
+    "--rdzv_endpoint": "rdzv_endpoint",
+    "--rdzv_id": "rdzv_id",
 }
 
 
@@ -106,10 +136,10 @@ def _parse_gin_assignment(expression: str) -> Optional[tuple[str, Any]]:
 
 
 def _load_gin_values_with_fallback(
-    gin_config: Optional[str], gin_bindings: Iterable[str]
+    gin_configs: Iterable[str], gin_bindings: Iterable[str]
 ) -> Dict[str, Any]:
     values: Dict[str, Any] = {}
-    if gin_config:
+    for gin_config in gin_configs:
         with open(gin_config, "r", encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.strip()
@@ -128,13 +158,13 @@ def _load_gin_values_with_fallback(
     return values
 
 
-def _load_gin_values(gin_config: Optional[str], gin_bindings: Iterable[str]) -> Dict[str, Any]:
+def _load_gin_values(gin_configs: Iterable[str], gin_bindings: Iterable[str]) -> Dict[str, Any]:
     if gin is None:
-        return _load_gin_values_with_fallback(gin_config, gin_bindings)
+        return _load_gin_values_with_fallback(gin_configs, gin_bindings)
 
     gin.clear_config()
     try:
-        if gin_config:
+        for gin_config in gin_configs:
             gin.parse_config_file(gin_config)
         if gin_bindings:
             gin.parse_config(list(gin_bindings))
@@ -145,11 +175,18 @@ def _load_gin_values(gin_config: Optional[str], gin_bindings: Iterable[str]) -> 
 
 
 def build_config_from_sources(
-    gin_config: Optional[str], gin_bindings: Iterable[str], cli_overrides: Dict[str, Any]
+    gin_config: Optional[str] = None,
+    gin_configs: Optional[Iterable[str]] = None,
+    gin_bindings: Iterable[str] = (),
+    cli_overrides: Optional[Dict[str, Any]] = None,
 ) -> SingleDayLaunchConfig:
-    values = _load_gin_values(gin_config, gin_bindings)
+    config_paths = list(gin_configs) if gin_configs is not None else []
+    if gin_config:
+        config_paths = [gin_config] + config_paths
+
+    values = _load_gin_values(config_paths, gin_bindings)
     config = SingleDayLaunchConfig(**values)
-    for key, value in cli_overrides.items():
+    for key, value in (cli_overrides or {}).items():
         if key in _CONFIG_FIELDS:
             setattr(config, key, value)
     return config

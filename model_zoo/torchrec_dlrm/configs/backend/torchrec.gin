@@ -1,0 +1,6 @@
+SingleDayLaunchConfig.use_torchrec = True
+SingleDayLaunchConfig.enable_prefetch = True
+SingleDayLaunchConfig.prefetch_depth = 2
+SingleDayLaunchConfig.fuse_emb_tables = True
+SingleDayLaunchConfig.fuse_k = 30
+SingleDayLaunchConfig.embedding_storage = "hbm"
