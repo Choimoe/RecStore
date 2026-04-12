@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import os
 import statistics
 import subprocess
@@ -51,3 +52,24 @@ def analyze_embupdate(repo_root: Path, jsonl_path: str, csv_path: str, top_n: in
         raise RuntimeError(f"analyze failed: {res.stderr}")
     return res.stdout
 
+
+def write_stage_csv(path: Path, rows: list[dict]) -> None:
+    if not rows:
+        raise ValueError("rows must not be empty")
+    fieldnames = list(rows[0].keys())
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def finalize_torchrec_row(row: dict) -> dict:
+    row["collective_total_ms"] = row["collective_launch_ms"] + row["collective_wait_ms"]
+    row["kv_local_only_ms"] = row["embed_lookup_local_ms"] + row["embed_pool_local_ms"]
+    row["kv_extended_ms"] = (
+        row["input_pack_ms"]
+        + row["embed_lookup_local_ms"]
+        + row["embed_pool_local_ms"]
+        + row["output_unpack_ms"]
+    )
+    return row
