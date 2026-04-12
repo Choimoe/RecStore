@@ -376,6 +376,47 @@ class TestShardedRecstoreClient(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             client.emb_wait_result(opaque_handle, 4)
 
+    def test_init_data_pull_and_wait_and_get_match_recstore_client_surface(self) -> None:
+        runtime_dir = self._make_runtime_dir(hash_method="simple_mod", distributed_num_shards=2)
+        fake_client = _FakeClient()
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+
+        client.init_data(
+            name="t0",
+            shape=(4, 4),
+            dtype=torch.float32,
+            base_offset=8,
+        )
+
+        pulled = client.pull("t0", torch.tensor([8, 9], dtype=torch.int64))
+        self.assertEqual(tuple(pulled.shape), (2, 4))
+
+        prefetch_id = client.prefetch(torch.tensor([8, 9], dtype=torch.int64))
+        waited = client.wait_and_get(prefetch_id, 4)
+        self.assertTrue(torch.allclose(waited, pulled))
+
+    def test_update_async_and_wait_route_updates_through_shards(self) -> None:
+        runtime_dir = self._make_runtime_dir(hash_method="simple_mod", distributed_num_shards=2)
+        fake_client = _FakeClient()
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+
+        client.init_data(
+            name="t0",
+            shape=(4, 4),
+            dtype=torch.float32,
+        )
+
+        handle = client.update_async(
+            "t0",
+            torch.tensor([1, 2], dtype=torch.int64),
+            torch.ones((2, 4), dtype=torch.float32),
+        )
+        self.assertEqual(fake_client.updates, [])
+
+        client.wait(handle)
+
+        self.assertEqual(len(fake_client.updates), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

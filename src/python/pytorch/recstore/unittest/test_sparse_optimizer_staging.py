@@ -7,6 +7,44 @@ from ._sparse_test_utils import KVClientIsolationMixin, build_features
 
 
 class TestSparseOptimizerStaging(KVClientIsolationMixin, unittest.TestCase):
+    def test_sparse_optimizer_uses_module_specific_kv_client_for_async_updates(self):
+        class _ProxyKVClient:
+            def __init__(self, inner):
+                self._inner = inner
+                self.update_async_calls = []
+                self.wait_calls = []
+                self._next_handle = 100
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def update_async(self, name, ids, grads):
+                handle = self._next_handle
+                self._next_handle += 1
+                self.update_async_calls.append((name, ids.clone(), grads.clone(), handle))
+                return handle
+
+            def wait(self, handle):
+                self.wait_calls.append(int(handle))
+
+        ebc, fake = self.build_module()
+        proxy_client = _ProxyKVClient(ebc.kv_client)
+        ebc.kv_client = proxy_client
+        optimizer = SparseSGD([ebc], lr=0.1)
+        features = build_features()
+
+        optimizer.zero_grad()
+        result = ebc(features)
+        loss = result.values().sum()
+        loss.backward()
+
+        optimizer.step()
+        optimizer.flush()
+
+        self.assertEqual(len(proxy_client.update_async_calls), 1)
+        self.assertEqual(proxy_client.wait_calls, [100])
+        self.assertEqual(fake.update_calls, [])
+
     def test_ebc_update_submits_unscaled_grads_for_backend_optimizer(self):
         ebc, fake = self.build_module()
         optimizer = SparseSGD([ebc], lr=0.1)

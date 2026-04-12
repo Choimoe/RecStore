@@ -5,6 +5,7 @@ import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -71,11 +72,25 @@ def _get_cityhash64_func():
     global _CITYHASH_LIB_HANDLE, _CITYHASH64_FUNC
     if _CITYHASH64_FUNC is not None:
         return _CITYHASH64_FUNC
-    lib_path = Path(__file__).resolve().parents[3] / "third_party/cityhash/src/.libs/libcityhash.so.0.0.0"
-    try:
-        _CITYHASH_LIB_HANDLE = ctypes.CDLL(str(lib_path))
-    except OSError as exc:
-        raise RuntimeError(f"failed to load cityhash library: {lib_path}") from exc
+    candidates = [
+        Path(__file__).resolve().parents[3] / "third_party/cityhash/src/.libs/libcityhash.so.0.0.0",
+    ]
+    if len(Path(__file__).resolve().parents) > 5:
+        candidates.append(
+            Path(__file__).resolve().parents[5]
+            / "third_party/cityhash/src/.libs/libcityhash.so.0.0.0"
+        )
+    lib_path = None
+    last_exc = None
+    for candidate in candidates:
+        lib_path = candidate
+        try:
+            _CITYHASH_LIB_HANDLE = ctypes.CDLL(str(candidate))
+            break
+        except OSError as exc:
+            last_exc = exc
+    if _CITYHASH_LIB_HANDLE is None:
+        raise RuntimeError(f"failed to load cityhash library: {lib_path}") from last_exc
     try:
         func = _CITYHASH_LIB_HANDLE._Z10CityHash64PKcm
     except AttributeError as exc:
@@ -106,6 +121,9 @@ class ShardedRecstoreClient:
         self._active_shard: int | None = None
         self._next_prefetch_id = 1
         self._prefetch_contexts: dict[int, tuple[int, list[tuple[int, torch.Tensor, torch.Tensor]]]] = {}
+        self._tensor_meta: dict[str, dict[str, Any]] = {}
+        self._pending_async_ops: dict[int, tuple[str, torch.Tensor, torch.Tensor]] = {}
+        self._next_async_handle = 1
 
     def _shard_for_key(self, key: int) -> int:
         if self._hash_method == "simple_mod":
@@ -143,6 +161,36 @@ class ShardedRecstoreClient:
             ok = self._client.init_embedding_table(table_name, num_embeddings, embedding_dim) and ok
         return ok
 
+    def init_data(
+        self,
+        name: str,
+        shape: tuple[int, int],
+        dtype: torch.dtype,
+        part_policy: Any = None,
+        init_func=None,
+        is_gdata: bool = True,
+        base_offset: int = 0,
+    ) -> None:
+        del part_policy, is_gdata
+        if name in self._tensor_meta:
+            return
+        num_embeddings, embedding_dim = int(shape[0]), int(shape[1])
+        ok = self.init_embedding_table(name, num_embeddings, embedding_dim)
+        if not ok:
+            raise RuntimeError(f"init_embedding_table failed: {name}")
+        self._tensor_meta[name] = {
+            "shape": (num_embeddings, embedding_dim),
+            "dtype": dtype,
+            "base_offset": int(base_offset),
+        }
+        initial_data = (
+            init_func(shape, dtype) if init_func is not None else torch.zeros(shape, dtype=dtype)
+        )
+        all_keys = torch.arange(num_embeddings, dtype=torch.int64)
+        if base_offset:
+            all_keys = all_keys + int(base_offset)
+        self.emb_write(all_keys, initial_data)
+
     def emb_write(self, keys: torch.Tensor, values: torch.Tensor) -> None:
         if keys.numel() == 0:
             return
@@ -162,6 +210,13 @@ class ShardedRecstoreClient:
             shard_values = self._client.emb_read(shard_keys, embedding_dim)
             out.index_copy_(0, index_tensor, shard_values)
         return out
+
+    def pull(self, name: str, ids: torch.Tensor) -> torch.Tensor:
+        meta = self._tensor_meta.get(name)
+        if meta is None:
+            raise RuntimeError(f"Tensor '{name}' has not been initialized.")
+        ids = ids.to(torch.int64).cpu().contiguous()
+        return self.emb_read(ids, int(meta["shape"][1]))
 
     def emb_prefetch(self, keys: torch.Tensor) -> int:
         req_id = self._next_prefetch_id
@@ -192,6 +247,21 @@ class ShardedRecstoreClient:
             out.index_copy_(0, index_tensor, shard_values)
         return out
 
+    def prefetch(self, ids: torch.Tensor) -> int:
+        ids = ids.to(torch.int64).cpu().contiguous()
+        return self.emb_prefetch(ids)
+
+    def wait_and_get(
+        self,
+        prefetch_id: int,
+        embedding_dim: int,
+        device: torch.device = torch.device("cpu"),
+    ) -> torch.Tensor:
+        out = self.emb_wait_result(int(prefetch_id), int(embedding_dim))
+        if device.type == "cuda":
+            out = out.to(device)
+        return out
+
     def emb_read_prefetch(self, keys: torch.Tensor, embedding_dim: int) -> torch.Tensor:
         prefetch_id = self.emb_prefetch(keys)
         return self.emb_wait_result(prefetch_id, embedding_dim)
@@ -204,3 +274,22 @@ class ShardedRecstoreClient:
             shard_keys = keys.index_select(0, index_tensor).contiguous()
             shard_grads = grads.index_select(0, index_tensor).contiguous()
             self._client.emb_update_table(table_name, shard_keys, shard_grads)
+
+    def update_async(self, name: str, ids: torch.Tensor, grads: torch.Tensor) -> int:
+        if name not in self._tensor_meta:
+            raise RuntimeError(f"Tensor '{name}' has not been initialized.")
+        handle = self._next_async_handle
+        self._next_async_handle += 1
+        self._pending_async_ops[handle] = (
+            name,
+            ids.to(torch.int64).cpu().contiguous().clone(),
+            grads.to(torch.float32).cpu().contiguous().clone(),
+        )
+        return handle
+
+    def wait(self, handle: int) -> None:
+        pending = self._pending_async_ops.pop(int(handle), None)
+        if pending is None:
+            return
+        name, ids, grads = pending
+        self.emb_update_table(name, ids, grads)

@@ -55,6 +55,7 @@ def _process_generic_module_with_trace(mod: Any, lr: float, kv_client: Any):
             name, ids, grads = entry
         traces_by_name.setdefault(name, []).append((ids, grads))
 
+    module_kv_client = getattr(mod, "kv_client", None) or kv_client
     handles = []
     for name, entries in traces_by_name.items():
         all_ids = torch.cat([ids for ids, _ in entries], dim=0)
@@ -69,7 +70,12 @@ def _process_generic_module_with_trace(mod: Any, lr: float, kv_client: Any):
         summed_grads.index_add_(0, inverse_indices, all_grads)
 
         # Backend sparse optimizers own learning-rate application for these modules.
-        handles.append(kv_client.update_async(name=name, ids=unique_ids, grads=summed_grads))
+        handles.append(
+            (
+                module_kv_client,
+                module_kv_client.update_async(name=name, ids=unique_ids, grads=summed_grads),
+            )
+        )
     return handles
 
 # --- Core Classes ---
@@ -92,7 +98,7 @@ class SparseOptimizer:
         """
         self.param_groups = [{"params": params, "lr": lr}]
         self.kv_client = _get_kv_client_if_needed(params)
-        self._inflight_handles: List[int] = []
+        self._inflight_handles: List[Tuple[Any, int]] = []
 
     def step(self):
         """
@@ -119,8 +125,8 @@ class SparseOptimizer:
         if self.kv_client is None:
             self._inflight_handles.clear()
             return
-        for handle in self._inflight_handles:
-            self.kv_client.wait(handle)
+        for kv_client, handle in self._inflight_handles:
+            kv_client.wait(handle)
         self._inflight_handles.clear()
 
 class SparseSGD(SparseOptimizer):

@@ -16,18 +16,15 @@ import torch
 from ..config import RunConfig, ensure_shared_dir, validate_recstore_config
 from ..data.dlrm_source import (
     build_kjt_batch_from_dense_sparse_labels,
-    build_table_offsets_from_eb_configs,
     build_train_dataloader,
-    convert_kjt_ids_to_fused_ids,
     get_default_cat_names,
     inject_project_paths,
 )
 from ..runtime.hybrid_dlrm import (
     build_hybrid_dense_arch,
-    flatten_embedded_sparse_grad_for_recstore,
     parse_layer_sizes,
     prepare_hybrid_dlrm_input,
-    reshape_recstore_embeddings_for_dlrm,
+    reshape_torchrec_embeddings_for_dlrm,
     run_hybrid_backward,
     sync_device,
 )
@@ -154,6 +151,42 @@ def _barrier_for_step_alignment(dist, device, local_rank: int, use_dist: bool) -
         dist.barrier(device_ids=[local_rank])
     else:
         dist.barrier()
+
+
+def _build_train_dataloader_for_mode(
+    repo_root: Path,
+    cfg: RunConfig,
+    rank: int,
+):
+    world_size = cfg.nnodes * cfg.nproc_per_node
+    return build_train_dataloader(
+        repo_root=repo_root,
+        data_dir_rel=cfg.data_dir,
+        train_ratio=cfg.train_ratio,
+        num_embeddings=cfg.num_embeddings,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        seed=cfg.seed,
+        rank=rank if world_size > 1 else None,
+        world_size=world_size if world_size > 1 else None,
+    )
+
+
+def _maybe_wrap_dense_module_for_dist(
+    dense_module: torch.nn.Module,
+    device: torch.device,
+    local_rank: int,
+    use_dist: bool,
+) -> torch.nn.Module:
+    if not use_dist:
+        return dense_module
+    if device.type == "cuda":
+        return torch.nn.parallel.DistributedDataParallel(
+            dense_module,
+            device_ids=[local_rank],
+            output_device=local_rank,
+        )
+    return torch.nn.parallel.DistributedDataParallel(dense_module)
 
 
 def _known_ids_path(cfg: RunConfig) -> Path:
@@ -338,6 +371,10 @@ class RecStoreRunner(BenchmarkRunner):
     ) -> dict[str, Any]:
         inject_project_paths(repo_root)
         from client import RecstoreClient  # type: ignore
+        from python.pytorch.recstore.optimizer import SparseSGD  # type: ignore
+        from python.pytorch.torchrec_kv.EmbeddingBag import (  # type: ignore
+            RecStoreEmbeddingBagCollection,
+        )
         from torch import distributed as dist
         default_cat_names = get_default_cat_names()
 
@@ -387,12 +424,10 @@ class RecStoreRunner(BenchmarkRunner):
             elif cfg.read_mode != "direct":
                 print("[rs_demo] unknown read mode, fallback to direct read mode")
 
-            dataset, dataloader = build_train_dataloader(
+            dataset, dataloader = _build_train_dataloader_for_mode(
                 repo_root=repo_root,
-                data_dir_rel=cfg.data_dir,
-                train_ratio=cfg.train_ratio,
-                num_embeddings=cfg.num_embeddings,
-                batch_size=cfg.batch_size,
+                cfg=cfg,
+                rank=rank,
             )
 
             eb_configs = [
@@ -405,63 +440,19 @@ class RecStoreRunner(BenchmarkRunner):
                 for feature_name in default_cat_names
             ]
 
-            if rank == 0:
-                t0 = time.perf_counter()
-                for table_cfg in eb_configs:
-                    ok = client.init_embedding_table(
-                        table_cfg["name"],
-                        table_cfg["num_embeddings"],
-                        table_cfg["embedding_dim"],
-                    )
-                    if not ok:
-                        raise RuntimeError(f"init_embedding_table failed: {table_cfg['name']}")
-                print(
-                    f"[rs_demo] init {len(eb_configs)} tables done in {(time.perf_counter() - t0):.3f}s"
-                )
-
-            table_offsets = build_table_offsets_from_eb_configs(eb_configs, cfg.fuse_k)
-            init_rows = min(int(cfg.init_rows), len(dataset))
-            init_loader = torch.utils.data.DataLoader(
-                dataset,
-                batch_size=min(cfg.batch_size, init_rows),
-                shuffle=False,
-                drop_last=False,
-                pin_memory=False,
-                num_workers=0,
+            embedding_module = RecStoreEmbeddingBagCollection(
+                embedding_bag_configs=eb_configs,
+                enable_fusion=True,
+                fusion_k=cfg.fuse_k,
+                kv_client=client,
+                initialize_tables=(rank == 0),
             )
-
-            known_fused_ids: set[int] = set()
-            known_ids_path = _known_ids_path(cfg)
-            if rank == 0:
-                init_written = 0
-                t0 = time.perf_counter()
-                for dense_batch, sparse_batch, labels_batch in init_loader:
-                    _, sparse_features = build_kjt_batch_from_dense_sparse_labels(
-                        dense_batch, sparse_batch, labels_batch
-                    )
-                    fused_ids = convert_kjt_ids_to_fused_ids(sparse_features, table_offsets)
-                    if fused_ids.numel() == 0:
-                        continue
-                    vals = (
-                        torch.randn(fused_ids.numel(), cfg.embedding_dim, dtype=torch.float32) * 0.01
-                    )
-                    client.emb_write(fused_ids, vals)
-                    known_fused_ids.update(fused_ids.tolist())
-                    init_written += fused_ids.numel()
-                    if init_written >= init_rows * 26:
-                        break
-                _write_known_ids_snapshot(known_ids_path, known_fused_ids)
-                print(
-                    f"[rs_demo] initial emb_write fused_rows={init_written} in {(time.perf_counter() - t0):.3f}s"
-                )
             _barrier_for_step_alignment(
                 dist=dist,
                 device=device,
                 local_rank=local_rank,
                 use_dist=use_dist,
             )
-            if use_dist and rank != 0:
-                known_fused_ids = _load_known_ids_snapshot(known_ids_path)
             dense_module = build_hybrid_dense_arch(
                 torch=torch,
                 dense_in_features=13,
@@ -471,8 +462,15 @@ class RecStoreRunner(BenchmarkRunner):
                 over_arch_layer_sizes=parse_layer_sizes(cfg.over_arch_layer_sizes),
                 device=device,
             )
+            dense_module = _maybe_wrap_dense_module_for_dist(
+                dense_module=dense_module,
+                device=device,
+                local_rank=local_rank,
+                use_dist=use_dist,
+            )
             criterion = torch.nn.BCEWithLogitsLoss()
             dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
+            sparse_optimizer = SparseSGD([embedding_module], lr=0.01)
 
             read_lat_us: list[float] = []
             update_lat_us: list[float] = []
@@ -505,45 +503,29 @@ class RecStoreRunner(BenchmarkRunner):
                     _, sparse_features = build_kjt_batch_from_dense_sparse_labels(
                         dense_batch, sparse_batch, labels_batch
                     )
-                    fused_ids = convert_kjt_ids_to_fused_ids(sparse_features, table_offsets)
-                if fused_ids.numel() == 0:
-                    continue
 
-                read_ids = fused_ids.contiguous()
-                batch_rows = dense_batch.shape[0]
-
-                # Ensure read-before-update does not hit missing keys and crash.
-                if cfg.read_before_update:
-                    cur_ids = read_ids.tolist()
-                    missing_ids = [x for x in cur_ids if x not in known_fused_ids]
-                    if missing_ids:
-                        warm_ids = torch.tensor(missing_ids, dtype=torch.int64)
-                        warm_vals = torch.zeros(len(missing_ids), cfg.embedding_dim, dtype=torch.float32)
-                        client.emb_write(warm_ids, warm_vals)
-                        known_fused_ids.update(missing_ids)
-
+                sparse_optimizer.zero_grad()
                 embeddings = None
                 with stage_timer(row, "embed_lookup_local_ms"):
                     if cfg.read_before_update and cfg.read_mode == "prefetch":
-                        embeddings = client.emb_read_prefetch(read_ids, cfg.embedding_dim)
-                    else:
-                        embeddings = client.emb_read(read_ids, cfg.embedding_dim)
+                        embedding_module.issue_fused_prefetch(sparse_features)
+                    embeddings = embedding_module(sparse_features)
                 if embeddings is None:
-                    raise RuntimeError("recstore emb_read returned no embeddings")
+                    raise RuntimeError("recstore embedding module returned no embeddings")
                 if step >= cfg.warmup_steps:
                     read_lat_us.append(row["embed_lookup_local_ms"] * 1e3)
 
                 with stage_timer(row, "embed_pool_local_ms"):
-                    embedded_sparse_cpu = reshape_recstore_embeddings_for_dlrm(
+                    embedded_sparse_source = reshape_torchrec_embeddings_for_dlrm(
                         embeddings=embeddings,
-                        batch_rows=batch_rows,
-                        num_sparse_features=len(default_cat_names),
+                        feature_names=default_cat_names,
+                        torch=torch,
                     )
 
                 with stage_timer(row, "output_unpack_ms"):
                     dense_features, embedded_sparse, labels = prepare_hybrid_dlrm_input(
                         dense_batch=dense_batch,
-                        embedded_sparse_source=embedded_sparse_cpu,
+                        embedded_sparse_source=embedded_sparse_source,
                         labels_batch=labels_batch,
                         torch=torch,
                         device=device,
@@ -573,15 +555,16 @@ class RecStoreRunner(BenchmarkRunner):
 
                 with stage_timer(row, "sparse_update_ms"):
                     sync_device(torch, device)
-                    update_grads = flatten_embedded_sparse_grad_for_recstore(
-                        embedded_sparse_grad.to("cpu")
+                    embedded_sparse_source.backward(
+                        embedded_sparse_grad.to(embedded_sparse_source.device)
                     )
-                    client.emb_update_table("t_cat_0", read_ids, update_grads)
+                    sparse_optimizer.step()
+                    sparse_optimizer.flush()
+                    sparse_optimizer.zero_grad()
                     sync_device(torch, device)
 
                 if step >= cfg.warmup_steps:
                     update_lat_us.append(row["sparse_update_ms"] * 1e3)
-                known_fused_ids.update(read_ids.tolist())
                 row["step_total_ms"] = (time.perf_counter() - step_start) * 1e3
                 rows.append(finalize_recstore_row(row))
                 _barrier_for_step_alignment(

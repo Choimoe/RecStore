@@ -21,7 +21,11 @@ class _FakeEmbeddingBagConfig:
 
 
 class _FakeKVClient:
+    def __init__(self):
+        self.init_data_calls = 0
+
     def init_data(self, **kwargs):
+        self.init_data_calls += 1
         return None
 
 
@@ -111,6 +115,43 @@ class TestEmbeddingBagPrefetchState(unittest.TestCase):
         self.assertEqual(ebc._prefetch_handles, {})
         self.assertEqual(len(ebc._fused_prefetch_slots), 1)
         self.assertEqual(ebc._fused_prefetch_handle, 23)
+
+    def test_constructor_uses_explicit_kv_client_when_provided(self):
+        explicit_client = _FakeKVClient()
+
+        ebc = self.embeddingbag_module.RecStoreEmbeddingBagCollection(
+            [
+                {
+                    "name": "t0",
+                    "embedding_dim": 4,
+                    "num_embeddings": 8,
+                    "feature_names": ["f1"],
+                }
+            ],
+            enable_fusion=True,
+            kv_client=explicit_client,
+        )
+
+        self.assertIs(ebc.kv_client, explicit_client)
+
+    def test_constructor_can_skip_backend_table_initialization(self):
+        explicit_client = _FakeKVClient()
+
+        self.embeddingbag_module.RecStoreEmbeddingBagCollection(
+            [
+                {
+                    "name": "t0",
+                    "embedding_dim": 4,
+                    "num_embeddings": 8,
+                    "feature_names": ["f1"],
+                }
+            ],
+            enable_fusion=True,
+            kv_client=explicit_client,
+            initialize_tables=False,
+        )
+
+        self.assertEqual(explicit_client.init_data_calls, 0)
 
 
 if __name__ == "__main__":

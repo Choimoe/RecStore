@@ -93,12 +93,14 @@ class _RecStoreEBCFunction(Function):
 class RecStoreEmbeddingBagCollection(torch.nn.Module):
     def __init__(self, embedding_bag_configs: List[Dict[str, Any]], lr: float = 0.01,
                  enable_fusion: bool = True, fusion_k: int = 30,
-                 ps_host: str = None, ps_port: int = None):
+                 ps_host: str = None, ps_port: int = None,
+                 kv_client: RecStoreClient | None = None,
+                 initialize_tables: bool = True):
         super().__init__()
         self._embedding_bag_configs = [
             EmbeddingBagConfig(**c) for c in embedding_bag_configs
         ]
-        self.kv_client: RecStoreClient = get_kv_client()
+        self.kv_client: RecStoreClient = kv_client if kv_client is not None else get_kv_client()
         if ps_host is not None and ps_port is not None:
             self.kv_client.set_ps_config(ps_host, ps_port)
 
@@ -137,14 +139,15 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         self._fused_ids_cpu: torch.Tensor | None = None
         self._fused_inverse: torch.Tensor | None = None
 
-        for idx, config in enumerate(self._embedding_bag_configs):
-            base_offset = (idx << self._fusion_k) if self._enable_fusion else 0
-            self.kv_client.init_data(
-                name=config.name,
-                shape=(config.num_embeddings, config.embedding_dim),
-                dtype=torch.float32,
-                base_offset=base_offset,
-            )
+        if initialize_tables:
+            for idx, config in enumerate(self._embedding_bag_configs):
+                base_offset = (idx << self._fusion_k) if self._enable_fusion else 0
+                self.kv_client.init_data(
+                    name=config.name,
+                    shape=(config.num_embeddings, config.embedding_dim),
+                    dtype=torch.float32,
+                    base_offset=base_offset,
+                )
 
     def embedding_bag_configs(self):
         return self._embedding_bag_configs
