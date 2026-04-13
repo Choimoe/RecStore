@@ -29,6 +29,47 @@ We recommend using [torchx](https://pytorch.org/torchx/main/quickstart.html) to 
 You can also use [torchrun](https://pytorch.org/docs/stable/elastic/run.html).
 * e.g. `torchrun --nnodes 1 --nproc_per_node 2 --rdzv_backend c10d --rdzv_endpoint localhost --rdzv_id 54321 --role trainer dlrm_main.py`
 
+## Single-Day Launcher (Layered Gin)
+
+Single-day training supports a unified Python launcher with layered gin configs.
+
+Entry point:
+
+```bash
+python3 -m model_zoo.torchrec_dlrm.launch_single_day \
+  --gin_config model_zoo/torchrec_dlrm/configs/base/single_day.gin \
+  --gin_config model_zoo/torchrec_dlrm/configs/backend/torchrec.gin \
+  --gin_config model_zoo/torchrec_dlrm/configs/presets/default.gin
+```
+
+TorchRec dry-run example:
+
+```bash
+python3 -m model_zoo.torchrec_dlrm.launch_single_day \
+  --gin_config model_zoo/torchrec_dlrm/configs/base/single_day.gin \
+  --gin_config model_zoo/torchrec_dlrm/configs/backend/torchrec.gin \
+  --gin_config model_zoo/torchrec_dlrm/configs/presets/debug.gin \
+  --dry-run
+```
+
+Override a single field with `--gin_binding`:
+
+```bash
+python3 -m model_zoo.torchrec_dlrm.launch_single_day \
+  --gin_config model_zoo/torchrec_dlrm/configs/base/single_day.gin \
+  --gin_config model_zoo/torchrec_dlrm/configs/backend/torchrec.gin \
+  --gin_binding "SingleDayLaunchConfig.embedding_storage = 'uvm'" \
+  --dry-run
+```
+
+The legacy shell entrypoint remains available as a thin wrapper:
+
+```bash
+bash model_zoo/torchrec_dlrm/run_single_day.sh \
+  --gin_config model_zoo/torchrec_dlrm/configs/base/single_day.gin \
+  --gin_config model_zoo/torchrec_dlrm/configs/backend/torchrec.gin \
+  --dry-run
+```
 
 ## Preliminary Training Results
 
