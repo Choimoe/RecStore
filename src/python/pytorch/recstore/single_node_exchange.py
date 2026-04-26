@@ -505,39 +505,35 @@ def _group_row_indices_by_destination(
     destination_ranks: torch.Tensor,
     *,
     world_size: int,
-) -> tuple[list[int], list[int]]:
-    send_counts = [0] * world_size
-    grouped_indices: list[int] = []
-    for destination_rank in range(world_size):
-        positions = torch.nonzero(
-            destination_ranks == int(destination_rank),
-            as_tuple=False,
-        ).view(-1)
-        send_counts[destination_rank] = int(positions.numel())
-        if positions.numel() > 0:
-            grouped_indices.extend(int(v) for v in positions.tolist())
+) -> tuple[list[int], torch.Tensor]:
+    valid_mask = (destination_ranks >= 0) & (destination_ranks < int(world_size))
+    valid_destinations = destination_ranks[valid_mask]
+    send_counts_tensor = torch.bincount(valid_destinations, minlength=world_size)
+    send_counts = [int(v) for v in send_counts_tensor.cpu().tolist()[:world_size]]
+    if valid_destinations.numel() == 0:
+        return send_counts, torch.empty((0,), dtype=torch.int64, device=destination_ranks.device)
+    valid_positions = torch.nonzero(valid_mask, as_tuple=False).view(-1)
+    permutation = torch.argsort(valid_destinations, stable=True)
+    grouped_indices = valid_positions.index_select(0, permutation)
     return send_counts, grouped_indices
 
 
-def _permute_vector_rows(tensor: torch.Tensor, grouped_indices: list[int]) -> torch.Tensor:
-    if not grouped_indices:
+def _permute_vector_rows(tensor: torch.Tensor, grouped_indices: torch.Tensor) -> torch.Tensor:
+    if grouped_indices.numel() == 0:
         return torch.empty((0,), dtype=torch.int64, device=tensor.device)
-    index_tensor = torch.tensor(grouped_indices, dtype=torch.long, device=tensor.device)
-    return tensor.index_select(0, index_tensor).to(torch.int64).contiguous()
+    return tensor.index_select(0, grouped_indices.to(device=tensor.device)).to(torch.int64).contiguous()
 
 
-def _permute_matrix_rows(tensor: torch.Tensor, grouped_indices: list[int]) -> torch.Tensor:
-    if not grouped_indices:
+def _permute_matrix_rows(tensor: torch.Tensor, grouped_indices: torch.Tensor) -> torch.Tensor:
+    if grouped_indices.numel() == 0:
         return torch.empty((0, int(tensor.shape[1])), dtype=torch.float32, device=tensor.device)
-    index_tensor = torch.tensor(grouped_indices, dtype=torch.long, device=tensor.device)
-    return tensor.index_select(0, index_tensor).to(torch.float32).contiguous()
+    return tensor.index_select(0, grouped_indices.to(device=tensor.device)).to(torch.float32).contiguous()
 
 
-def _permute_int_matrix_rows(tensor: torch.Tensor, grouped_indices: list[int]) -> torch.Tensor:
-    if not grouped_indices:
+def _permute_int_matrix_rows(tensor: torch.Tensor, grouped_indices: torch.Tensor) -> torch.Tensor:
+    if grouped_indices.numel() == 0:
         return torch.empty((0, int(tensor.shape[1])), dtype=torch.int64, device=tensor.device)
-    index_tensor = torch.tensor(grouped_indices, dtype=torch.long, device=tensor.device)
-    return tensor.index_select(0, index_tensor).to(torch.int64).contiguous()
+    return tensor.index_select(0, grouped_indices.to(device=tensor.device)).to(torch.int64).contiguous()
 
 
 def _build_exchange_plan(
@@ -547,7 +543,7 @@ def _build_exchange_plan(
     backend: Any,
     group: Any | None,
     device: torch.device,
-) -> tuple[list[int], list[int], list[int]]:
+) -> tuple[list[int], list[int], torch.Tensor]:
     send_counts, grouped_indices = _group_row_indices_by_destination(
         destination_ranks,
         world_size=world_size,
@@ -567,7 +563,7 @@ def _exchange_vector_by_plan(
     *,
     send_counts: list[int],
     recv_counts: list[int],
-    grouped_indices: list[int],
+    grouped_indices: torch.Tensor,
     backend: Any,
     group: Any | None,
     device: torch.device,
@@ -590,7 +586,7 @@ def _exchange_matrix_by_plan(
     *,
     send_counts: list[int],
     recv_counts: list[int],
-    grouped_indices: list[int],
+    grouped_indices: torch.Tensor,
     backend: Any,
     group: Any | None,
     device: torch.device,
@@ -614,7 +610,7 @@ def _exchange_int_matrix_by_plan(
     *,
     send_counts: list[int],
     recv_counts: list[int],
-    grouped_indices: list[int],
+    grouped_indices: torch.Tensor,
     backend: Any,
     group: Any | None,
     device: torch.device,
@@ -680,7 +676,12 @@ def _exchange_lookup_ids_all_to_all(
         gathered.append(
             LookupIdsPayload(
                 rank=source_rank,
-                destination_ranks=torch.full((rows,), int(payload.rank), dtype=torch.int64),
+                destination_ranks=torch.full(
+                    (rows,),
+                    int(payload.rank),
+                    dtype=torch.int64,
+                    device=received_int.device,
+                ),
                 source_ranks=received_int[start:end, 0].clone(),
                 row_positions=received_int[start:end, 1].clone(),
                 fused_ids=received_int[start:end, 2].clone(),
@@ -919,31 +920,51 @@ def reassemble_lookup_embedding_responses(
         dtype=filtered[0].embeddings.dtype,
         device=filtered[0].embeddings.device,
     )
-    seen_positions: set[int] = set()
+    seen_positions = torch.zeros((total_rows,), dtype=torch.bool, device=rebuilt.device)
 
     for payload in filtered:
         if int(payload.embeddings.shape[1]) != embedding_dim:
             raise ValueError("embedding response payloads must share the same embedding dimension")
-        if payload.embeddings.device != rebuilt.device:
-            raise ValueError("embedding response payloads must share the same device")
+        if (
+            payload.embeddings.device != rebuilt.device
+            or payload.requestor_ranks.device != rebuilt.device
+            or payload.row_positions.device != rebuilt.device
+        ):
+            payload = LookupEmbeddingResponsePayload(
+                rank=payload.rank,
+                requestor_ranks=payload.requestor_ranks.to(rebuilt.device),
+                row_positions=payload.row_positions.to(rebuilt.device),
+                embeddings=payload.embeddings.to(rebuilt.device),
+            )
         if payload.embeddings.dtype != rebuilt.dtype:
             raise ValueError("embedding response payloads must share the same dtype")
         requestor_mask = payload.requestor_ranks == int(requestor_rank)
-        selected_positions = payload.row_positions[requestor_mask]
+        selected_positions = payload.row_positions[requestor_mask].to(dtype=torch.int64)
         selected_embeddings = payload.embeddings[requestor_mask]
-        for row_idx in range(int(selected_positions.numel())):
-            position = int(selected_positions[row_idx].item())
-            if position < 0 or position >= total_rows:
-                raise ValueError(
-                    f"row position {position} is out of bounds for total_rows={total_rows}"
-                )
-            if position in seen_positions:
-                raise ValueError(f"duplicate row position detected during reassembly: {position}")
-            rebuilt[position] = selected_embeddings[row_idx]
-            seen_positions.add(position)
+        if selected_positions.numel() == 0:
+            continue
+        out_of_bounds = torch.logical_or(selected_positions < 0, selected_positions >= total_rows)
+        if bool(out_of_bounds.any().item()):
+            bad_position = int(selected_positions[out_of_bounds][0].item())
+            raise ValueError(
+                f"row position {bad_position} is out of bounds for total_rows={total_rows}"
+            )
+        sorted_positions, _ = torch.sort(selected_positions)
+        duplicate_mask = sorted_positions[1:] == sorted_positions[:-1]
+        if bool(duplicate_mask.any().item()):
+            duplicate = int(sorted_positions[1:][duplicate_mask][0].item())
+            raise ValueError(f"duplicate row position detected during reassembly: {duplicate}")
+        previously_seen = seen_positions.index_select(0, selected_positions)
+        if bool(previously_seen.any().item()):
+            duplicate = int(selected_positions[previously_seen][0].item())
+            raise ValueError(f"duplicate row position detected during reassembly: {duplicate}")
+        rebuilt.index_copy_(0, selected_positions, selected_embeddings)
+        seen_positions.index_fill_(0, selected_positions, True)
 
-    if len(seen_positions) != total_rows:
-        missing_positions = sorted(set(range(total_rows)) - seen_positions)
+    if not bool(seen_positions.all().item()):
+        missing_positions = (
+            torch.nonzero(~seen_positions, as_tuple=False).view(-1).cpu().tolist()
+        )
         raise ValueError(
             "lookup embedding responses did not cover every requested row position; "
             f"missing positions: {missing_positions}"

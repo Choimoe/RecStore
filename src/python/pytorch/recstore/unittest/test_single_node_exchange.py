@@ -168,6 +168,19 @@ class FakeAllToAllDistBackend(FakeDistBackend):
                 isinstance(payload, LookupIdsPayload) for payload in local_payloads
             ):
                 role = "packed_lookup"
+        if role is None and input_tensor.dtype == torch.float32 and input_tensor.dim() == 1:
+            if any(isinstance(payload, SparseGradPayload) for payload in local_payloads):
+                total_grad_numel = sum(int(payload.grads.numel()) for payload in local_payloads if isinstance(payload, SparseGradPayload))
+                if total_grad_numel == input_tensor.numel():
+                    role = "grad"
+            elif any(isinstance(payload, LookupEmbeddingResponsePayload) for payload in local_payloads):
+                total_emb_numel = sum(
+                    int(payload.embeddings.numel())
+                    for payload in local_payloads
+                    if isinstance(payload, LookupEmbeddingResponsePayload)
+                )
+                if total_emb_numel == input_tensor.numel():
+                    role = "emb"
         for payload in local_payloads:
             if role is not None:
                 break
@@ -259,6 +272,61 @@ class FakeAllToAllDistBackend(FakeDistBackend):
 class TestSingleNodeExchange(unittest.TestCase):
     def setUp(self):
         exchange_module._CPU_EXCHANGE_GROUP = None
+
+    def _assert_grouping_and_permutation_helpers(self, device: torch.device) -> None:
+        destination_ranks = torch.tensor([2, 0, 1, 2, 1, 0], dtype=torch.int64, device=device)
+        send_counts, grouped_indices = exchange_module._group_row_indices_by_destination(
+            destination_ranks,
+            world_size=4,
+        )
+
+        self.assertEqual(send_counts, [2, 2, 2, 0])
+        self.assertIsInstance(grouped_indices, torch.Tensor)
+        self.assertEqual(grouped_indices.dtype, torch.int64)
+        self.assertEqual(grouped_indices.device, destination_ranks.device)
+        self.assertTrue(
+            torch.equal(
+                grouped_indices.cpu(),
+                torch.tensor([1, 5, 2, 4, 0, 3], dtype=torch.int64),
+            )
+        )
+
+        vector = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int64, device=device)
+        matrix = torch.tensor(
+            [[0.0, 0.5], [1.0, 1.5], [2.0, 2.5], [3.0, 3.5], [4.0, 4.5], [5.0, 5.5]],
+            dtype=torch.float32,
+            device=device,
+        )
+        int_matrix = torch.tensor(
+            [[20, 21], [22, 23], [24, 25], [26, 27], [28, 29], [30, 31]],
+            dtype=torch.int64,
+            device=device,
+        )
+
+        self.assertTrue(
+            torch.equal(
+                exchange_module._permute_vector_rows(vector, grouped_indices).cpu(),
+                torch.tensor([11, 15, 12, 14, 10, 13], dtype=torch.int64),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                exchange_module._permute_matrix_rows(matrix, grouped_indices).cpu(),
+                torch.tensor(
+                    [[1.0, 1.5], [5.0, 5.5], [2.0, 2.5], [4.0, 4.5], [0.0, 0.5], [3.0, 3.5]],
+                    dtype=torch.float32,
+                ),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                exchange_module._permute_int_matrix_rows(int_matrix, grouped_indices).cpu(),
+                torch.tensor(
+                    [[22, 23], [30, 31], [24, 25], [28, 29], [20, 21], [26, 27]],
+                    dtype=torch.int64,
+                ),
+            )
+        )
 
     def test_exchange_lookup_ids_world_size_one_is_noop(self):
         payload = LookupIdsPayload(
@@ -598,6 +666,101 @@ class TestSingleNodeExchange(unittest.TestCase):
 
         self.assertEqual([payload.rank for payload in exchanged], [0, 1])
         self.assertTrue(any(call[0] == "all_to_all_single" for call in backend.calls if isinstance(call, tuple)))
+
+    def test_group_row_indices_helpers_keep_tensor_indices_on_cpu(self):
+        self._assert_grouping_and_permutation_helpers(torch.device("cpu"))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for NCCL device-preservation coverage")
+    def test_exchange_lookup_ids_keeps_cuda_payload_fields_on_nccl_all_to_all(self):
+        device = torch.device("cuda", 0)
+        local_payload = LookupIdsPayload(
+            rank=0,
+            destination_ranks=torch.tensor([0, 1], dtype=torch.int64, device=device),
+            source_ranks=torch.tensor([0, 0], dtype=torch.int64, device=device),
+            row_positions=torch.tensor([3, 4], dtype=torch.int64, device=device),
+            fused_ids=torch.tensor([13, 17], dtype=torch.int64, device=device),
+        )
+        backend = FakeAllToAllDistBackend(
+            {
+                0: [
+                    LookupIdsPayload(
+                        rank=0,
+                        destination_ranks=torch.tensor([0], dtype=torch.int64, device=device),
+                        source_ranks=torch.tensor([0], dtype=torch.int64, device=device),
+                        row_positions=torch.tensor([3], dtype=torch.int64, device=device),
+                        fused_ids=torch.tensor([13], dtype=torch.int64, device=device),
+                    ),
+                    LookupIdsPayload(
+                        rank=1,
+                        destination_ranks=torch.tensor([0], dtype=torch.int64, device=device),
+                        source_ranks=torch.tensor([1], dtype=torch.int64, device=device),
+                        row_positions=torch.tensor([9], dtype=torch.int64, device=device),
+                        fused_ids=torch.tensor([21], dtype=torch.int64, device=device),
+                    ),
+                ]
+            },
+            current_rank=0,
+            backend_name="nccl",
+        )
+
+        exchanged = exchange_lookup_ids(local_payload, world_size=2, backend=backend)
+
+        self.assertEqual(backend.created_groups, [])
+        for payload in exchanged:
+            self.assertEqual(payload.destination_ranks.device.type, "cuda")
+            self.assertEqual(payload.source_ranks.device.type, "cuda")
+            self.assertEqual(payload.row_positions.device.type, "cuda")
+            self.assertEqual(payload.fused_ids.device.type, "cuda")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for grouped-index device coverage")
+    def test_group_row_indices_helpers_keep_tensor_indices_on_cuda(self):
+        self._assert_grouping_and_permutation_helpers(torch.device("cuda", 0))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for NCCL device-preservation coverage")
+    def test_exchange_sparse_grads_keeps_cuda_payload_fields_on_nccl_all_to_all(self):
+        device = torch.device("cuda", 0)
+        local_payload = SparseGradPayload(
+            rank=0,
+            destination_ranks=torch.tensor([0, 1], dtype=torch.int64, device=device),
+            source_ranks=torch.tensor([0, 0], dtype=torch.int64, device=device),
+            row_positions=torch.tensor([3, 4], dtype=torch.int64, device=device),
+            fused_ids=torch.tensor([13, 17], dtype=torch.int64, device=device),
+            grads=torch.tensor([[1.0, 1.5], [2.0, 2.5]], dtype=torch.float32, device=device),
+        )
+        backend = FakeAllToAllDistBackend(
+            {
+                0: [
+                    SparseGradPayload(
+                        rank=0,
+                        destination_ranks=torch.tensor([0], dtype=torch.int64, device=device),
+                        source_ranks=torch.tensor([0], dtype=torch.int64, device=device),
+                        row_positions=torch.tensor([3], dtype=torch.int64, device=device),
+                        fused_ids=torch.tensor([13], dtype=torch.int64, device=device),
+                        grads=torch.tensor([[1.0, 1.5]], dtype=torch.float32, device=device),
+                    ),
+                    SparseGradPayload(
+                        rank=1,
+                        destination_ranks=torch.tensor([0], dtype=torch.int64, device=device),
+                        source_ranks=torch.tensor([1], dtype=torch.int64, device=device),
+                        row_positions=torch.tensor([9], dtype=torch.int64, device=device),
+                        fused_ids=torch.tensor([21], dtype=torch.int64, device=device),
+                        grads=torch.tensor([[3.0, 3.5]], dtype=torch.float32, device=device),
+                    ),
+                ]
+            },
+            current_rank=0,
+            backend_name="nccl",
+        )
+
+        exchanged = exchange_sparse_grads(local_payload, world_size=2, backend=backend)
+
+        self.assertEqual(backend.created_groups, [])
+        for payload in exchanged:
+            self.assertEqual(payload.destination_ranks.device.type, "cuda")
+            self.assertEqual(payload.source_ranks.device.type, "cuda")
+            self.assertEqual(payload.row_positions.device.type, "cuda")
+            self.assertEqual(payload.fused_ids.device.type, "cuda")
+            self.assertEqual(payload.grads.device.type, "cuda")
 
 
 if __name__ == "__main__":
