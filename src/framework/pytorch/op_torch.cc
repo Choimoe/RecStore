@@ -4,7 +4,6 @@
 #include <cstring>
 #include <iostream>
 #include <string>
-
 #include "base/tensor.h"
 #include "framework/op.h"
 // Log level: 0=ERROR, 1=WARNING, 2=INFO, 3=DEBUG
