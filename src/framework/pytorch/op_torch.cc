@@ -29,11 +29,9 @@ static torch::TensorOptions PinnedCpuOptions(torch::ScalarType dtype) {
       .pinned_memory(true);
 }
 
-static torch::Tensor StageCudaTensorToPinnedCpu(
-    const torch::Tensor& tensor, torch::ScalarType dtype) {
-  auto cpu_tensor = torch::empty(
-      tensor.sizes(),
-      PinnedCpuOptions(dtype));
+static torch::Tensor StageCudaTensorToPinnedCpu(const torch::Tensor& tensor,
+                                                torch::ScalarType dtype) {
+  auto cpu_tensor = torch::empty(tensor.sizes(), PinnedCpuOptions(dtype));
   cpu_tensor.copy_(tensor.to(dtype), /*non_blocking=*/false);
   return cpu_tensor;
 }
@@ -74,15 +72,14 @@ torch::Tensor emb_read_torch(const torch::Tensor& keys, int64_t embedding_dim) {
 static std::shared_ptr<KVClientOp> GetConcreteKVClientOp() {
   auto op    = GetKVClientOp();
   auto kv_op = std::dynamic_pointer_cast<KVClientOp>(op);
-  TORCH_CHECK(
-      kv_op != nullptr, "storage backend is not KVClientOp");
+  TORCH_CHECK(kv_op != nullptr, "storage backend is not KVClientOp");
   return kv_op;
 }
 
-torch::Tensor local_lookup_flat_torch(const torch::Tensor& keys,
-                                      int64_t embedding_dim) {
-  bool is_cuda           = keys.is_cuda();
-  auto orig_device       = keys.device();
+torch::Tensor
+local_lookup_flat_torch(const torch::Tensor& keys, int64_t embedding_dim) {
+  bool is_cuda     = keys.is_cuda();
+  auto orig_device = keys.device();
   torch::Tensor cpu_keys =
       is_cuda ? StageCudaTensorToPinnedCpu(keys, torch::kInt64) : keys;
 
@@ -106,10 +103,12 @@ torch::Tensor local_lookup_flat_torch(const torch::Tensor& keys,
 
   auto cpu_values =
       is_cuda
-          ? torch::empty({num_keys, embedding_dim}, PinnedCpuOptions(torch::kFloat32))
-          : torch::empty(
-                {num_keys, embedding_dim},
-                torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+          ? torch::empty({num_keys, embedding_dim},
+                         PinnedCpuOptions(torch::kFloat32))
+          : torch::empty({num_keys, embedding_dim},
+                         torch::TensorOptions()
+                             .device(torch::kCPU)
+                             .dtype(torch::kFloat32));
 
   base::RecTensor rec_keys   = ToRecTensor(cpu_keys, base::DataType::UINT64);
   base::RecTensor rec_values = ToRecTensor(cpu_values, base::DataType::FLOAT32);
@@ -236,7 +235,8 @@ void local_update_flat_torch(const std::string& table_name,
   torch::Tensor cpu_keys =
       keys.is_cuda() ? StageCudaTensorToPinnedCpu(keys, torch::kInt64) : keys;
   torch::Tensor cpu_grads =
-      grads.is_cuda() ? StageCudaTensorToPinnedCpu(grads, torch::kFloat32) : grads;
+      grads.is_cuda() ? StageCudaTensorToPinnedCpu(grads, torch::kFloat32)
+                      : grads;
 
   base::RecTensor rec_keys  = ToRecTensor(cpu_keys, base::DataType::UINT64);
   base::RecTensor rec_grads = ToRecTensor(cpu_grads, base::DataType::FLOAT32);
