@@ -123,6 +123,7 @@ class TestShardedRecstoreClient(unittest.TestCase):
         self,
         *,
         hash_method: str = "simple_mod",
+        cache_ps_type: str | None = None,
         distributed_servers: list[dict] | None = None,
         cache_servers: list[dict] | None = None,
         distributed_num_shards: int | None = None,
@@ -152,6 +153,8 @@ class TestShardedRecstoreClient(unittest.TestCase):
                 "hash_method": hash_method,
             },
         }
+        if cache_ps_type is not None:
+            cfg["cache_ps"]["ps_type"] = cache_ps_type
         if include_distributed_num_shards:
             cfg["distributed_client"]["num_shards"] = distributed_num_shards
         if include_distributed_servers:
@@ -524,6 +527,71 @@ class TestShardedRecstoreClient(unittest.TestCase):
 
         self.assertEqual(out.shape, (2, 4))
         self.assertEqual(fake_client.ops.lookup_calls, [(20001, [7, 3], 4)])
+
+    def test_activate_shard_skips_transport_reconfig_for_shared_local_shm_single_table(self) -> None:
+        runtime_dir = self._make_runtime_dir(
+            cache_ps_type="LOCAL_SHM",
+            cache_servers=[
+                {"host": "127.0.0.1", "port": 20000, "shard": 0},
+            ],
+        )
+        cfg = json.loads((runtime_dir / "recstore_config.json").read_text(encoding="utf-8"))
+        cfg["cache_ps"]["num_shards"] = 1
+        (runtime_dir / "recstore_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        fake_client = _FakeClient()
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+
+        client._activate_shard(1)
+
+        self.assertEqual(client._active_shard, 1)
+        self.assertEqual(fake_client.ops.port_history, [])
+
+    def test_activate_shard_keeps_transport_reconfig_for_non_shared_local_shm_runtime(self) -> None:
+        runtime_dir = self._make_runtime_dir(cache_ps_type="LOCAL_SHM")
+        cfg = json.loads((runtime_dir / "recstore_config.json").read_text(encoding="utf-8"))
+        cfg["cache_ps"]["num_shards"] = 2
+        cfg["cache_ps"]["servers"] = [
+            {"host": "127.0.0.1", "port": 20000, "shard": 0},
+            {"host": "127.0.0.1", "port": 20001, "shard": 1},
+        ]
+        (runtime_dir / "recstore_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        fake_client = _FakeClient()
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+
+        client._activate_shard(1)
+
+        self.assertEqual(client._active_shard, 1)
+        self.assertEqual(fake_client.ops.port_history, [20001])
+
+    def test_reports_shared_local_shm_single_table_runtime_only_when_config_is_unambiguous(self) -> None:
+        runtime_dir = self._make_runtime_dir(
+            cache_ps_type="LOCAL_SHM",
+            cache_servers=[
+                {"host": "127.0.0.1", "port": 20000, "shard": 0},
+            ],
+        )
+        cfg = json.loads((runtime_dir / "recstore_config.json").read_text(encoding="utf-8"))
+        cfg["cache_ps"]["num_shards"] = 1
+        (runtime_dir / "recstore_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        fake_client = _FakeClient()
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+
+        self.assertTrue(client.is_shared_local_shm_table())
+
+    def test_reports_non_shared_runtime_when_local_shm_cache_exposes_multiple_shards(self) -> None:
+        runtime_dir = self._make_runtime_dir(cache_ps_type="LOCAL_SHM")
+        cfg = json.loads((runtime_dir / "recstore_config.json").read_text(encoding="utf-8"))
+        cfg["cache_ps"]["num_shards"] = 2
+        cfg["cache_ps"]["servers"] = [
+            {"host": "127.0.0.1", "port": 20000, "shard": 0},
+            {"host": "127.0.0.1", "port": 20001, "shard": 1},
+        ]
+        (runtime_dir / "recstore_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+        fake_client = _FakeClient()
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+
+        self.assertFalse(client.is_shared_local_shm_table())
 
     def test_local_update_flat_normalizes_inputs_and_forwards_to_active_shard(self) -> None:
         runtime_dir = self._make_runtime_dir()

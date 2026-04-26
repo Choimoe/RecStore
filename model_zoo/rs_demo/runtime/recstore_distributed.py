@@ -60,6 +60,18 @@ def _load_num_shards(distributed_cfg: dict, cache_cfg: dict, servers: list[Shard
     return len(servers)
 
 
+def _load_cache_servers(cache_cfg: dict) -> list[ShardServer]:
+    raw_servers = cache_cfg.get("servers") or []
+    return [
+        ShardServer(
+            shard=int(server["shard"]),
+            host=str(server["host"]),
+            port=int(server["port"]),
+        )
+        for server in raw_servers
+    ]
+
+
 def _load_hash_method(distributed_cfg: dict) -> str:
     return str(distributed_cfg.get("hash_method", "city_hash"))
 
@@ -98,6 +110,9 @@ class ShardedRecstoreClient:
         cfg = _load_runtime_config(runtime_dir)
         distributed_cfg, cache_cfg = _load_client_configs(cfg)
         self._client = client
+        self._cache_ps_type = str(cache_cfg.get("ps_type", "")).upper()
+        self._cache_servers = _load_cache_servers(cache_cfg)
+        self._cache_num_shards = _load_num_shards({}, cache_cfg, self._cache_servers)
         self._servers = _load_shard_servers(
             distributed_cfg, cache_cfg, runtime_dir / "recstore_config.json"
         )
@@ -137,6 +152,9 @@ class ShardedRecstoreClient:
     def _activate_shard(self, shard: int) -> None:
         shard = int(shard)
         if self._active_shard == shard:
+            return
+        if self.is_shared_local_shm_table():
+            self._active_shard = shard
             return
         server = self._servers_by_shard.get(shard)
         if server is None:
@@ -280,6 +298,9 @@ class ShardedRecstoreClient:
             )
         return str(self._client.ops.current_ps_backend())
 
+    def activate_shard(self, shard: int) -> None:
+        self._activate_shard(int(shard))
+
     def set_ps_backend(self, backend: str) -> None:
         if not isinstance(backend, str) or not backend:
             raise ValueError("backend must be a non-empty string")
@@ -288,6 +309,15 @@ class ShardedRecstoreClient:
                 "set_ps_backend requires a RecStore ops library exposing set_ps_backend()."
             )
         self._client.ops.set_ps_backend(backend)
+
+    def is_shared_local_shm_table(self) -> bool:
+        if self._cache_ps_type != "LOCAL_SHM":
+            return False
+        if self._cache_num_shards != 1:
+            return False
+        if len(self._cache_servers) != 1:
+            return False
+        return True
 
     def local_lookup_flat(self, name: str, ids: torch.Tensor) -> torch.Tensor:
         if name not in self._tensor_meta:
