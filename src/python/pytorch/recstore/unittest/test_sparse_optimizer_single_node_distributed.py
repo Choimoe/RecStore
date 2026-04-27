@@ -274,6 +274,8 @@ class TestSparseOptimizerSingleNodeDistributed(unittest.TestCase):
         self.assertIsInstance(profile, dict)
         self.assertEqual(profile.get("exchange_ms"), 0.0)
         self.assertEqual(profile.get("owner_aggregate_ms"), 0.0)
+        self.assertIn("trace_collect_ms", profile)
+        self.assertIn("trace_aggregate_ms", profile)
         self.assertGreaterEqual(profile.get("local_update_ms", -1.0), 0.0)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for GPU-resident sparse fast path coverage")

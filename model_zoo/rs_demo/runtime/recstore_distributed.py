@@ -328,6 +328,31 @@ class ShardedRecstoreClient:
         normalized_ids = self._normalize_ids(ids, keep_device=True)
         return self._client.ops.local_lookup_flat(normalized_ids, embedding_dim)
 
+    def warmup_local_lookup_flat_cuda_region(self) -> bool:
+        self._require_active_shard("warmup_local_lookup_flat_cuda_region")
+        self._require_local_shm_backend("warmup_local_lookup_flat_cuda_region")
+        warmup = getattr(self._client.ops, "warmup_local_lookup_flat_cuda_region", None)
+        if not callable(warmup):
+            return False
+        return bool(warmup())
+
+    def get_last_local_shm_lookup_profile(self) -> dict[str, float]:
+        getter = getattr(self._client.ops, "get_last_local_lookup_flat_profile", None)
+        if not callable(getter):
+            return {}
+        values = getter()
+        if not isinstance(values, (list, tuple)) or len(values) < 7:
+            return {}
+        return {
+            "lookup_cpp_total_ms": float(values[0]),
+            "lookup_keys_stage_ms": float(values[1]),
+            "lookup_submit_ms": float(values[2]),
+            "lookup_wait_ms": float(values[3]),
+            "lookup_payload_pin_ms": float(values[4]),
+            "lookup_fallback_copy_ms": float(values[5]),
+            "lookup_values_h2d_enqueue_ms": float(values[6]),
+        }
+
     def local_update_flat(self, name: str, ids: torch.Tensor, grads: torch.Tensor) -> None:
         if name not in self._tensor_meta:
             raise RuntimeError(f"Tensor '{name}' has not been initialized.")
@@ -345,6 +370,20 @@ class ShardedRecstoreClient:
                 f"grads second dimension must match embedding dim {embedding_dim} for tensor '{name}'"
             )
         self._client.ops.local_update_flat(name, normalized_ids, normalized_grads)
+
+    def get_last_local_shm_update_profile(self) -> dict[str, float]:
+        getter = getattr(self._client.ops, "get_last_local_update_flat_profile", None)
+        if not callable(getter):
+            return {}
+        values = getter()
+        if not isinstance(values, (list, tuple)) or len(values) < 4:
+            return {}
+        return {
+            "local_update_cpp_total_ms": float(values[0]),
+            "local_update_keys_stage_ms": float(values[1]),
+            "local_update_grads_stage_ms": float(values[2]),
+            "local_update_shm_call_ms": float(values[3]),
+        }
 
     def emb_update_table(self, table_name: str, keys: torch.Tensor, grads: torch.Tensor) -> None:
         if keys.numel() == 0:

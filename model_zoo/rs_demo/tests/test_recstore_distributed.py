@@ -24,6 +24,7 @@ class _FakeOps:
         self.lookup_calls: list[tuple[int | None, list[int], int]] = []
         self.update_calls: list[tuple[int | None, str, list[int], list[list[float]]]] = []
         self.backend_switch_calls: list[str] = []
+        self.lookup_region_warmup_calls = 0
 
     def set_ps_config(self, host: str, port: int) -> None:
         self.active_port = int(port)
@@ -52,6 +53,10 @@ class _FakeOps:
                 [[float(x) for x in row] for row in grads.tolist()],
             )
         )
+
+    def warmup_local_lookup_flat_cuda_region(self) -> bool:
+        self.lookup_region_warmup_calls += 1
+        return True
 
 
 class _FakeClient:
@@ -608,6 +613,25 @@ class TestShardedRecstoreClient(unittest.TestCase):
             fake_client.ops.update_calls,
             [(20000, "table0", [7, 3], grads.to(dtype=torch.float32).tolist())],
         )
+
+    def test_warmup_local_lookup_flat_cuda_region_forwards_to_underlying_ops(self) -> None:
+        runtime_dir = self._make_runtime_dir(
+            cache_ps_type="LOCAL_SHM",
+            cache_servers=[
+                {"host": "127.0.0.1", "port": 20000, "shard": 0},
+            ],
+        )
+        cfg = json.loads((runtime_dir / "recstore_config.json").read_text(encoding="utf-8"))
+        cfg["cache_ps"]["num_shards"] = 1
+        (runtime_dir / "recstore_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        fake_client = _FakeClient()
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+        client._activate_shard(0)
+
+        ok = client.warmup_local_lookup_flat_cuda_region()
+
+        self.assertTrue(ok)
+        self.assertEqual(fake_client.ops.lookup_region_warmup_calls, 1)
 
     def test_local_flat_ops_fail_loudly_for_non_local_backend(self) -> None:
         runtime_dir = self._make_runtime_dir()

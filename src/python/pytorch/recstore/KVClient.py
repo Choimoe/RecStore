@@ -2,7 +2,7 @@ import torch
 import os
 import time
 import ctypes
-from typing import Optional, Tuple, List, Any, Callable
+from typing import Optional, Tuple, List, Dict, Any, Callable
 
 def get_reporter():
     if not hasattr(get_reporter, 'lib'):
@@ -312,6 +312,23 @@ class RecStoreClient:
         ids = self._normalize_ids(ids, preserve_device=True)
         return self.ops.local_lookup_flat(ids, int(embedding_dim))
 
+    def get_last_local_shm_lookup_profile(self) -> Dict[str, float]:
+        getter = getattr(self.ops, "get_last_local_lookup_flat_profile", None)
+        if not callable(getter):
+            return {}
+        values = getter()
+        if not isinstance(values, (list, tuple)) or len(values) < 7:
+            return {}
+        return {
+            "lookup_cpp_total_ms": float(values[0]),
+            "lookup_keys_stage_ms": float(values[1]),
+            "lookup_submit_ms": float(values[2]),
+            "lookup_wait_ms": float(values[3]),
+            "lookup_payload_pin_ms": float(values[4]),
+            "lookup_fallback_copy_ms": float(values[5]),
+            "lookup_values_h2d_enqueue_ms": float(values[6]),
+        }
+
     def local_update_flat(self, name: str, ids: torch.Tensor, grads: torch.Tensor) -> None:
         if name not in self._tensor_meta:
             raise RuntimeError(f"Tensor '{name}' has not been initialized.")
@@ -324,6 +341,20 @@ class RecStoreClient:
         if ids.size(0) != grads.size(0):
             raise ValueError("ids and grads must have the same number of rows")
         self.ops.local_update_flat(name, ids, grads)
+
+    def get_last_local_shm_update_profile(self) -> Dict[str, float]:
+        getter = getattr(self.ops, "get_last_local_update_flat_profile", None)
+        if not callable(getter):
+            return {}
+        values = getter()
+        if not isinstance(values, (list, tuple)) or len(values) < 4:
+            return {}
+        return {
+            "local_update_cpp_total_ms": float(values[0]),
+            "local_update_keys_stage_ms": float(values[1]),
+            "local_update_grads_stage_ms": float(values[2]),
+            "local_update_shm_call_ms": float(values[3]),
+        }
 
     def push(self, name: str, ids: torch.Tensor, data: torch.Tensor):
         """Push data to KVServer.

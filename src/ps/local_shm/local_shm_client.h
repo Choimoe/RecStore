@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
@@ -55,6 +56,7 @@ public:
                          const EmbeddingTableConfig& config) override;
   int AsyncGetParameter(const base::ConstArray<uint64_t>& keys,
                         float* values) override;
+  bool GetSlotPayloadRegion(const void** base, std::size_t* bytes) const;
 
   void Command(PSCommand command) override;
 

@@ -284,5 +284,16 @@ bool KVClientOp::IsPrefetchDone(uint64_t prefetch_id) {
   return prefetch_results_.find(prefetch_id) != prefetch_results_.end();
 }
 
+bool KVClientOp::GetLocalLookupFlatPayloadRegion(const void** base,
+                                                 std::size_t* bytes) {
+  if (base != nullptr) {
+    *base = nullptr;
+  }
+  if (bytes != nullptr) {
+    *bytes = 0;
+  }
+  return false;
+}
+
 } // namespace recstore
 #endif

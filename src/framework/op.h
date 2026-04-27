@@ -3,6 +3,7 @@
 #include "base/tensor.h"
 #include "framework/common/op_runtime_support.h"
 #include "ps/base/base_client.h"
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <mutex>
@@ -159,6 +160,7 @@ public:
                             LocalShmFlatGetHandle* handle);
   int WaitLocalLookupFlat(LocalShmFlatGetHandle* handle);
   void ReleaseLocalLookupFlat(LocalShmFlatGetHandle* handle);
+  bool GetLocalLookupFlatPayloadRegion(const void** base, std::size_t* bytes);
   void LocalUpdateFlat(const std::string& table_name,
                        const base::RecTensor& keys,
                        const base::RecTensor& grads);
