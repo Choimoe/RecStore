@@ -37,12 +37,11 @@ bool IsHierKVBackendName(const std::string& backend_name) {
 }
 
 std::string NormalizeBackendName(std::string backend_name) {
-  std::transform(backend_name.begin(),
-                 backend_name.end(),
-                 backend_name.begin(),
-                 [](unsigned char c) {
-                   return static_cast<char>(std::tolower(c));
-                 });
+  std::transform(
+      backend_name.begin(),
+      backend_name.end(),
+      backend_name.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return backend_name;
 }
 
@@ -81,7 +80,8 @@ struct HierKVLocalRuntime {
   int64_t default_embedding_dim = -1;
   std::unordered_map<std::string, EmbeddingTableConfig> table_configs;
   std::unordered_map<uint64_t, std::vector<float>> store;
-  std::unordered_map<uint64_t, std::vector<std::vector<float>>> prefetch_results;
+  std::unordered_map<uint64_t, std::vector<std::vector<float>>>
+      prefetch_results;
   uint64_t next_prefetch_id = 1;
 
   static void ValidateKeys(const base::RecTensor& keys) {
@@ -91,9 +91,9 @@ struct HierKVLocalRuntime {
           base::DataTypeToString(keys.dtype()));
     }
     if (keys.dim() != 1) {
-      throw std::invalid_argument("Keys tensor must be 1-dimensional, but has " +
-                                  std::to_string(keys.dim()) +
-                                  " dimensions.");
+      throw std::invalid_argument(
+          "Keys tensor must be 1-dimensional, but has " +
+          std::to_string(keys.dim()) + " dimensions.");
     }
   }
 
@@ -121,10 +121,10 @@ struct HierKVLocalRuntime {
       return;
     }
     if (default_embedding_dim != embedding_dim) {
-      throw std::runtime_error(std::string(api_name) +
-                               " embedding dim mismatch: expected " +
-                               std::to_string(default_embedding_dim) +
-                               ", got " + std::to_string(embedding_dim));
+      throw std::runtime_error(
+          std::string(api_name) + " embedding dim mismatch: expected " +
+          std::to_string(default_embedding_dim) + ", got " +
+          std::to_string(embedding_dim));
     }
   }
 
@@ -137,9 +137,10 @@ struct HierKVLocalRuntime {
     if (it != table_configs.end()) {
       if (it->second.embedding_dim != config.embedding_dim ||
           it->second.num_embeddings != config.num_embeddings) {
-        throw std::runtime_error("HierKV table already exists with different "
-                                 "shape: " +
-                                 table_name);
+        throw std::runtime_error(
+            "HierKV table already exists with different "
+            "shape: " +
+            table_name);
       }
       return true;
     }
@@ -180,7 +181,7 @@ struct HierKVLocalRuntime {
     const uint64_t* key_data = keys.data_as<uint64_t>();
     float* out_data          = values.data_as<float>();
     for (int64_t row = 0; row < num_rows; ++row) {
-      auto it      = store.find(key_data[row]);
+      auto it        = store.find(key_data[row]);
       float* out_row = out_data + row * embedding_dim;
       if (it == store.end()) {
         std::fill(out_row, out_row + embedding_dim, 0.0f);
@@ -213,8 +214,8 @@ struct HierKVLocalRuntime {
       if (table_it != table_configs.end() &&
           static_cast<int64_t>(table_it->second.embedding_dim) !=
               embedding_dim) {
-        throw std::runtime_error("HierKV table dim mismatch for update: " +
-                                 table_name);
+        throw std::runtime_error(
+            "HierKV table dim mismatch for update: " + table_name);
       }
     }
 
@@ -264,8 +265,8 @@ struct HierKVLocalRuntime {
   void WaitForPrefetch(uint64_t prefetch_id) {
     std::lock_guard<std::mutex> lock(mu);
     if (prefetch_results.find(prefetch_id) == prefetch_results.end()) {
-      throw std::runtime_error("unknown HierKV prefetch_id: " +
-                               std::to_string(prefetch_id));
+      throw std::runtime_error(
+          "unknown HierKV prefetch_id: " + std::to_string(prefetch_id));
     }
   }
 
@@ -274,8 +275,8 @@ struct HierKVLocalRuntime {
     std::lock_guard<std::mutex> lock(mu);
     auto it = prefetch_results.find(prefetch_id);
     if (it == prefetch_results.end()) {
-      throw std::runtime_error("unknown HierKV prefetch_id: " +
-                               std::to_string(prefetch_id));
+      throw std::runtime_error(
+          "unknown HierKV prefetch_id: " + std::to_string(prefetch_id));
     }
     *values = it->second;
     prefetch_results.erase(it);
@@ -481,7 +482,7 @@ void ConfigureLogging(bool initialize_google_logging) {
 KVClientOp::KVClientOp() {
   if (!ps_client_) {
     try {
-      json config   = GetGlobalConfig();
+      json config      = GetGlobalConfig();
       ps_backend_name_ = BackendNameFromConfig(config);
       if (IsHierKVBackendName(ps_backend_name_)) {
         ConfigureLogging();
@@ -599,10 +600,11 @@ void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
                                  base::RecTensor& values) {
   if (ps_backend_name_ != "local_shm" &&
       !IsHierKVBackendName(ps_backend_name_)) {
-    throw std::runtime_error("local_lookup_flat requires local_shm or hierkv "
-                             "backend, "
-                             "but current backend is " +
-                             ps_backend_name_);
+    throw std::runtime_error(
+        "local_lookup_flat requires local_shm or hierkv "
+        "backend, "
+        "but current backend is " +
+        ps_backend_name_);
   }
   EmbRead(keys, values);
 }
@@ -612,10 +614,11 @@ void KVClientOp::LocalUpdateFlat(const std::string& table_name,
                                  const base::RecTensor& grads) {
   if (ps_backend_name_ != "local_shm" &&
       !IsHierKVBackendName(ps_backend_name_)) {
-    throw std::runtime_error("local_update_flat requires local_shm or hierkv "
-                             "backend, "
-                             "but current backend is " +
-                             ps_backend_name_);
+    throw std::runtime_error(
+        "local_update_flat requires local_shm or hierkv "
+        "backend, "
+        "but current backend is " +
+        ps_backend_name_);
   }
   EmbUpdate(table_name, keys, grads);
 }

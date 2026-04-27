@@ -98,10 +98,10 @@ local_lookup_flat_torch(const torch::Tensor& keys, int64_t embedding_dim) {
   TORCH_CHECK(embedding_dim > 0, "Embedding dimension must be positive");
 
   auto kv_op = GetConcreteKVClientOp();
-  TORCH_CHECK(
-      IsLocalFastPathBackend(kv_op->CurrentPSBackend()),
-      "local_lookup_flat requires local_shm or hierkv backend, but current backend is ",
-      kv_op->CurrentPSBackend());
+  TORCH_CHECK(IsLocalFastPathBackend(kv_op->CurrentPSBackend()),
+              "local_lookup_flat requires local_shm or hierkv backend, but "
+              "current backend is ",
+              kv_op->CurrentPSBackend());
 
   const int64_t num_keys = cpu_keys.size(0);
   if (num_keys == 0) {
@@ -231,10 +231,10 @@ void local_update_flat_torch(const std::string& table_name,
               "Keys and grads tensors must have the same number of entries");
 
   auto kv_op = GetConcreteKVClientOp();
-  TORCH_CHECK(
-      IsLocalFastPathBackend(kv_op->CurrentPSBackend()),
-      "local_update_flat requires local_shm or hierkv backend, but current backend is ",
-      kv_op->CurrentPSBackend());
+  TORCH_CHECK(IsLocalFastPathBackend(kv_op->CurrentPSBackend()),
+              "local_update_flat requires local_shm or hierkv backend, but "
+              "current backend is ",
+              kv_op->CurrentPSBackend());
 
   if (keys.size(0) == 0) {
     return;
