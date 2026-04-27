@@ -9,6 +9,8 @@ import time
 import uuid
 from pathlib import Path
 
+_LOCAL_SHM_READY_DELAY_S = 0.5
+
 
 def resolve_kv_data_path(
     output_root: str,
@@ -71,7 +73,16 @@ def wait_server_ready(
     port0: int,
     port1: int,
     timeout_s: float,
+    ps_type: str = "BRPC",
 ) -> bool:
+    if str(ps_type).upper() == "LOCAL_SHM":
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return False
+            time.sleep(_LOCAL_SHM_READY_DELAY_S)
+            return proc.poll() is None
+        return False
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if proc.poll() is not None:
@@ -94,6 +105,7 @@ def build_runtime_config(
     output_root: str,
     run_id: str,
     kv_capacity: int | None = None,
+    value_size_bytes: int | None = None,
 ) -> dict:
     cfg = copy.deepcopy(base_cfg)
     cfg.setdefault("cache_ps", {})
@@ -116,6 +128,15 @@ def build_runtime_config(
         {"host": host, "port": port0, "shard": 0},
         {"host": host, "port": port1, "shard": 1},
     ]
+    if cfg["cache_ps"]["ps_type"] == "LOCAL_SHM":
+        cfg["local_shm"] = {
+            "region_name": f"recstore_rs_demo_{run_id}_{path_suffix}",
+            "slot_count": 256,
+            "ready_queue_count": 2,
+            "ready_queue_burst_limit": 16,
+            "slot_buffer_bytes": 8 * 1024 * 1024,
+            "client_timeout_ms": 30000,
+        }
 
     base_kv = cfg["cache_ps"].setdefault("base_kv_config", {})
     base_kv["value_memory_management"] = allocator
@@ -128,6 +149,8 @@ def build_runtime_config(
     base_kv["index_type"] = "DRAM"
     if kv_capacity is not None:
         base_kv["capacity"] = int(kv_capacity)
+    if value_size_bytes is not None:
+        base_kv["value_size"] = int(value_size_bytes)
     return cfg
 
 
@@ -145,7 +168,13 @@ def resolve_default_ports(base_cfg: dict) -> tuple[int, int]:
 
 
 def start_server(repo_root: Path, cfg_path: Path, log_path: Path) -> subprocess.Popen:
-    server_bin = repo_root / "build/bin/ps_server"
+    with cfg_path.open("r", encoding="utf-8") as f:
+        runtime_cfg = json.load(f)
+    ps_type = str(runtime_cfg.get("cache_ps", {}).get("ps_type", "BRPC")).upper()
+    if ps_type == "LOCAL_SHM":
+        server_bin = repo_root / "build/bin/local_shm_ps_server"
+    else:
+        server_bin = repo_root / "build/bin/ps_server"
     if not server_bin.exists():
         raise FileNotFoundError(f"ps_server not found: {server_bin}")
 
@@ -190,6 +219,7 @@ def make_runtime_dir(
     run_id: str,
     ps_type: str = "BRPC",
     kv_capacity: int | None = None,
+    value_size_bytes: int | None = None,
 ) -> tuple[Path, Path]:
     unique_tag = f"{time.time_ns()}_{uuid.uuid4().hex[:8]}"
     runtime_cfg = build_runtime_config(
@@ -203,6 +233,7 @@ def make_runtime_dir(
         output_root=output_root,
         run_id=run_id,
         kv_capacity=kv_capacity,
+        value_size_bytes=value_size_bytes,
     )
     runtime_dir = Path(output_root) / "runtime" / run_id / unique_tag
     runtime_dir.mkdir(parents=True, exist_ok=True)

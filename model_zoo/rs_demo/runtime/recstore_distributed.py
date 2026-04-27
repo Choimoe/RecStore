@@ -140,11 +140,18 @@ class ShardedRecstoreClient:
         shard = int(shard)
         if self._active_shard == shard:
             return
+        current_backend = None
+        if hasattr(self._client, "ops") and hasattr(self._client.ops, "current_ps_backend"):
+            current_backend = str(self._client.ops.current_ps_backend())
         server = self._servers_by_shard.get(shard)
         if server is None:
             raise RuntimeError(f"no server configured for shard {shard}")
-        self._client.ops.set_ps_config(server.host, server.port)
+        if current_backend not in _LOCAL_FAST_PATH_BACKENDS:
+            self._client.ops.set_ps_config(server.host, server.port)
         self._active_shard = shard
+
+    def activate_shard(self, shard: int) -> None:
+        self._activate_shard(shard)
 
     def _group_indices(self, keys: torch.Tensor) -> list[tuple[int, torch.Tensor]]:
         shard_to_indices: dict[int, list[int]] = {}

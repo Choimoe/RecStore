@@ -20,7 +20,7 @@ class _FakeOps:
     def __init__(self) -> None:
         self.active_port: int | None = None
         self.port_history: list[int] = []
-        self.backend = "local_shm"
+        self.backend = "brpc"
         self.lookup_calls: list[tuple[int | None, list[int], int]] = []
         self.update_calls: list[tuple[int | None, str, list[int], list[list[float]]]] = []
         self.backend_switch_calls: list[str] = []
@@ -505,7 +505,7 @@ class TestShardedRecstoreClient(unittest.TestCase):
         fake_client = _FakeClient()
         client = ShardedRecstoreClient(fake_client, runtime_dir)
 
-        self.assertEqual(client.current_ps_backend(), "local_shm")
+        self.assertEqual(client.current_ps_backend(), "brpc")
 
         client.set_ps_backend("brpc")
 
@@ -515,6 +515,7 @@ class TestShardedRecstoreClient(unittest.TestCase):
     def test_local_lookup_flat_normalizes_ids_and_forwards_to_active_shard(self) -> None:
         runtime_dir = self._make_runtime_dir()
         fake_client = _FakeClient()
+        fake_client.ops.backend = "local_shm"
         client = ShardedRecstoreClient(fake_client, runtime_dir)
         client.register_tensor_meta("table0", shape=(16, 4), dtype=torch.float32)
         client._activate_shard(1)
@@ -523,11 +524,14 @@ class TestShardedRecstoreClient(unittest.TestCase):
         out = client.local_lookup_flat("table0", ids)
 
         self.assertEqual(out.shape, (2, 4))
-        self.assertEqual(fake_client.ops.lookup_calls, [(20001, [7, 3], 4)])
+        self.assertEqual(fake_client.ops.lookup_calls, [(None, [7, 3], 4)])
+        self.assertEqual(client._active_shard, 1)
+        self.assertEqual(fake_client.ops.port_history, [])
 
     def test_local_update_flat_normalizes_inputs_and_forwards_to_active_shard(self) -> None:
         runtime_dir = self._make_runtime_dir()
         fake_client = _FakeClient()
+        fake_client.ops.backend = "local_shm"
         client = ShardedRecstoreClient(fake_client, runtime_dir)
         client.register_tensor_meta("table0", shape=(16, 4), dtype=torch.float32)
         client._activate_shard(0)
@@ -538,8 +542,10 @@ class TestShardedRecstoreClient(unittest.TestCase):
 
         self.assertEqual(
             fake_client.ops.update_calls,
-            [(20000, "table0", [7, 3], grads.to(dtype=torch.float32).tolist())],
+            [(None, "table0", [7, 3], grads.to(dtype=torch.float32).tolist())],
         )
+        self.assertEqual(client._active_shard, 0)
+        self.assertEqual(fake_client.ops.port_history, [])
 
     def test_local_flat_ops_allow_hierkv_backend(self) -> None:
         runtime_dir = self._make_runtime_dir()
@@ -555,11 +561,12 @@ class TestShardedRecstoreClient(unittest.TestCase):
         client.local_update_flat("table0", ids, grads)
 
         self.assertEqual(out.shape, (2, 4))
-        self.assertEqual(fake_client.ops.lookup_calls, [(20000, [7, 3], 4)])
+        self.assertEqual(fake_client.ops.lookup_calls, [(None, [7, 3], 4)])
         self.assertEqual(
             fake_client.ops.update_calls,
-            [(20000, "table0", [7, 3], grads.to(dtype=torch.float32).tolist())],
+            [(None, "table0", [7, 3], grads.to(dtype=torch.float32).tolist())],
         )
+        self.assertEqual(fake_client.ops.port_history, [])
 
     def test_local_flat_ops_fail_loudly_for_non_local_backend(self) -> None:
         runtime_dir = self._make_runtime_dir()

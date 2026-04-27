@@ -108,7 +108,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rdzv-id", type=str, default="")
     parser.add_argument("--output-root", type=str, default="/nas/home/shq/docker/rs_demo")
     parser.add_argument("--run-id", type=str, default="")
-    parser.add_argument("--ps-type", type=str, default="BRPC", choices=["BRPC", "GRPC"])
+    parser.add_argument(
+        "--ps-type",
+        type=str,
+        default="BRPC",
+        choices=["BRPC", "GRPC", "LOCAL_SHM"],
+    )
     parser.add_argument("--num-embeddings", type=int, default=200000)
     parser.add_argument("--embedding-dim", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=4096)

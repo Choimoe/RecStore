@@ -82,10 +82,18 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.server_port1 is None:
         cfg.server_port1 = p1_default
     server_needed = cfg.backend == "recstore" and cfg.start_server
+    effective_ps_type = cfg.ps_type
+    if (
+        cfg.backend == "recstore"
+        and cfg.enable_single_node_distributed_fast_path
+        and cfg.single_node_ps_backend == "local_shm"
+    ):
+        effective_ps_type = "LOCAL_SHM"
     if server_needed:
-        cfg.server_port0, cfg.server_port1 = choose_available_ports(
-            cfg.server_host, cfg.server_port0, cfg.server_port1
-        )
+        if effective_ps_type != "LOCAL_SHM":
+            cfg.server_port0, cfg.server_port1 = choose_available_ports(
+                cfg.server_host, cfg.server_port0, cfg.server_port1
+            )
 
     runtime_dir = Path(cfg.output_root) / "runtime" / cfg.run_id
     runtime_cfg_path = runtime_dir / "recstore_config.json"
@@ -102,14 +110,20 @@ def main(argv: list[str] | None = None) -> int:
                 allocator=cfg.allocator,
                 output_root=cfg.output_root,
                 run_id=cfg.run_id,
-                ps_type=cfg.ps_type,
+                ps_type=effective_ps_type,
                 kv_capacity=estimate_recstore_kv_capacity(cfg.num_embeddings),
+                value_size_bytes=(
+                    int(cfg.embedding_dim) * 4
+                    if effective_ps_type == "LOCAL_SHM"
+                    else None
+                ),
             )
+            cfg.recstore_runtime_dir = str(runtime_dir)
 
     proc = None
     try:
         if server_needed:
-            print(f"[rs_demo] starting server ({cfg.ps_type}) with {runtime_cfg_path}")
+            print(f"[rs_demo] starting server ({effective_ps_type}) with {runtime_cfg_path}")
             proc = start_server(repo_root, runtime_cfg_path, Path(cfg.server_log))
             if not wait_server_ready(
                 proc=proc,
@@ -117,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
                 port0=cfg.server_port0,
                 port1=cfg.server_port1,
                 timeout_s=cfg.server_wait_seconds,
+                ps_type=effective_ps_type,
             ):
                 raise RuntimeError(
                     f"server failed to become ready: {cfg.server_host}:{cfg.server_port0},{cfg.server_port1}; "

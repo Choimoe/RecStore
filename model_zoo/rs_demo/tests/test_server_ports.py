@@ -4,11 +4,13 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from model_zoo.rs_demo.runtime.server import (
     choose_available_ports,
     make_runtime_dir,
     resolve_kv_data_path,
+    wait_server_ready,
 )
 
 
@@ -94,6 +96,40 @@ class TestChooseAvailablePorts(unittest.TestCase):
             runtime_cfg = runtime_cfg_path.read_text(encoding="utf-8")
             self.assertIn('"path"', runtime_cfg)
             self.assertIn(str(Path(tmpdir) / "runtime" / "case-shards"), runtime_cfg)
+
+    def test_make_runtime_dir_writes_local_shm_runtime_section(self) -> None:
+        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _runtime_dir, runtime_cfg_path = make_runtime_dir(
+                base_cfg=base_cfg,
+                host="127.0.0.1",
+                port0=15123,
+                port1=15124,
+                allocator="PersistLoopShmMalloc",
+                output_root=tmpdir,
+                run_id="case-local-shm",
+                ps_type="LOCAL_SHM",
+                value_size_bytes=256,
+            )
+            runtime_cfg = runtime_cfg_path.read_text(encoding="utf-8")
+            self.assertIn('"ps_type": "LOCAL_SHM"', runtime_cfg)
+            self.assertIn('"local_shm"', runtime_cfg)
+            self.assertIn('"region_name"', runtime_cfg)
+            self.assertIn('"value_size": 256', runtime_cfg)
+
+    def test_wait_server_ready_local_shm_only_requires_live_process(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        self.assertTrue(
+            wait_server_ready(
+                proc=proc,
+                host="127.0.0.1",
+                port0=15123,
+                port1=15124,
+                timeout_s=0.1,
+                ps_type="LOCAL_SHM",
+            )
+        )
 
     def test_r2shmmalloc_kv_path_falls_back_to_local_tmp(self) -> None:
         path = resolve_kv_data_path(
