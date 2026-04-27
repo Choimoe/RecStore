@@ -1,5 +1,6 @@
 import torch
 import logging
+import time
 import torch.nn.functional as F
 from torch.autograd import Function
 from typing import List, Dict, Any, Tuple
@@ -17,6 +18,14 @@ from ..recstore.single_node_exchange import (
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
+
+def _merge_profile_values(dst: Dict[str, float], src: Dict[str, Any] | None) -> None:
+    if not isinstance(src, dict):
+        return
+    for key, value in src.items():
+        if isinstance(value, (int, float)):
+            dst[key] = dst.get(key, 0.0) + float(value)
 
 
 class _RecStoreEBCFunction(Function):
@@ -415,6 +424,13 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         *,
         compute_device: torch.device,
     ) -> torch.Tensor:
+        profile: Dict[str, float] = {
+            "lookup_exchange_ids_ms": 0.0,
+            "lookup_local_lookup_ms": 0.0,
+            "lookup_exchange_responses_ms": 0.0,
+            "lookup_rebuild_ms": 0.0,
+            "lookup_post_rebuild_h2d_ms": 0.0,
+        }
         dist = torch.distributed
         rank = int(dist.get_rank())
         world_size = int(dist.get_world_size())
@@ -426,11 +442,15 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             rank=rank,
             world_size=world_size,
         )
+        exchange_ids_start = time.perf_counter()
         gathered_requests = exchange_lookup_ids(
             local_payload,
             world_size=world_size,
             backend=backend,
         )
+        profile["lookup_exchange_ids_ms"] += (
+            time.perf_counter() - exchange_ids_start
+        ) * 1e3
 
         owner_source_rank_tensors = [
             payload.source_ranks for payload in gathered_requests if payload.source_ranks.numel() > 0
@@ -445,9 +465,17 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
 
         if owner_id_tensors:
             local_ids = torch.cat(owner_id_tensors, dim=0).contiguous()
+            lookup_start = time.perf_counter()
             local_embeddings = self.kv_client.local_lookup_flat(
                 self._master_config.name,
                 local_ids,
+            )
+            profile["lookup_local_lookup_ms"] += (
+                time.perf_counter() - lookup_start
+            ) * 1e3
+            _merge_profile_values(
+                profile,
+                getattr(self.kv_client, "get_last_local_shm_lookup_profile", lambda: {})(),
             )
         else:
             local_ids = torch.empty((0,), dtype=torch.int64, device=payload_device)
@@ -473,18 +501,29 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             ),
             embeddings=local_embeddings,
         )
+        exchange_responses_start = time.perf_counter()
         gathered_responses = exchange_lookup_embedding_responses(
             response_payload,
             world_size=world_size,
             backend=backend,
         )
+        profile["lookup_exchange_responses_ms"] += (
+            time.perf_counter() - exchange_responses_start
+        ) * 1e3
+        rebuild_start = time.perf_counter()
         rebuilt = reassemble_lookup_embedding_responses(
             gathered_responses,
             requestor_rank=rank,
             total_rows=int(fused_ids.numel()),
         )
+        profile["lookup_rebuild_ms"] += (time.perf_counter() - rebuild_start) * 1e3
         if rebuilt.device != compute_device:
+            transfer_start = time.perf_counter()
             rebuilt = rebuilt.to(compute_device)
+            profile["lookup_post_rebuild_h2d_ms"] += (
+                time.perf_counter() - transfer_start
+            ) * 1e3
+        setattr(self, "_single_node_forward_profile", profile)
         return rebuilt
 
     def _lookup_fused_embeddings_shared_local_shm_single_table(
@@ -493,17 +532,36 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         *,
         compute_device: torch.device,
     ) -> torch.Tensor:
+        profile: Dict[str, float] = {
+            "lookup_exchange_ids_ms": 0.0,
+            "lookup_local_lookup_ms": 0.0,
+            "lookup_exchange_responses_ms": 0.0,
+            "lookup_rebuild_ms": 0.0,
+            "lookup_post_rebuild_h2d_ms": 0.0,
+        }
         rank = int(torch.distributed.get_rank())
         self._prepare_single_node_local_shm_fast_path_client(rank)
+        lookup_start = time.perf_counter()
         local_embeddings = self.kv_client.local_lookup_flat(
             self._master_config.name,
             fused_ids,
         )
+        profile["lookup_local_lookup_ms"] += (time.perf_counter() - lookup_start) * 1e3
+        _merge_profile_values(
+            profile,
+            getattr(self.kv_client, "get_last_local_shm_lookup_profile", lambda: {})(),
+        )
         if local_embeddings.device != compute_device:
+            transfer_start = time.perf_counter()
             local_embeddings = local_embeddings.to(compute_device)
+            profile["lookup_post_rebuild_h2d_ms"] += (
+                time.perf_counter() - transfer_start
+            ) * 1e3
+        setattr(self, "_single_node_forward_profile", profile)
         return local_embeddings
 
     def forward(self, features: KeyedJaggedTensor) -> KeyedTensor:
+        setattr(self, "_single_node_forward_profile", {})
         # Determine if we can enable fused single-call path safely
         keys_in_batch = list(features.keys())
         dims_this_batch: List[int] = [

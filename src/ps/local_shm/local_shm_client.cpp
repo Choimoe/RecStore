@@ -106,6 +106,23 @@ int LocalShmPSClient::GetParameter(const base::ConstArray<uint64_t>& keys,
       keys, values, static_cast<int64_t>(keys.Size()), /*embedding_dim=*/0);
 }
 
+bool LocalShmPSClient::GetSlotPayloadRegion(const void** base,
+                                            std::size_t* bytes) const {
+  if (base == nullptr || bytes == nullptr) {
+    return false;
+  }
+  *base  = nullptr;
+  *bytes = 0;
+  if (!region_.IsOpen() || region_.slot_count() == 0 ||
+      region_.slot_buffer_bytes() == 0) {
+    return false;
+  }
+  *base = region_.slot_payload(0);
+  *bytes = static_cast<std::size_t>(region_.slot_count()) *
+           AlignUp(region_.slot_buffer_bytes());
+  return *base != nullptr && *bytes > 0;
+}
+
 int LocalShmPSClient::GetParameterFlat(
     const base::ConstArray<uint64_t>& keys,
     float* values,

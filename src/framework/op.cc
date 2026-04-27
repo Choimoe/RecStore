@@ -224,6 +224,13 @@ void KVClientOp::ReleaseLocalLookupFlat(LocalShmFlatGetHandle* handle) {
   ReleaseLocalShmLookupFlat(ps_client_, ps_backend_name_, handle);
 }
 
+bool KVClientOp::GetLocalLookupFlatPayloadRegion(const void** base,
+                                                 std::size_t* bytes) {
+  auto* local_client = GetLocalShmClientOrThrow(
+      ps_client_, ps_backend_name_, "warmup_local_lookup_flat_cuda_region");
+  return local_client->GetSlotPayloadRegion(base, bytes);
+}
+
 void KVClientOp::LocalUpdateFlat(const std::string& table_name,
                                  const base::RecTensor& keys,
                                  const base::RecTensor& grads) {

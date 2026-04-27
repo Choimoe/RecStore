@@ -150,6 +150,14 @@ def _aggregate_ids_and_grads(
     return unique_ids, summed_grads
 
 
+def _merge_numeric_profile(dst: Dict[str, float], src: Dict[str, Any] | None) -> None:
+    if not isinstance(src, dict):
+        return
+    for key, value in src.items():
+        if isinstance(value, (int, float)):
+            dst[key] = dst.get(key, 0.0) + float(value)
+
+
 def _process_generic_module_with_trace_single_node_distributed(mod: Any) -> None:
     if not mod._trace:
         return
@@ -171,16 +179,22 @@ def _process_generic_module_with_trace_single_node_distributed(mod: Any) -> None
         if hasattr(module_kv_client, "set_ps_backend"):
             module_kv_client.set_ps_backend(target_backend)
 
-    traces_by_name = _collect_traces_by_name(mod)
     profile = {
+        "trace_collect_ms": 0.0,
+        "trace_aggregate_ms": 0.0,
         "exchange_ms": 0.0,
         "owner_aggregate_ms": 0.0,
         "local_update_ms": 0.0,
     }
+    collect_start = time.perf_counter()
+    traces_by_name = _collect_traces_by_name(mod)
+    profile["trace_collect_ms"] += (time.perf_counter() - collect_start) * 1e3
     for name, entries in traces_by_name.items():
+        aggregate_start = time.perf_counter()
         all_ids = torch.cat([ids for ids, _ in entries], dim=0)
         all_grads = torch.cat([grads for _, grads in entries], dim=0)
         unique_ids, summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
+        profile["trace_aggregate_ms"] += (time.perf_counter() - aggregate_start) * 1e3
         if getattr(mod, "single_node_owner_policy", "hash_mod_world_size") != "hash_mod_world_size":
             raise RuntimeError("single-node distributed sparse update currently requires hash_mod_world_size")
 
@@ -258,6 +272,10 @@ def _process_generic_module_with_trace_single_node_distributed(mod: Any) -> None
             grads=owner_summed_grads,
         )
         profile["local_update_ms"] += (time.perf_counter() - local_update_start) * 1e3
+        _merge_numeric_profile(
+            profile,
+            getattr(module_kv_client, "get_last_local_shm_update_profile", lambda: {})(),
+        )
 
     setattr(mod, "_single_node_fast_path_profile", profile)
 
@@ -281,16 +299,22 @@ def _process_generic_module_with_trace_shared_local_shm_single_table(mod: Any) -
         if hasattr(module_kv_client, "set_ps_backend"):
             module_kv_client.set_ps_backend(target_backend)
 
-    traces_by_name = _collect_traces_by_name(mod)
     profile = {
+        "trace_collect_ms": 0.0,
+        "trace_aggregate_ms": 0.0,
         "exchange_ms": 0.0,
         "owner_aggregate_ms": 0.0,
         "local_update_ms": 0.0,
     }
+    collect_start = time.perf_counter()
+    traces_by_name = _collect_traces_by_name(mod)
+    profile["trace_collect_ms"] += (time.perf_counter() - collect_start) * 1e3
     for name, entries in traces_by_name.items():
+        aggregate_start = time.perf_counter()
         all_ids = torch.cat([ids for ids, _ in entries], dim=0)
         all_grads = torch.cat([grads for _, grads in entries], dim=0)
         local_unique_ids, local_summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
+        profile["trace_aggregate_ms"] += (time.perf_counter() - aggregate_start) * 1e3
         local_update_start = time.perf_counter()
         module_kv_client.local_update_flat(
             name=name,
@@ -298,6 +322,10 @@ def _process_generic_module_with_trace_shared_local_shm_single_table(mod: Any) -
             grads=local_summed_grads,
         )
         profile["local_update_ms"] += (time.perf_counter() - local_update_start) * 1e3
+        _merge_numeric_profile(
+            profile,
+            getattr(module_kv_client, "get_last_local_shm_update_profile", lambda: {})(),
+        )
 
     setattr(mod, "_single_node_fast_path_profile", profile)
 
