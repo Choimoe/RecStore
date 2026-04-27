@@ -1,6 +1,7 @@
 #include "ps/local_shm/local_shm_server.h"
 #include "ps/local_shm/local_shm_futex.h"
 #include "ps/local_shm/local_shm_queue.h"
+#include "ps/local_shm/local_shm_stage_report.h"
 
 #include <cstring>
 #include <thread>
@@ -29,9 +30,13 @@ void FinishWithStatus(LocalShmSlotHeader* header, LocalStatusCode code) {
 
 LocalShmStoreRuntime::LocalShmStoreRuntime(LocalShmRegion* region,
                                            ::CachePS* cache_ps,
+                                           uint32_t ready_queue_id,
+                                           uint32_t worker_tid,
                                            uint32_t ready_queue_burst_limit)
     : region_(region),
       cache_ps_(cache_ps),
+      ready_queue_id_(ready_queue_id),
+      worker_tid_(worker_tid),
       ready_queue_burst_limit_(std::max<uint32_t>(1, ready_queue_burst_limit)) {
 }
 
@@ -40,15 +45,8 @@ void LocalShmStoreRuntime::Run() {
     auto* control = region_->control();
     const uint32_t observed_before_wait =
         control->request_doorbell.load(std::memory_order_acquire);
-    const uint32_t ready_queue_count = region_->ready_queue_count();
     uint32_t processed               = 0;
-    for (uint32_t step = 0; step < ready_queue_count; ++step) {
-      const uint32_t ready_queue_id =
-          (next_ready_queue_id_ + step) % ready_queue_count;
-      if (DrainReadyQueue(ready_queue_id, &processed)) {
-        next_ready_queue_id_ = (ready_queue_id + 1) % ready_queue_count;
-      }
-    }
+    DrainReadyQueue(ready_queue_id_, &processed);
     if (processed == 0) {
       if (!stop_.load(std::memory_order_acquire)) {
         FutexWaitUntilValueChange(
@@ -92,6 +90,12 @@ void LocalShmStoreRuntime::Stop() {
 void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
   auto* header  = region_->slot_header(slot_id);
   auto* payload = region_->slot_payload(slot_id);
+  const auto process_start = std::chrono::steady_clock::now();
+  LocalShmStageReportScope stage_scope(header->request_id,
+                                       header->opcode,
+                                       ready_queue_id_,
+                                       header->key_count,
+                                       header->embedding_dim);
   try {
     switch (static_cast<LocalOpcode>(header->opcode)) {
     case LocalOpcode::kInitTable: {
@@ -103,8 +107,13 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       std::memcpy(&num_embeddings, cursor, sizeof(num_embeddings));
       cursor += sizeof(num_embeddings);
       std::memcpy(&embedding_dim, cursor, sizeof(embedding_dim));
+      const auto backend_start = std::chrono::steady_clock::now();
       const bool ok =
           cache_ps_->InitTable(table_name, num_embeddings, embedding_dim);
+      ReportLocalShmStageMetric(
+          "init_table_backend_us", LocalShmElapsedUs(backend_start));
+      ReportLocalShmStageMetric(
+          "server_process_total_us", LocalShmElapsedUs(process_start));
       FinishWithStatus(
           header, ok ? LocalStatusCode::kOk : LocalStatusCode::kUnknownError);
       return;
@@ -116,15 +125,23 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       if (embedding_dim == 0) {
         std::vector<ParameterPack> packs;
         packs.reserve(header->key_count);
-        if (!cache_ps_->GetParameterRun2Completion(key_array, packs, 0)) {
+        const auto backend_start = std::chrono::steady_clock::now();
+        if (!cache_ps_->GetParameterRun2Completion(
+                key_array, packs, static_cast<int>(worker_tid_))) {
           LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot get_failed"
                      << " slot_id=" << slot_id << " request_id="
                      << header->request_id << " key_count=" << header->key_count
                      << " computed_embedding_dim=0" << " output_bytes=0"
                      << " reason=GetParameterRun2Completion";
+          ReportLocalShmStageMetric(
+              "get_backend_us", LocalShmElapsedUs(backend_start));
+          ReportLocalShmStageMetric(
+              "server_process_total_us", LocalShmElapsedUs(process_start));
           FinishWithStatus(header, LocalStatusCode::kUnknownError);
           return;
         }
+        ReportLocalShmStageMetric(
+            "get_backend_us", LocalShmElapsedUs(backend_start));
         int64_t max_embedding_dim = 0;
         for (const auto& pack : packs) {
           max_embedding_dim = std::max<int64_t>(max_embedding_dim, pack.dim);
@@ -139,21 +156,28 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
                      << " computed_embedding_dim=" << max_embedding_dim
                      << " output_bytes=" << output_bytes
                      << " slot_buffer_bytes=" << region_->slot_buffer_bytes();
+          ReportLocalShmStageMetric(
+              "server_process_total_us", LocalShmElapsedUs(process_start));
           FinishWithStatus(header, LocalStatusCode::kBufferTooSmall);
           return;
         }
+        const auto payload_pack_start = std::chrono::steady_clock::now();
         std::memset(payload, 0, output_bytes);
         float* out = reinterpret_cast<float*>(payload);
         for (std::size_t row = 0; row < packs.size(); ++row) {
           if (packs[row].dim > 0 && packs[row].emb_data != nullptr) {
             std::copy_n(
                 packs[row].emb_data,
-                packs[row].dim,
-                out + row * static_cast<std::size_t>(max_embedding_dim));
+                    packs[row].dim,
+                    out + row * static_cast<std::size_t>(max_embedding_dim));
           }
         }
+        ReportLocalShmStageMetric(
+            "get_payload_pack_us", LocalShmElapsedUs(payload_pack_start));
         header->embedding_dim = static_cast<uint32_t>(max_embedding_dim);
         header->output_bytes  = output_bytes;
+        ReportLocalShmStageMetric(
+            "server_process_total_us", LocalShmElapsedUs(process_start));
         FinishWithStatus(header, LocalStatusCode::kOk);
         return;
       }
@@ -168,25 +192,36 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
                    << " computed_embedding_dim=" << embedding_dim
                    << " output_bytes=" << output_bytes
                    << " slot_buffer_bytes=" << region_->slot_buffer_bytes();
+        ReportLocalShmStageMetric(
+            "server_process_total_us", LocalShmElapsedUs(process_start));
         FinishWithStatus(header, LocalStatusCode::kBufferTooSmall);
         return;
       }
+      const auto backend_start = std::chrono::steady_clock::now();
       if (!cache_ps_->GetParameterFlat(
               key_array,
               reinterpret_cast<float*>(payload),
               static_cast<int64_t>(header->key_count),
               static_cast<int64_t>(embedding_dim),
-              0)) {
+              static_cast<int>(worker_tid_))) {
         LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot get_failed"
                    << " slot_id=" << slot_id << " request_id="
                    << header->request_id << " key_count=" << header->key_count
                    << " computed_embedding_dim=" << embedding_dim
                    << " output_bytes=" << output_bytes
                    << " reason=GetParameterFlat";
+        ReportLocalShmStageMetric(
+            "get_backend_us", LocalShmElapsedUs(backend_start));
+        ReportLocalShmStageMetric(
+            "server_process_total_us", LocalShmElapsedUs(process_start));
         FinishWithStatus(header, LocalStatusCode::kUnknownError);
         return;
       }
+      ReportLocalShmStageMetric(
+          "get_backend_us", LocalShmElapsedUs(backend_start));
       header->output_bytes = output_bytes;
+      ReportLocalShmStageMetric(
+          "server_process_total_us", LocalShmElapsedUs(process_start));
       FinishWithStatus(header, LocalStatusCode::kOk);
       return;
     }
@@ -194,12 +229,17 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       const auto* keys   = reinterpret_cast<const uint64_t*>(payload);
       const auto* values = reinterpret_cast<const float*>(
           payload + sizeof(uint64_t) * header->key_count);
+      const auto backend_start = std::chrono::steady_clock::now();
       cache_ps_->PutDenseParameterBatch(
           keys,
           values,
           static_cast<int>(header->key_count),
           static_cast<int>(header->embedding_dim),
-          0);
+          static_cast<int>(worker_tid_));
+      ReportLocalShmStageMetric(
+          "put_backend_us", LocalShmElapsedUs(backend_start));
+      ReportLocalShmStageMetric(
+          "server_process_total_us", LocalShmElapsedUs(process_start));
       FinishWithStatus(header, LocalStatusCode::kOk);
       return;
     }
@@ -211,18 +251,25 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       cursor += sizeof(uint64_t) * header->key_count;
       const auto* grads = reinterpret_cast<const float*>(cursor);
       const base::ConstArray<uint64_t> key_array(keys, header->key_count);
+      const auto backend_start = std::chrono::steady_clock::now();
       const bool ok = cache_ps_->UpdateParameterFlat(
           table_name,
           key_array,
           grads,
           static_cast<int64_t>(header->key_count),
           static_cast<int64_t>(header->embedding_dim),
-          0);
+          static_cast<int>(worker_tid_));
+      ReportLocalShmStageMetric(
+          "update_backend_us", LocalShmElapsedUs(backend_start));
+      ReportLocalShmStageMetric(
+          "server_process_total_us", LocalShmElapsedUs(process_start));
       FinishWithStatus(
           header, ok ? LocalStatusCode::kOk : LocalStatusCode::kUnknownError);
       return;
     }
     default:
+      ReportLocalShmStageMetric(
+          "server_process_total_us", LocalShmElapsedUs(process_start));
       FinishWithStatus(header, LocalStatusCode::kUnsupportedOpcode);
       return;
     }
@@ -231,6 +278,8 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
                << slot_id << " request_id=" << header->request_id
                << " opcode=" << header->opcode
                << " key_count=" << header->key_count << " what=" << e.what();
+    ReportLocalShmStageMetric(
+        "server_process_total_us", LocalShmElapsedUs(process_start));
     FinishWithStatus(header, LocalStatusCode::kUnknownError);
     return;
   }
@@ -253,21 +302,49 @@ void LocalShmParameterServer::Init(const json& config) {
   region_ = std::make_unique<LocalShmRegion>();
   CHECK(region_->Create(
       region_name, slot_count, slot_buffer_bytes, ready_queue_count));
-  cache_ps_ = std::make_shared<CachePS>(config_["cache_ps"]);
-  runtime_  = std::make_unique<LocalShmStoreRuntime>(
-      region_.get(), cache_ps_.get(), ready_queue_burst_limit);
+  json cache_ps_config =
+      config_.contains("cache_ps") ? config_["cache_ps"] : json::object();
+  const uint32_t configured_num_threads =
+      cache_ps_config.value("num_threads", 1U);
+  cache_ps_config["num_threads"] =
+      std::max<uint32_t>(configured_num_threads, ready_queue_count);
+  cache_ps_ = std::make_shared<CachePS>(cache_ps_config);
+  runtimes_.clear();
+  runtimes_.reserve(ready_queue_count);
+  for (uint32_t ready_queue_id = 0; ready_queue_id < ready_queue_count;
+       ++ready_queue_id) {
+    runtimes_.push_back(std::make_unique<LocalShmStoreRuntime>(
+        region_.get(),
+        cache_ps_.get(),
+        ready_queue_id,
+        ready_queue_id,
+        ready_queue_burst_limit));
+  }
 }
 
 LocalShmParameterServer::~LocalShmParameterServer() = default;
 
 void LocalShmParameterServer::Run() {
-  CHECK(runtime_ != nullptr);
-  runtime_->Run();
+  CHECK(!runtimes_.empty());
+  worker_threads_.clear();
+  worker_threads_.reserve(runtimes_.size() > 0 ? runtimes_.size() - 1 : 0);
+  for (std::size_t idx = 1; idx < runtimes_.size(); ++idx) {
+    worker_threads_.emplace_back([this, idx]() { runtimes_[idx]->Run(); });
+  }
+  runtimes_[0]->Run();
+  for (auto& worker : worker_threads_) {
+    if (worker.joinable()) {
+      worker.join();
+    }
+  }
+  worker_threads_.clear();
 }
 
 void LocalShmParameterServer::Stop() {
-  if (runtime_ != nullptr) {
-    runtime_->Stop();
+  for (const auto& runtime : runtimes_) {
+    if (runtime != nullptr) {
+      runtime->Stop();
+    }
   }
 }
 
