@@ -89,6 +89,60 @@ TEST(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
   server_thread.join();
 }
 
+TEST(LocalShmPSClientTest, GetParameterFlatRoundTripUsesFixedEmbeddingDim) {
+  const auto config = MakeLocalShmConfig(
+      "recstore_local_shm_ps_client_flat_get_" + std::to_string(::getpid()));
+  LocalShmParameterServer server;
+  server.Init(config);
+
+  std::thread server_thread([&]() { server.Run(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  LocalShmPSClient client(config["local_shm"]);
+  ASSERT_EQ(client.InitEmbeddingTable("table_flat", {128, 4}), 0);
+
+  std::vector<uint64_t> keys             = {2, 6};
+  std::vector<std::vector<float>> values = {
+      {2.0f, 3.0f, 4.0f, 5.0f}, {6.0f, 7.0f, 8.0f, 9.0f}};
+  base::ConstArray<uint64_t> key_array(keys);
+  ASSERT_EQ(client.PutParameter(key_array, values), 0);
+
+  std::vector<float> readback(8, 0.0f);
+  ASSERT_EQ(client.GetParameterFlat(key_array, readback.data(), 2, 4), 0);
+  EXPECT_EQ(readback[0], 2.0f);
+  EXPECT_EQ(readback[1], 3.0f);
+  EXPECT_EQ(readback[4], 6.0f);
+  EXPECT_EQ(readback[7], 9.0f);
+
+  server.Stop();
+  server_thread.join();
+}
+
+TEST(LocalShmPSClientTest, GetParameterFlatRejectsMismatchedEmbeddingDim) {
+  const auto config = MakeLocalShmConfig(
+      "recstore_local_shm_ps_client_flat_dim_mismatch_" +
+      std::to_string(::getpid()));
+  LocalShmParameterServer server;
+  server.Init(config);
+
+  std::thread server_thread([&]() { server.Run(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  LocalShmPSClient client(config["local_shm"]);
+  ASSERT_EQ(client.InitEmbeddingTable("table_mismatch", {128, 4}), 0);
+
+  std::vector<uint64_t> keys             = {7};
+  std::vector<std::vector<float>> values = {{7.0f, 8.0f, 9.0f, 10.0f}};
+  base::ConstArray<uint64_t> key_array(keys);
+  ASSERT_EQ(client.PutParameter(key_array, values), 0);
+
+  std::vector<float> readback(3, 0.0f);
+  EXPECT_EQ(client.GetParameterFlat(key_array, readback.data(), 1, 3), -1);
+
+  server.Stop();
+  server_thread.join();
+}
+
 TEST(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_multi_" + std::to_string(::getpid()), 2);

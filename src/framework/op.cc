@@ -1,6 +1,7 @@
 #include "framework/op.h"
 #include "framework/common/ps_client_config_adapter.h"
 #include "ps/client_factory.h"
+#include "ps/local_shm/local_shm_client.h"
 #include "ps/rdma/rdma_ps_client_adapter.h"
 #include "base/factory.h"
 #include <immintrin.h>
@@ -16,7 +17,6 @@
 #include <cstdlib>
 #include <string>
 #include <fstream>
-
 #include "base/tensor.h"
 #include <glog/logging.h>
 #ifdef ENABLE_PERF_REPORT
@@ -27,7 +27,8 @@ namespace recstore {
 
 namespace {
 bool IsReadWriteSuccess(BasePSClient* client, int ret) {
-  if (dynamic_cast<RDMAPSClientAdapter*>(client) != nullptr) {
+  if (dynamic_cast<RDMAPSClientAdapter*>(client) != nullptr ||
+      dynamic_cast<LocalShmPSClient*>(client) != nullptr) {
     return ret == 0;
   }
   // Legacy GRPC/BRPC read/write methods return bool-like int values.
@@ -324,7 +325,31 @@ void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
         "local_lookup_flat requires local_shm backend, but current backend is " +
         ps_backend_name_);
   }
-  EmbRead(keys, values);
+  validate_keys(keys);
+  validate_embeddings(values, "Values");
+
+  const int64_t L = keys.shape(0);
+  if (values.shape(0) != L) {
+    throw std::invalid_argument(
+        "Dimension mismatch: Keys has length " + std::to_string(L) +
+        " but values has length " + std::to_string(values.shape(0)));
+  }
+
+  auto* local_client = dynamic_cast<LocalShmPSClient*>(ps_client_);
+  if (local_client == nullptr) {
+    throw std::runtime_error(
+        "local_lookup_flat requires LocalShmPSClient backend instance.");
+  }
+
+  const uint64_t* keys_data = keys.data_as<uint64_t>();
+  base::ConstArray<uint64_t> keys_array(keys_data, L);
+  float* values_data = values.data_as<float>();
+  const int64_t D = values.shape(1);
+
+  int ret = local_client->GetParameterFlat(keys_array, values_data, L, D);
+  if (ret != 0) {
+    throw std::runtime_error("Failed to read embeddings from local_shm PS client.");
+  }
 }
 
 void KVClientOp::LocalUpdateFlat(const std::string& table_name,

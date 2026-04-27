@@ -17,6 +17,10 @@ public:
 
   int GetParameter(const base::ConstArray<uint64_t>& keys,
                    float* values) override;
+  int GetParameterFlat(const base::ConstArray<uint64_t>& keys,
+                       float* values,
+                       int64_t num_rows,
+                       int64_t embedding_dim);
   int PutParameter(const base::ConstArray<uint64_t>& keys,
                    const std::vector<std::vector<float>>& values) override;
   int UpdateParameter(const std::string& table_name,

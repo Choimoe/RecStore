@@ -111,34 +111,84 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
     }
     case LocalOpcode::kGet: {
       const auto* keys = reinterpret_cast<const uint64_t*>(payload);
-      std::vector<ParameterPack> packs;
-      packs.reserve(header->key_count);
       const base::ConstArray<uint64_t> key_array(keys, header->key_count);
-      if (!cache_ps_->GetParameterRun2Completion(key_array, packs, 0)) {
-        FinishWithStatus(header, LocalStatusCode::kUnknownError);
+      const uint32_t embedding_dim = header->embedding_dim;
+      if (embedding_dim == 0) {
+        std::vector<ParameterPack> packs;
+        packs.reserve(header->key_count);
+        if (!cache_ps_->GetParameterRun2Completion(key_array, packs, 0)) {
+          LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot get_failed"
+                     << " slot_id=" << slot_id
+                     << " request_id=" << header->request_id
+                     << " key_count=" << header->key_count
+                     << " computed_embedding_dim=0"
+                     << " output_bytes=0"
+                     << " reason=GetParameterRun2Completion";
+          FinishWithStatus(header, LocalStatusCode::kUnknownError);
+          return;
+        }
+        int64_t max_embedding_dim = 0;
+        for (const auto& pack : packs) {
+          max_embedding_dim = std::max<int64_t>(max_embedding_dim, pack.dim);
+        }
+        const std::size_t output_bytes =
+            sizeof(float) * packs.size() *
+            static_cast<std::size_t>(max_embedding_dim);
+        if (output_bytes > region_->slot_buffer_bytes()) {
+          LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot get_buffer_too_small"
+                     << " slot_id=" << slot_id
+                     << " request_id=" << header->request_id
+                     << " key_count=" << header->key_count
+                     << " computed_embedding_dim=" << max_embedding_dim
+                     << " output_bytes=" << output_bytes
+                     << " slot_buffer_bytes=" << region_->slot_buffer_bytes();
+          FinishWithStatus(header, LocalStatusCode::kBufferTooSmall);
+          return;
+        }
+        std::memset(payload, 0, output_bytes);
+        float* out = reinterpret_cast<float*>(payload);
+        for (std::size_t row = 0; row < packs.size(); ++row) {
+          if (packs[row].dim > 0 && packs[row].emb_data != nullptr) {
+            std::copy_n(packs[row].emb_data,
+                        packs[row].dim,
+                        out + row * static_cast<std::size_t>(max_embedding_dim));
+          }
+        }
+        header->embedding_dim = static_cast<uint32_t>(max_embedding_dim);
+        header->output_bytes  = output_bytes;
+        FinishWithStatus(header, LocalStatusCode::kOk);
         return;
       }
-      int64_t embedding_dim = 0;
-      for (const auto& pack : packs) {
-        embedding_dim = std::max<int64_t>(embedding_dim, pack.dim);
-      }
+
       const std::size_t output_bytes =
-          sizeof(float) * packs.size() *
+          sizeof(float) * static_cast<std::size_t>(header->key_count) *
           static_cast<std::size_t>(embedding_dim);
       if (output_bytes > region_->slot_buffer_bytes()) {
+        LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot get_buffer_too_small"
+                   << " slot_id=" << slot_id
+                   << " request_id=" << header->request_id
+                   << " key_count=" << header->key_count
+                   << " computed_embedding_dim=" << embedding_dim
+                   << " output_bytes=" << output_bytes
+                   << " slot_buffer_bytes=" << region_->slot_buffer_bytes();
         FinishWithStatus(header, LocalStatusCode::kBufferTooSmall);
         return;
       }
-      std::memset(payload, 0, output_bytes);
-      float* out = reinterpret_cast<float*>(payload);
-      for (std::size_t row = 0; row < packs.size(); ++row) {
-        if (packs[row].dim > 0 && packs[row].emb_data != nullptr) {
-          std::copy_n(packs[row].emb_data,
-                      packs[row].dim,
-                      out + row * static_cast<std::size_t>(embedding_dim));
-        }
+      if (!cache_ps_->GetParameterFlat(key_array,
+                                       reinterpret_cast<float*>(payload),
+                                       static_cast<int64_t>(header->key_count),
+                                       static_cast<int64_t>(embedding_dim),
+                                       0)) {
+        LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot get_failed"
+                   << " slot_id=" << slot_id
+                   << " request_id=" << header->request_id
+                   << " key_count=" << header->key_count
+                   << " computed_embedding_dim=" << embedding_dim
+                   << " output_bytes=" << output_bytes
+                   << " reason=GetParameterFlat";
+        FinishWithStatus(header, LocalStatusCode::kUnknownError);
+        return;
       }
-      header->embedding_dim = static_cast<uint32_t>(embedding_dim);
       header->output_bytes  = output_bytes;
       FinishWithStatus(header, LocalStatusCode::kOk);
       return;
@@ -180,7 +230,10 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       return;
     }
   } catch (const std::exception& e) {
-    LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot exception: " << e.what();
+    LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot exception slot_id="
+               << slot_id << " request_id=" << header->request_id
+               << " opcode=" << header->opcode
+               << " key_count=" << header->key_count << " what=" << e.what();
     FinishWithStatus(header, LocalStatusCode::kUnknownError);
     return;
   }
