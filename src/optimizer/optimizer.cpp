@@ -1,6 +1,36 @@
 #include "optimizer.h"
 #include <cstring>
 
+namespace {
+
+std::vector<uint64_t>
+CollectReaderKeys(const ParameterCompressReader* reader) {
+  const int size = reader->item_size();
+  std::vector<uint64_t> keys;
+  keys.reserve(size);
+  for (int i = 0; i < size; ++i) {
+    keys.push_back(reader->item(i)->key);
+  }
+  return keys;
+}
+
+void ValidateFlatUpdateArgs(const base::ConstArray<uint64_t>& keys,
+                            const float* grads,
+                            int64_t num_rows,
+                            int64_t embedding_dim) {
+  if (grads == nullptr) {
+    throw std::runtime_error("UpdateFlat grads pointer is null");
+  }
+  if (num_rows < 0 || embedding_dim <= 0) {
+    throw std::runtime_error("UpdateFlat invalid rows/dim");
+  }
+  if (keys.Size() != static_cast<size_t>(num_rows)) {
+    throw std::runtime_error("UpdateFlat keys size mismatch");
+  }
+}
+
+} // namespace
+
 void SGD::Init(const std::vector<std::string> table_name,
                const EmbeddingTableConfig& config,
                BaseKV* base_kv) {
@@ -28,11 +58,7 @@ void SGD::Update(
   }
 
   int size = reader->item_size();
-  std::vector<uint64_t> keys;
-  keys.reserve(size);
-  for (int i = 0; i < size; ++i) {
-    keys.push_back(reader->item(i)->key);
-  }
+  std::vector<uint64_t> keys = CollectReaderKeys(reader);
 
   std::vector<base::ConstArray<float>> current_values;
   it->second->BatchGet(keys, &current_values, tid);
@@ -57,6 +83,51 @@ void SGD::Update(
 #pragma omp simd
     for (int j = 0; j < dim; ++j) {
       data[j] -= learning_rate_ * item->data()[j];
+    }
+  }
+}
+
+void SGD::UpdateFlat(std::string table,
+                     const base::ConstArray<uint64_t>& keys,
+                     const float* grads,
+                     int64_t num_rows,
+                     int64_t embedding_dim,
+                     unsigned tid) {
+  ValidateFlatUpdateArgs(keys, grads, num_rows, embedding_dim);
+
+  auto it = tensor_map_.find(table);
+  if (it == tensor_map_.end()) {
+    LOG(ERROR) << "Table not found in SGD optimizer: '" << table << "'";
+    throw std::runtime_error("Table not found: " + table);
+  }
+
+  std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
+  std::vector<base::ConstArray<float>> current_values;
+  it->second->BatchGet(key_vec, &current_values, tid);
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    const float* row_grad = grads + row * embedding_dim;
+    const auto& current = current_values[static_cast<size_t>(row)];
+    if (current.Size() == 0) {
+      std::vector<float> zero_init(static_cast<size_t>(embedding_dim), 0.0f);
+      for (int64_t col = 0; col < embedding_dim; ++col) {
+        zero_init[static_cast<size_t>(col)] = -learning_rate_ * row_grad[col];
+      }
+      std::string val_str(
+          reinterpret_cast<char*>(zero_init.data()),
+          zero_init.size() * sizeof(float));
+      it->second->Put(keys[static_cast<size_t>(row)], val_str, tid);
+      continue;
+    }
+    if (static_cast<int64_t>(current.Size()) != embedding_dim) {
+      throw std::runtime_error(
+          "SGD::UpdateFlat embedding_dim mismatch for table " + table);
+    }
+
+    float* data = const_cast<float*>(current.Data());
+#pragma omp simd
+    for (int64_t col = 0; col < embedding_dim; ++col) {
+      data[col] -= learning_rate_ * row_grad[col];
     }
   }
 }
@@ -99,11 +170,7 @@ void AdaGrad::Update(
   }
 
   int size = reader->item_size();
-  std::vector<uint64_t> keys;
-  keys.reserve(size);
-  for (int i = 0; i < size; ++i) {
-    keys.push_back(reader->item(i)->key);
-  }
+  std::vector<uint64_t> keys = CollectReaderKeys(reader);
 
   std::vector<base::ConstArray<float>> current_values;
   std::vector<base::ConstArray<float>> acc_values;
@@ -127,6 +194,56 @@ void AdaGrad::Update(
       acc_data[j] += item->data()[j] * item->data()[j];
       float adaptive_lr = learning_rate_ / (std::sqrt(acc_data[j]) + epsilon_);
       param_data[j] -= adaptive_lr * item->data()[j];
+    }
+  }
+}
+
+void AdaGrad::UpdateFlat(std::string table,
+                         const base::ConstArray<uint64_t>& keys,
+                         const float* grads,
+                         int64_t num_rows,
+                         int64_t embedding_dim,
+                         unsigned tid) {
+  ValidateFlatUpdateArgs(keys, grads, num_rows, embedding_dim);
+
+  auto param_it = tensor_map_.find(table);
+  if (param_it == tensor_map_.end()) {
+    throw std::runtime_error("Table not found: " + table);
+  }
+
+  std::string acc_table = table + "_accumulated_grad";
+  auto acc_it           = tensor_map_.find(acc_table);
+  if (acc_it == tensor_map_.end()) {
+    throw std::runtime_error(
+        "Accumulated gradient table not found: " + acc_table);
+  }
+
+  std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
+  std::vector<base::ConstArray<float>> current_values;
+  std::vector<base::ConstArray<float>> acc_values;
+  param_it->second->BatchGet(key_vec, &current_values, tid);
+  acc_it->second->BatchGet(key_vec, &acc_values, tid);
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    const auto& current = current_values[static_cast<size_t>(row)];
+    const auto& acc     = acc_values[static_cast<size_t>(row)];
+    if (current.Size() == 0 || acc.Size() == 0) {
+      continue;
+    }
+    if (static_cast<int64_t>(current.Size()) != embedding_dim ||
+        static_cast<int64_t>(acc.Size()) != embedding_dim) {
+      throw std::runtime_error(
+          "AdaGrad::UpdateFlat embedding_dim mismatch for table " + table);
+    }
+
+    const float* row_grad = grads + row * embedding_dim;
+    float* param_data     = const_cast<float*>(current.Data());
+    float* acc_data       = const_cast<float*>(acc.Data());
+#pragma omp simd
+    for (int64_t col = 0; col < embedding_dim; ++col) {
+      acc_data[col] += row_grad[col] * row_grad[col];
+      float adaptive_lr = learning_rate_ / (std::sqrt(acc_data[col]) + epsilon_);
+      param_data[col] -= adaptive_lr * row_grad[col];
     }
   }
 }
@@ -171,11 +288,7 @@ void RowWiseAdaGrad::Update(
   }
 
   int size = reader->item_size();
-  std::vector<uint64_t> keys;
-  keys.reserve(size);
-  for (int i = 0; i < size; ++i) {
-    keys.push_back(reader->item(i)->key);
-  }
+  std::vector<uint64_t> keys = CollectReaderKeys(reader);
 
   std::vector<base::ConstArray<float>> current_values;
   std::vector<base::ConstArray<float>> acc_values;
@@ -205,6 +318,65 @@ void RowWiseAdaGrad::Update(
 #pragma omp simd
     for (int j = 0; j < dim; ++j) {
       param_data[j] -= adaptive_lr * item->data()[j];
+    }
+  }
+}
+
+void RowWiseAdaGrad::UpdateFlat(std::string table,
+                                const base::ConstArray<uint64_t>& keys,
+                                const float* grads,
+                                int64_t num_rows,
+                                int64_t embedding_dim,
+                                unsigned tid) {
+  ValidateFlatUpdateArgs(keys, grads, num_rows, embedding_dim);
+
+  auto param_it = tensor_map_.find(table);
+  if (param_it == tensor_map_.end()) {
+    throw std::runtime_error("Table not found: " + table);
+  }
+
+  std::string acc_table = table + "_rowwise_accumulated_grad";
+  auto acc_it           = tensor_map_.find(acc_table);
+  if (acc_it == tensor_map_.end()) {
+    throw std::runtime_error(
+        "Row-wise accumulated gradient table not found: " + acc_table);
+  }
+
+  std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
+  std::vector<base::ConstArray<float>> current_values;
+  std::vector<base::ConstArray<float>> acc_values;
+  param_it->second->BatchGet(key_vec, &current_values, tid);
+  acc_it->second->BatchGet(key_vec, &acc_values, tid);
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    const auto& current = current_values[static_cast<size_t>(row)];
+    const auto& acc     = acc_values[static_cast<size_t>(row)];
+    if (current.Size() == 0 || acc.Size() == 0) {
+      continue;
+    }
+    if (static_cast<int64_t>(current.Size()) != embedding_dim ||
+        acc.Size() != 1) {
+      throw std::runtime_error(
+          "RowWiseAdaGrad::UpdateFlat embedding_dim mismatch for table " +
+          table);
+    }
+
+    const float* row_grad = grads + row * embedding_dim;
+    float* param_data     = const_cast<float*>(current.Data());
+    float* acc_data       = const_cast<float*>(acc.Data());
+
+    float grad_square_mean = 0.0f;
+#pragma omp simd reduction(+ : grad_square_mean)
+    for (int64_t col = 0; col < embedding_dim; ++col) {
+      grad_square_mean += row_grad[col] * row_grad[col];
+    }
+    grad_square_mean /= static_cast<float>(embedding_dim);
+
+    acc_data[0] += grad_square_mean;
+    float adaptive_lr = learning_rate_ / (std::sqrt(acc_data[0]) + epsilon_);
+#pragma omp simd
+    for (int64_t col = 0; col < embedding_dim; ++col) {
+      param_data[col] -= adaptive_lr * row_grad[col];
     }
   }
 }

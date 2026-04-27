@@ -327,21 +327,13 @@ public:
                  << " vs " << num_rows;
       return false;
     }
-
-    ParameterCompressor compressor(std::numeric_limits<int>::max());
-    for (int64_t row = 0; row < num_rows; ++row) {
-      ParameterPack pack;
-      pack.key      = keys[static_cast<size_t>(row)];
-      pack.dim      = static_cast<int>(embedding_dim);
-      pack.emb_data = grads + row * embedding_dim;
-      compressor.AddItem(pack, nullptr);
+    if (!optimizer_) {
+      LOG(ERROR) << "Optimizer not initialized. Please call InitTable first.";
+      return false;
     }
-
-    std::string block;
-    compressor.ToBlock(&block);
-    const auto* reader =
-        reinterpret_cast<const ParameterCompressReader*>(block.data());
-    return UpdateParameter(table_name, reader, tid);
+    optimizer_->UpdateFlat(
+        table_name, keys, grads, num_rows, embedding_dim, tid);
+    return true;
   }
 
 private:
