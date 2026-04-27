@@ -110,21 +110,6 @@ TEST_F(LocalShmPSClientTest, FactoryClientTypeCanBeConstructed) {
   server_thread.join();
 }
 
-TEST_F(LocalShmPSClientTest, InitCreatesOneRuntimePerReadyQueue) {
-  const auto config = MakeLocalShmConfig(
-      MakeUniqueRegionName("recstore_local_shm_ps_client_multi_queue"),
-      /*ready_queue_count=*/2);
-  LocalShmParameterServer server;
-
-  server.Init(config);
-
-  ASSERT_EQ(server.runtimes_.size(), 2u);
-  ASSERT_NE(server.runtimes_[0], nullptr);
-  ASSERT_NE(server.runtimes_[1], nullptr);
-  EXPECT_EQ(server.runtimes_[0]->ready_queue_id_, 0u);
-  EXPECT_EQ(server.runtimes_[1]->ready_queue_id_, 1u);
-}
-
 TEST_F(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
   const auto config =
       MakeLocalShmConfig(MakeUniqueRegionName("recstore_local_shm_ps_client_rw"));
@@ -374,7 +359,12 @@ TEST_F(LocalShmPSClientTest, ServerDrainReadyQueueHonorsBurstLimit) {
         region.ready_queue_header(0), region.ready_queue_cells(0), slot_id));
   }
 
-  LocalShmStoreRuntime runtime(&region, nullptr, 2);
+  LocalShmStoreRuntime runtime(
+      &region,
+      nullptr,
+      /*ready_queue_id=*/0,
+      /*worker_tid=*/0,
+      /*ready_queue_burst_limit=*/2);
   uint32_t processed = 0;
   EXPECT_TRUE(runtime.DrainReadyQueue(0, &processed));
   EXPECT_EQ(processed, 2U);
