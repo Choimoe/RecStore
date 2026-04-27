@@ -36,13 +36,14 @@ protected:
             {"value_type", "DRAM"},
             {"capacity", 1024},
             {"value_size", 16}}}}},
-        {"local_shm",
-         {{"region_name", region_name},
-          {"slot_count", 8},
-          {"ready_queue_count", ready_queue_count},
-          {"ready_queue_burst_limit", ready_queue_burst_limit},
-          {"slot_buffer_bytes", 1 << 20},
-          {"client_timeout_ms", 1000}}},
+      {"local_shm",
+       {{"region_name", region_name},
+        {"local_rank", 0},
+        {"slot_count", 8},
+        {"ready_queue_count", ready_queue_count},
+        {"ready_queue_burst_limit", ready_queue_burst_limit},
+        {"slot_buffer_bytes", 1 << 20},
+        {"client_timeout_ms", 1000}}},
     };
   }
 
@@ -292,6 +293,7 @@ TEST_F(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
 TEST_F(LocalShmPSClientTest, LocalRankEnvironmentSelectsReadyQueue) {
   auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_env_" + std::to_string(::getpid()), 2);
+  config["local_shm"].erase("local_rank");
   config["local_shm"]["client_timeout_ms"] = 100;
   LocalShmRegion region;
   ASSERT_TRUE(region.Create(
