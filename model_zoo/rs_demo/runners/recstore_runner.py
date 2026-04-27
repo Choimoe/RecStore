@@ -32,6 +32,33 @@ from ..runtime.recstore_distributed import ShardedRecstoreClient
 from ..runtime.report import finalize_recstore_row, summarize_us, write_stage_csv
 from .base import BenchmarkRunner
 
+FAST_PATH_LOOKUP_PROFILE_KEYS = (
+    "lookup_exchange_ids_ms",
+    "lookup_local_lookup_ms",
+    "lookup_exchange_responses_ms",
+    "lookup_rebuild_ms",
+    "lookup_post_rebuild_h2d_ms",
+    "lookup_cpp_total_ms",
+    "lookup_keys_stage_ms",
+    "lookup_submit_ms",
+    "lookup_wait_ms",
+    "lookup_payload_pin_ms",
+    "lookup_fallback_copy_ms",
+    "lookup_values_h2d_enqueue_ms",
+)
+
+FAST_PATH_UPDATE_PROFILE_KEYS = (
+    "trace_collect_ms",
+    "trace_aggregate_ms",
+    "exchange_ms",
+    "owner_aggregate_ms",
+    "local_update_ms",
+    "local_update_cpp_total_ms",
+    "local_update_keys_stage_ms",
+    "local_update_grads_stage_ms",
+    "local_update_shm_call_ms",
+)
+
 
 @contextmanager
 def stage_timer(row: dict[str, Any], key: str):
@@ -53,6 +80,46 @@ def _load_rows(path: Path) -> list[dict[str, str]]:
 
 def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     write_stage_csv(path, rows)
+
+
+def _merge_numeric_fields(
+    row: dict[str, Any],
+    profile: Any,
+    keys: tuple[str, ...],
+) -> None:
+    if not isinstance(profile, dict):
+        for key in keys:
+            row.setdefault(key, 0.0)
+        return
+    for key in keys:
+        value = profile.get(key, 0.0)
+        row[key] = float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _maybe_warmup_gpu_local_shm_fast_path(
+    cfg: RunConfig,
+    client: Any,
+    device: torch.device,
+) -> bool:
+    if not cfg.enable_single_node_distributed_fast_path:
+        return False
+    if device.type != "cuda":
+        return False
+    is_shared_local_shm_table = getattr(client, "is_shared_local_shm_table", None)
+    if not callable(is_shared_local_shm_table) or not is_shared_local_shm_table():
+        return False
+    activate_shard = getattr(client, "activate_shard", None)
+    if callable(activate_shard):
+        activate_shard(0)
+    current_ps_backend = getattr(client, "current_ps_backend", None)
+    set_ps_backend = getattr(client, "set_ps_backend", None)
+    if callable(current_ps_backend) and callable(set_ps_backend):
+        if current_ps_backend() != "local_shm":
+            set_ps_backend("local_shm")
+    warmup = getattr(client, "warmup_local_lookup_flat_cuda_region", None)
+    if not callable(warmup):
+        return False
+    return bool(warmup())
 
 
 def _pick_socket_ifname() -> str | None:
@@ -220,7 +287,7 @@ class RecStoreRunner(BenchmarkRunner):
 
     def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig) -> list[str]:
         rdzv_endpoint = f"{cfg.master_addr}:{cfg.master_port}"
-        return [
+        cmd = [
             sys.executable,
             "-m",
             "torch.distributed.run",
@@ -293,6 +360,19 @@ class RecStoreRunner(BenchmarkRunner):
             str(cfg.read_mode),
             "--no-start-server",
         ]
+        if cfg.enable_single_node_distributed_fast_path:
+            cmd.extend(
+                [
+                    "--enable-single-node-distributed-fast-path",
+                    "--single-node-ps-backend",
+                    str(cfg.single_node_ps_backend),
+                    "--single-node-owner-policy",
+                    str(cfg.single_node_owner_policy),
+                ]
+            )
+        if not cfg.read_before_update:
+            cmd.append("--no-read-before-update")
+        return cmd
 
     def _run_single_process(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
         return self._run_local_worker(
@@ -458,6 +538,19 @@ class RecStoreRunner(BenchmarkRunner):
             criterion = torch.nn.BCEWithLogitsLoss()
             dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
             sparse_optimizer = SparseSGD([embedding_module], lr=0.01)
+            fast_path_region_warmed = _maybe_warmup_gpu_local_shm_fast_path(
+                cfg=cfg,
+                client=client,
+                device=device,
+            )
+            if fast_path_region_warmed:
+                print("[rs_demo] warmed local_shm lookup payload region for GPU fast path")
+                _barrier_for_step_alignment(
+                    dist=dist,
+                    device=device,
+                    local_rank=local_rank,
+                    use_dist=use_dist,
+                )
 
             read_lat_us: list[float] = []
             update_lat_us: list[float] = []
@@ -488,9 +581,11 @@ class RecStoreRunner(BenchmarkRunner):
 
                 with stage_timer(row, "input_pack_ms"):
                     _, sparse_features = build_kjt_batch_from_dense_sparse_labels(
-                        dense_batch, sparse_batch, labels_batch
+                        dense_batch,
+                        sparse_batch,
+                        labels_batch,
+                        device=device,
                     )
-
                 sparse_optimizer.zero_grad()
                 embeddings = None
                 with stage_timer(row, "embed_lookup_local_ms"):
@@ -499,6 +594,11 @@ class RecStoreRunner(BenchmarkRunner):
                         embedding_module.issue_fused_prefetch(sparse_features)
                     embeddings = embedding_module(sparse_features)
                     sync_device(torch, device)
+                _merge_numeric_fields(
+                    row,
+                    getattr(embedding_module, "_single_node_forward_profile", None),
+                    FAST_PATH_LOOKUP_PROFILE_KEYS,
+                )
                 if embeddings is None:
                     raise RuntimeError("recstore embedding module returned no embeddings")
                 if step >= cfg.warmup_steps:
@@ -545,13 +645,40 @@ class RecStoreRunner(BenchmarkRunner):
 
                 with stage_timer(row, "sparse_update_ms"):
                     sync_device(torch, device)
+                    replay_start = time.perf_counter()
                     embedded_sparse_source.backward(
                         embedded_sparse_grad.to(embedded_sparse_source.device)
                     )
-                    sparse_optimizer.step()
-                    sparse_optimizer.flush()
-                    sparse_optimizer.zero_grad()
                     sync_device(torch, device)
+                    row["sparse_backward_replay_ms"] = (
+                        time.perf_counter() - replay_start
+                    ) * 1e3
+
+                    step_start = time.perf_counter()
+                    sparse_optimizer.step()
+                    sync_device(torch, device)
+                    row["sparse_optimizer_step_ms"] = (
+                        time.perf_counter() - step_start
+                    ) * 1e3
+
+                    flush_start = time.perf_counter()
+                    sparse_optimizer.flush()
+                    sync_device(torch, device)
+                    row["sparse_optimizer_flush_ms"] = (
+                        time.perf_counter() - flush_start
+                    ) * 1e3
+
+                    zero_grad_start = time.perf_counter()
+                    sparse_optimizer.zero_grad()
+                    row["sparse_zero_grad_ms"] = (
+                        time.perf_counter() - zero_grad_start
+                    ) * 1e3
+                    sync_device(torch, device)
+                _merge_numeric_fields(
+                    row,
+                    getattr(sparse_optimizer, "_last_step_profile", None),
+                    FAST_PATH_UPDATE_PROFILE_KEYS,
+                )
 
                 if step >= cfg.warmup_steps:
                     update_lat_us.append(row["sparse_update_ms"] * 1e3)
