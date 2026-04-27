@@ -401,6 +401,8 @@ class RecStoreRunner(BenchmarkRunner):
                 _append_worker_debug(cfg, rank, f"worker_fingerprint {fingerprint}")
             raw_client = RecstoreClient(library_path=str(library_path))
             client = ShardedRecstoreClient(raw_client, self.runtime_dir)
+            if cfg.enable_single_node_distributed_fast_path:
+                client.set_ps_backend(cfg.single_node_ps_backend)
             if cfg.read_before_update and cfg.read_mode == "prefetch":
                 print("[rs_demo] sharded recstore path uses prefetch read mode")
             elif cfg.read_mode != "direct":

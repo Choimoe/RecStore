@@ -19,6 +19,8 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+_LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
+
 
 class _RecStoreEBCFunction(Function):
     @staticmethod
@@ -348,7 +350,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             return False
         if self.single_node_owner_policy != "hash_mod_world_size":
             return False
-        if self.single_node_ps_backend != "local_shm":
+        if self.single_node_ps_backend not in _LOCAL_FAST_PATH_BACKENDS:
             return False
         return True
 

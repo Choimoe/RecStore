@@ -4,6 +4,8 @@ import time
 import ctypes
 from typing import Optional, Tuple, List, Any, Callable
 
+_LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
+
 def get_reporter():
     if not hasattr(get_reporter, 'lib'):
         script_dir = os.path.dirname(__file__)
@@ -271,9 +273,9 @@ class RecStoreClient:
                 f"{api_name} requires a RecStore ops library exposing current_ps_backend()."
             )
         backend = self.ops.current_ps_backend()
-        if backend != "local_shm":
+        if backend not in _LOCAL_FAST_PATH_BACKENDS:
             raise RuntimeError(
-                f"{api_name} requires local_shm backend, but current backend is {backend}."
+                f"{api_name} requires local_shm or hierkv backend, but current backend is {backend}."
             )
 
     def set_ps_backend(self, backend: str) -> None:

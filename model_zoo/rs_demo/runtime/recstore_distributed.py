@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Tuple
 
 import torch
 
+_LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
+
 
 @dataclass(frozen=True)
 class ShardServer:
@@ -188,9 +190,9 @@ class ShardedRecstoreClient:
                 f"{api_name} requires a RecStore ops library exposing current_ps_backend()."
             )
         backend = self._client.ops.current_ps_backend()
-        if backend != "local_shm":
+        if backend not in _LOCAL_FAST_PATH_BACKENDS:
             raise RuntimeError(
-                f"{api_name} requires local_shm backend, but current backend is {backend}."
+                f"{api_name} requires local_shm or hierkv backend, but current backend is {backend}."
             )
 
     def _group_ids_by_shard(self, keys: torch.Tensor) -> list[tuple[int, torch.Tensor, torch.Tensor]]:

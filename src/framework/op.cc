@@ -3,6 +3,9 @@
 #include "ps/client_factory.h"
 #include "ps/rdma/rdma_ps_client_adapter.h"
 #include "base/factory.h"
+#include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <immintrin.h>
 #include <iostream>
 #include <stdexcept>
@@ -26,6 +29,23 @@
 namespace recstore {
 
 namespace {
+constexpr const char* kHierKVBackendName = "hierkv";
+constexpr float kHierKVLearningRate      = 0.01f;
+
+bool IsHierKVBackendName(const std::string& backend_name) {
+  return backend_name == kHierKVBackendName;
+}
+
+std::string NormalizeBackendName(std::string backend_name) {
+  std::transform(backend_name.begin(),
+                 backend_name.end(),
+                 backend_name.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  return backend_name;
+}
+
 bool IsReadWriteSuccess(BasePSClient* client, int ret) {
   if (dynamic_cast<RDMAPSClientAdapter*>(client) != nullptr) {
     return ret == 0;
@@ -35,6 +55,13 @@ bool IsReadWriteSuccess(BasePSClient* client, int ret) {
 }
 
 std::string BackendNameFromConfig(const json& config) {
+  if (config.contains("cache_ps") && config["cache_ps"].contains("ps_type")) {
+    const std::string ps_type =
+        NormalizeBackendName(config["cache_ps"]["ps_type"].get<std::string>());
+    if (IsHierKVBackendName(ps_type)) {
+      return ps_type;
+    }
+  }
   switch (ResolveFrameworkPSClientType(config)) {
   case PSClientType::kGrpc:
     return "grpc";
@@ -47,6 +74,240 @@ std::string BackendNameFromConfig(const json& config) {
   }
 
   return "unknown";
+}
+
+struct HierKVLocalRuntime {
+  std::mutex mu;
+  int64_t default_embedding_dim = -1;
+  std::unordered_map<std::string, EmbeddingTableConfig> table_configs;
+  std::unordered_map<uint64_t, std::vector<float>> store;
+  std::unordered_map<uint64_t, std::vector<std::vector<float>>> prefetch_results;
+  uint64_t next_prefetch_id = 1;
+
+  static void ValidateKeys(const base::RecTensor& keys) {
+    if (keys.dtype() != base::DataType::UINT64) {
+      throw std::invalid_argument(
+          "Keys tensor must have dtype UINT64, but got " +
+          base::DataTypeToString(keys.dtype()));
+    }
+    if (keys.dim() != 1) {
+      throw std::invalid_argument("Keys tensor must be 1-dimensional, but has " +
+                                  std::to_string(keys.dim()) +
+                                  " dimensions.");
+    }
+  }
+
+  static void ValidateEmbeddings(const base::RecTensor& embeddings,
+                                 const std::string& name) {
+    if (embeddings.dtype() != base::DataType::FLOAT32) {
+      throw std::invalid_argument(
+          name + " tensor must have dtype FLOAT32, but got " +
+          base::DataTypeToString(embeddings.dtype()));
+    }
+    if (embeddings.dim() != 2) {
+      throw std::invalid_argument(
+          name + " tensor must be 2-dimensional, but has " +
+          std::to_string(embeddings.dim()) + " dimensions.");
+    }
+  }
+
+  void ValidateOrSetEmbeddingDim(int64_t embedding_dim, const char* api_name) {
+    if (embedding_dim <= 0) {
+      throw std::invalid_argument(
+          std::string(api_name) + " requires positive embedding dim.");
+    }
+    if (default_embedding_dim == -1) {
+      default_embedding_dim = embedding_dim;
+      return;
+    }
+    if (default_embedding_dim != embedding_dim) {
+      throw std::runtime_error(std::string(api_name) +
+                               " embedding dim mismatch: expected " +
+                               std::to_string(default_embedding_dim) +
+                               ", got " + std::to_string(embedding_dim));
+    }
+  }
+
+  bool InitEmbeddingTable(const std::string& table_name,
+                          const EmbeddingTableConfig& config) {
+    std::lock_guard<std::mutex> lock(mu);
+    ValidateOrSetEmbeddingDim(
+        static_cast<int64_t>(config.embedding_dim), "InitEmbeddingTable");
+    auto it = table_configs.find(table_name);
+    if (it != table_configs.end()) {
+      if (it->second.embedding_dim != config.embedding_dim ||
+          it->second.num_embeddings != config.num_embeddings) {
+        throw std::runtime_error("HierKV table already exists with different "
+                                 "shape: " +
+                                 table_name);
+      }
+      return true;
+    }
+    table_configs.emplace(table_name, config);
+    return true;
+  }
+
+  void Write(const base::RecTensor& keys, const base::RecTensor& values) {
+    ValidateKeys(keys);
+    ValidateEmbeddings(values, "Values");
+    const int64_t num_rows = keys.shape(0);
+    if (values.shape(0) != num_rows) {
+      throw std::invalid_argument("HierKV write row count mismatch.");
+    }
+    const int64_t embedding_dim = values.shape(1);
+    std::lock_guard<std::mutex> lock(mu);
+    ValidateOrSetEmbeddingDim(embedding_dim, "EmbWrite");
+
+    const uint64_t* key_data = keys.data_as<uint64_t>();
+    const float* value_data  = values.data_as<float>();
+    for (int64_t row = 0; row < num_rows; ++row) {
+      const float* start = value_data + row * embedding_dim;
+      store[key_data[row]].assign(start, start + embedding_dim);
+    }
+  }
+
+  void Read(const base::RecTensor& keys, base::RecTensor& values) {
+    ValidateKeys(keys);
+    ValidateEmbeddings(values, "Values");
+    const int64_t num_rows = keys.shape(0);
+    if (values.shape(0) != num_rows) {
+      throw std::invalid_argument("HierKV read row count mismatch.");
+    }
+    const int64_t embedding_dim = values.shape(1);
+    std::lock_guard<std::mutex> lock(mu);
+    ValidateOrSetEmbeddingDim(embedding_dim, "EmbRead");
+
+    const uint64_t* key_data = keys.data_as<uint64_t>();
+    float* out_data          = values.data_as<float>();
+    for (int64_t row = 0; row < num_rows; ++row) {
+      auto it      = store.find(key_data[row]);
+      float* out_row = out_data + row * embedding_dim;
+      if (it == store.end()) {
+        std::fill(out_row, out_row + embedding_dim, 0.0f);
+        continue;
+      }
+      if (static_cast<int64_t>(it->second.size()) != embedding_dim) {
+        throw std::runtime_error("HierKV stored row dim mismatch for key " +
+                                 std::to_string(key_data[row]));
+      }
+      std::memcpy(out_row,
+                  it->second.data(),
+                  static_cast<size_t>(embedding_dim) * sizeof(float));
+    }
+  }
+
+  void Update(const std::string& table_name,
+              const base::RecTensor& keys,
+              const base::RecTensor& grads) {
+    ValidateKeys(keys);
+    ValidateEmbeddings(grads, "Grads");
+    const int64_t num_rows = keys.shape(0);
+    if (grads.shape(0) != num_rows) {
+      throw std::invalid_argument("HierKV update row count mismatch.");
+    }
+    const int64_t embedding_dim = grads.shape(1);
+    std::lock_guard<std::mutex> lock(mu);
+    ValidateOrSetEmbeddingDim(embedding_dim, "EmbUpdate");
+    if (!table_name.empty()) {
+      auto table_it = table_configs.find(table_name);
+      if (table_it != table_configs.end() &&
+          static_cast<int64_t>(table_it->second.embedding_dim) !=
+              embedding_dim) {
+        throw std::runtime_error("HierKV table dim mismatch for update: " +
+                                 table_name);
+      }
+    }
+
+    const uint64_t* key_data = keys.data_as<uint64_t>();
+    const float* grad_data   = grads.data_as<float>();
+    for (int64_t row = 0; row < num_rows; ++row) {
+      auto& value = store[key_data[row]];
+      if (value.empty()) {
+        value.assign(static_cast<size_t>(embedding_dim), 0.0f);
+      } else if (static_cast<int64_t>(value.size()) != embedding_dim) {
+        throw std::runtime_error("HierKV stored row dim mismatch for key " +
+                                 std::to_string(key_data[row]));
+      }
+      for (int64_t col = 0; col < embedding_dim; ++col) {
+        value[static_cast<size_t>(col)] -=
+            kHierKVLearningRate * grad_data[row * embedding_dim + col];
+      }
+    }
+  }
+
+  uint64_t Prefetch(const base::RecTensor& keys, int64_t embedding_dim) {
+    ValidateKeys(keys);
+    std::lock_guard<std::mutex> lock(mu);
+    ValidateOrSetEmbeddingDim(embedding_dim, "EmbPrefetch");
+    const uint64_t prefetch_id = next_prefetch_id++;
+    auto& rows                 = prefetch_results[prefetch_id];
+    const uint64_t* key_data   = keys.data_as<uint64_t>();
+    const int64_t num_rows     = keys.shape(0);
+    rows.resize(static_cast<size_t>(num_rows));
+    for (int64_t row = 0; row < num_rows; ++row) {
+      auto it = store.find(key_data[row]);
+      if (it == store.end()) {
+        rows[static_cast<size_t>(row)] =
+            std::vector<float>(static_cast<size_t>(embedding_dim), 0.0f);
+      } else {
+        rows[static_cast<size_t>(row)] = it->second;
+      }
+    }
+    return prefetch_id;
+  }
+
+  bool IsPrefetchDone(uint64_t prefetch_id) {
+    std::lock_guard<std::mutex> lock(mu);
+    return prefetch_results.find(prefetch_id) != prefetch_results.end();
+  }
+
+  void WaitForPrefetch(uint64_t prefetch_id) {
+    std::lock_guard<std::mutex> lock(mu);
+    if (prefetch_results.find(prefetch_id) == prefetch_results.end()) {
+      throw std::runtime_error("unknown HierKV prefetch_id: " +
+                               std::to_string(prefetch_id));
+    }
+  }
+
+  void ConsumePrefetch(uint64_t prefetch_id,
+                       std::vector<std::vector<float>>* values) {
+    std::lock_guard<std::mutex> lock(mu);
+    auto it = prefetch_results.find(prefetch_id);
+    if (it == prefetch_results.end()) {
+      throw std::runtime_error("unknown HierKV prefetch_id: " +
+                               std::to_string(prefetch_id));
+    }
+    *values = it->second;
+    prefetch_results.erase(it);
+  }
+
+  void ConsumePrefetchFlat(uint64_t prefetch_id,
+                           std::vector<float>* values,
+                           int64_t* num_rows,
+                           int64_t embedding_dim) {
+    std::vector<std::vector<float>> rows;
+    ConsumePrefetch(prefetch_id, &rows);
+    *num_rows = static_cast<int64_t>(rows.size());
+    values->assign(
+        static_cast<size_t>(*num_rows) * static_cast<size_t>(embedding_dim),
+        0.0f);
+    for (int64_t row = 0; row < *num_rows; ++row) {
+      const auto& src = rows[static_cast<size_t>(row)];
+      const int64_t copy_dim =
+          std::min<int64_t>(embedding_dim, static_cast<int64_t>(src.size()));
+      if (copy_dim <= 0) {
+        continue;
+      }
+      std::memcpy(values->data() + row * embedding_dim,
+                  src.data(),
+                  static_cast<size_t>(copy_dim) * sizeof(float));
+    }
+  }
+};
+
+HierKVLocalRuntime& GetHierKVLocalRuntime() {
+  static HierKVLocalRuntime runtime;
+  return runtime;
 }
 } // namespace
 
@@ -221,6 +482,12 @@ KVClientOp::KVClientOp() {
   if (!ps_client_) {
     try {
       json config   = GetGlobalConfig();
+      ps_backend_name_ = BackendNameFromConfig(config);
+      if (IsHierKVBackendName(ps_backend_name_)) {
+        ConfigureLogging();
+        LOG(INFO) << "Initialized local HierKV backend in KVClientOp.";
+        return;
+      }
       bool use_rdma = false;
       try {
         use_rdma = ResolveFrameworkPSClientType(config) == PSClientType::kRdma;
@@ -229,7 +496,6 @@ KVClientOp::KVClientOp() {
       }
       std::cerr << "[RDMA-DBG] KVClientOp ctor use_rdma="
                 << (use_rdma ? "true" : "false") << std::endl;
-      ps_backend_name_ = BackendNameFromConfig(config);
 
       if (use_rdma) {
         std::cerr << "[RDMA-DBG] InitializeRdmaProcessRuntime before "
@@ -255,6 +521,11 @@ BasePSClient* KVClientOp::ps_client_ = nullptr;
 std::unique_ptr<BasePSClient> KVClientOp::ps_client_holder_;
 
 void KVClientOp::SetPSConfig(const std::string& host, int port) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    LOG(INFO) << "HierKV backend ignores set_ps_config host=" << host
+              << " port=" << port;
+    return;
+  }
   ps_client_holder_.reset();
   ps_client_ = nullptr;
 
@@ -299,6 +570,15 @@ void KVClientOp::SetPSBackend(const std::string& backend) {
     throw std::invalid_argument("backend must be non-empty");
   }
 
+  const std::string normalized_backend = NormalizeBackendName(backend);
+  if (IsHierKVBackendName(normalized_backend)) {
+    ps_client_holder_.reset();
+    ps_client_       = nullptr;
+    ps_backend_name_ = normalized_backend;
+    LOG(INFO) << "Switched KVClientOp backend to local HierKV runtime.";
+    return;
+  }
+
   json config = GetGlobalConfig();
   if (!config.contains("cache_ps")) {
     config["cache_ps"] = json::object();
@@ -317,8 +597,10 @@ std::string KVClientOp::CurrentPSBackend() const { return ps_backend_name_; }
 
 void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
                                  base::RecTensor& values) {
-  if (ps_backend_name_ != "local_shm") {
-    throw std::runtime_error("local_lookup_flat requires local_shm backend, "
+  if (ps_backend_name_ != "local_shm" &&
+      !IsHierKVBackendName(ps_backend_name_)) {
+    throw std::runtime_error("local_lookup_flat requires local_shm or hierkv "
+                             "backend, "
                              "but current backend is " +
                              ps_backend_name_);
   }
@@ -328,8 +610,10 @@ void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
 void KVClientOp::LocalUpdateFlat(const std::string& table_name,
                                  const base::RecTensor& keys,
                                  const base::RecTensor& grads) {
-  if (ps_backend_name_ != "local_shm") {
-    throw std::runtime_error("local_update_flat requires local_shm backend, "
+  if (ps_backend_name_ != "local_shm" &&
+      !IsHierKVBackendName(ps_backend_name_)) {
+    throw std::runtime_error("local_update_flat requires local_shm or hierkv "
+                             "backend, "
                              "but current backend is " +
                              ps_backend_name_);
   }
@@ -337,6 +621,10 @@ void KVClientOp::LocalUpdateFlat(const std::string& table_name,
 }
 
 void KVClientOp::EmbRead(const RecTensor& keys, RecTensor& values) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    GetHierKVLocalRuntime().Read(keys, values);
+    return;
+  }
   if (ps_client_ == nullptr) {
     throw std::runtime_error("PS client is not initialized. Please call "
                              "KVClientOp::SetPSClient() first.");
@@ -440,6 +728,10 @@ void KVClientOp::EmbUpdate(const base::RecTensor& keys,
 void KVClientOp::EmbUpdate(const std::string& table_name,
                            const base::RecTensor& keys,
                            const base::RecTensor& grads) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    GetHierKVLocalRuntime().Update(table_name, keys, grads);
+    return;
+  }
   if (ps_client_ == nullptr) {
     throw std::runtime_error("PS client is not initialized. Please call "
                              "KVClientOp::SetPSClient() first.");
@@ -536,6 +828,9 @@ void KVClientOp::EmbUpdate(const std::string& table_name,
 
 bool KVClientOp::InitEmbeddingTable(const std::string& table_name,
                                     const EmbeddingTableConfig& config) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    return GetHierKVLocalRuntime().InitEmbeddingTable(table_name, config);
+  }
   if (ps_client_ == nullptr) {
     throw std::runtime_error("PS client is not initialized. Please call "
                              "KVClientOp::SetPSClient() first.");
@@ -567,6 +862,10 @@ bool KVClientOp::InitEmbeddingTable(const std::string& table_name,
 }
 
 void KVClientOp::EmbWrite(const RecTensor& keys, const RecTensor& values) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    GetHierKVLocalRuntime().Write(keys, values);
+    return;
+  }
   if (ps_client_ == nullptr) {
     throw std::runtime_error("PS client is not initialized. Please call "
                              "KVClientOp::SetPSClient() first.");
@@ -673,6 +972,13 @@ void KVClientOp::EmbInit(const base::RecTensor& keys,
 
 uint64_t
 KVClientOp::EmbPrefetch(const base::RecTensor& keys, const RecTensor& values) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    int64_t embedding_dim = values.dim() == 2 ? values.shape(1) : -1;
+    if (embedding_dim <= 0) {
+      embedding_dim = GetHierKVLocalRuntime().default_embedding_dim;
+    }
+    return GetHierKVLocalRuntime().Prefetch(keys, embedding_dim);
+  }
   const uint64_t* keys_data = keys.data_as<uint64_t>();
   int64_t L                 = keys.shape(0);
   base::ConstArray<uint64_t> keys_array(keys_data, L);
@@ -680,15 +986,26 @@ KVClientOp::EmbPrefetch(const base::RecTensor& keys, const RecTensor& values) {
 }
 
 bool KVClientOp::IsPrefetchDone(uint64_t prefetch_id) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    return GetHierKVLocalRuntime().IsPrefetchDone(prefetch_id);
+  }
   return ps_client_->IsPrefetchDone(prefetch_id);
 }
 
 void KVClientOp::WaitForPrefetch(uint64_t prefetch_id) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    GetHierKVLocalRuntime().WaitForPrefetch(prefetch_id);
+    return;
+  }
   ps_client_->WaitForPrefetch(prefetch_id);
 }
 
 void KVClientOp::GetPretchResult(uint64_t prefetch_id,
                                  std::vector<std::vector<float>>* values) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    GetHierKVLocalRuntime().ConsumePrefetch(prefetch_id, values);
+    return;
+  }
   ps_client_->GetPrefetchResult(prefetch_id, values);
 }
 
@@ -697,6 +1014,11 @@ void KVClientOp::GetPretchResultFlat(
     std::vector<float>* values,
     int64_t* num_rows,
     int64_t embedding_dim) {
+  if (IsHierKVBackendName(ps_backend_name_)) {
+    GetHierKVLocalRuntime().ConsumePrefetchFlat(
+        prefetch_id, values, num_rows, embedding_dim);
+    return;
+  }
   ps_client_->GetPrefetchResultFlat(
       prefetch_id, values, num_rows, embedding_dim);
 }

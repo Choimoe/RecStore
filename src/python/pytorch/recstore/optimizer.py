@@ -2,6 +2,8 @@ import torch
 from typing import List, Union, Dict, Tuple, Any
 from .single_node_exchange import SparseGradPayload, exchange_sparse_grads
 
+_LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
+
 class DistEmbedding:
     pass
 
@@ -87,7 +89,7 @@ def _can_use_single_node_distributed_fast_path(mod: Any) -> bool:
         return False
     if getattr(mod, "single_node_owner_policy", None) != "hash_mod_world_size":
         return False
-    if getattr(mod, "single_node_ps_backend", None) != "local_shm":
+    if getattr(mod, "single_node_ps_backend", None) not in _LOCAL_FAST_PATH_BACKENDS:
         return False
     dist = getattr(torch, "distributed", None)
     if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():

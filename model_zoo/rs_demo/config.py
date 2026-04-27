@@ -94,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--single-node-ps-backend",
         type=str,
         default="local_shm",
-        choices=["local_shm"],
+        choices=["local_shm", "hierkv"],
     )
     parser.add_argument(
         "--single-node-owner-policy",
@@ -252,9 +252,9 @@ def validate_recstore_config(cfg: RunConfig) -> None:
             raise RuntimeError(
                 "RecStore single-node distributed fast path requires --nproc-per-node greater than 1."
             )
-        if cfg.single_node_ps_backend != "local_shm":
+        if cfg.single_node_ps_backend not in {"local_shm", "hierkv"}:
             raise RuntimeError(
-                "RecStore single-node distributed fast path only supports --single-node-ps-backend=local_shm."
+                "RecStore single-node distributed fast path only supports --single-node-ps-backend=local_shm or hierkv."
             )
         if cfg.single_node_owner_policy != "hash_mod_world_size":
             raise RuntimeError(

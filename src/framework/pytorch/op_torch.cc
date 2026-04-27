@@ -13,6 +13,14 @@
 namespace recstore {
 namespace framework {
 
+namespace {
+
+bool IsLocalFastPathBackend(const std::string& backend) {
+  return backend == "local_shm" || backend == "hierkv";
+}
+
+} // namespace
+
 static inline base::RecTensor
 ToRecTensor(const torch::Tensor& tensor, base::DataType dtype) {
   std::vector<int64_t> shape;
@@ -91,8 +99,8 @@ local_lookup_flat_torch(const torch::Tensor& keys, int64_t embedding_dim) {
 
   auto kv_op = GetConcreteKVClientOp();
   TORCH_CHECK(
-      kv_op->CurrentPSBackend() == "local_shm",
-      "local_lookup_flat requires local_shm backend, but current backend is ",
+      IsLocalFastPathBackend(kv_op->CurrentPSBackend()),
+      "local_lookup_flat requires local_shm or hierkv backend, but current backend is ",
       kv_op->CurrentPSBackend());
 
   const int64_t num_keys = cpu_keys.size(0);
@@ -224,8 +232,8 @@ void local_update_flat_torch(const std::string& table_name,
 
   auto kv_op = GetConcreteKVClientOp();
   TORCH_CHECK(
-      kv_op->CurrentPSBackend() == "local_shm",
-      "local_update_flat requires local_shm backend, but current backend is ",
+      IsLocalFastPathBackend(kv_op->CurrentPSBackend()),
+      "local_update_flat requires local_shm or hierkv backend, but current backend is ",
       kv_op->CurrentPSBackend());
 
   if (keys.size(0) == 0) {

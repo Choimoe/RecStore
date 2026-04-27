@@ -1,6 +1,7 @@
 #include "framework/hugectr/op_hugectr.h"
 
 #include "framework/hugectr/hierkv_backend.h"
+#include "framework/op.h"
 #include "base/tensor.h"
 
 #include <cuda_runtime_api.h>
@@ -10,8 +11,21 @@
 #include <vector>
 
 namespace recstore {
-void EmbRead(const base::RecTensor& keys, base::RecTensor& values);
-void EmbUpdate(const base::RecTensor& keys, const base::RecTensor& grads);
+void EmbRead(const base::RecTensor& keys, base::RecTensor& values) {
+  auto op = GetKVClientOp();
+  if (op == nullptr) {
+    throw std::runtime_error("KV client op is not initialized.");
+  }
+  op->EmbRead(keys, values);
+}
+
+void EmbUpdate(const base::RecTensor& keys, const base::RecTensor& grads) {
+  auto op = GetKVClientOp();
+  if (op == nullptr) {
+    throw std::runtime_error("KV client op is not initialized.");
+  }
+  op->EmbUpdate(keys, grads);
+}
 } // namespace recstore
 
 static void check_cuda_error(cudaError_t err) {
