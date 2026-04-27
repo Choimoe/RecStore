@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <unordered_map>
 
 #include "base/array.h"
@@ -9,6 +11,18 @@
 #include "ps/local_shm/local_shm_region.h"
 
 namespace recstore {
+
+struct LocalShmFlatGetHandle {
+  static constexpr uint32_t kInvalidSlotId =
+      std::numeric_limits<uint32_t>::max();
+
+  uint32_t slot_id        = kInvalidSlotId;
+  uint64_t request_id     = 0;
+  float* values           = nullptr;
+  int64_t num_rows        = 0;
+  int64_t embedding_dim   = 0;
+  uint64_t output_bytes   = 0;
+};
 
 class LocalShmPSClient : public BasePSClient {
 public:
@@ -21,6 +35,12 @@ public:
                        float* values,
                        int64_t num_rows,
                        int64_t embedding_dim);
+  int SubmitGetParameterFlat(const base::ConstArray<uint64_t>& keys,
+                             int64_t num_rows,
+                             int64_t embedding_dim,
+                             LocalShmFlatGetHandle* handle);
+  int WaitGetParameterFlat(LocalShmFlatGetHandle* handle);
+  void ReleaseGetParameterFlat(LocalShmFlatGetHandle* handle);
   int PutParameter(const base::ConstArray<uint64_t>& keys,
                    const std::vector<std::vector<float>>& values) override;
   int UpdateParameter(const std::string& table_name,
