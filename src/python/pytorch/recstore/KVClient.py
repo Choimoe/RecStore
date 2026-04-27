@@ -243,25 +243,35 @@ class RecStoreClient:
         
         return res
 
-    def _normalize_ids(self, ids: torch.Tensor) -> torch.Tensor:
+    def _normalize_ids(
+        self,
+        ids: torch.Tensor,
+        *,
+        preserve_device: bool = False,
+    ) -> torch.Tensor:
         if not isinstance(ids, torch.Tensor):
             raise TypeError("ids must be a torch.Tensor")
         if ids.dtype != torch.int64:
             ids = ids.to(dtype=torch.int64)
         if not ids.is_contiguous():
             ids = ids.contiguous()
-        if ids.device.type != 'cpu':
+        if not preserve_device and ids.device.type != 'cpu':
             ids = ids.to('cpu')
         return ids
 
-    def _normalize_grads(self, grads: torch.Tensor) -> torch.Tensor:
+    def _normalize_grads(
+        self,
+        grads: torch.Tensor,
+        *,
+        preserve_device: bool = False,
+    ) -> torch.Tensor:
         if not isinstance(grads, torch.Tensor):
             raise TypeError("grads must be a torch.Tensor")
         if grads.dtype != torch.float32:
             grads = grads.to(dtype=torch.float32)
         if not grads.is_contiguous():
             grads = grads.contiguous()
-        if grads.device.type != 'cpu':
+        if not preserve_device and grads.device.type != 'cpu':
             grads = grads.to('cpu')
         return grads
 
@@ -291,7 +301,7 @@ class RecStoreClient:
         self._require_local_shm_backend("local_lookup_flat")
         meta = self._tensor_meta[name]
         embedding_dim = meta['shape'][1]
-        ids = self._normalize_ids(ids)
+        ids = self._normalize_ids(ids, preserve_device=True)
         return self.ops.local_lookup_flat(ids, int(embedding_dim))
 
     def local_update_flat(self, name: str, ids: torch.Tensor, grads: torch.Tensor) -> None:
@@ -299,8 +309,8 @@ class RecStoreClient:
             raise RuntimeError(f"Tensor '{name}' has not been initialized.")
 
         self._require_local_shm_backend("local_update_flat")
-        ids = self._normalize_ids(ids)
-        grads = self._normalize_grads(grads)
+        ids = self._normalize_ids(ids, preserve_device=True)
+        grads = self._normalize_grads(grads, preserve_device=True)
         if grads.dim() != 2:
             raise ValueError("grads must be a 2-dimensional tensor")
         if ids.size(0) != grads.size(0):

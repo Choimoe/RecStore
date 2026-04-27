@@ -68,6 +68,50 @@ class TestKVClientLocalFastPath(unittest.TestCase):
         self.assertTrue(torch.equal(called_keys, keys))
         self.assertTrue(torch.equal(called_grads, grads))
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for CPU-normalization regression coverage")
+    def test_default_normalizers_still_move_cuda_tensors_to_cpu(self):
+        client = self._build_client()
+        device = torch.device("cuda", 0)
+
+        ids = client._normalize_ids(torch.tensor([7, 3], dtype=torch.int64, device=device))
+        grads = client._normalize_grads(
+            torch.ones((2, 4), dtype=torch.float32, device=device)
+        )
+
+        self.assertEqual(ids.device.type, "cpu")
+        self.assertEqual(grads.device.type, "cpu")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for GPU-resident local fast path coverage")
+    def test_local_lookup_flat_keeps_cuda_ids_for_local_shm_backend(self):
+        client = self._build_client()
+        device = torch.device("cuda", 0)
+
+        keys = torch.tensor([7, 3], dtype=torch.int64, device=device)
+        client.local_lookup_flat("table_a", keys)
+
+        self.assertEqual(len(client.ops.lookup_calls), 1)
+        called_keys, called_dim = client.ops.lookup_calls[0]
+        self.assertEqual(called_keys.device.type, "cuda")
+        self.assertTrue(torch.equal(called_keys, keys))
+        self.assertEqual(called_dim, 4)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for GPU-resident local fast path coverage")
+    def test_local_update_flat_keeps_cuda_inputs_for_local_shm_backend(self):
+        client = self._build_client()
+        device = torch.device("cuda", 0)
+
+        keys = torch.tensor([7, 3], dtype=torch.int64, device=device)
+        grads = torch.ones((2, 4), dtype=torch.float32, device=device)
+        client.local_update_flat("table_a", keys, grads)
+
+        self.assertEqual(len(client.ops.update_calls), 1)
+        table_name, called_keys, called_grads = client.ops.update_calls[0]
+        self.assertEqual(table_name, "table_a")
+        self.assertEqual(called_keys.device.type, "cuda")
+        self.assertEqual(called_grads.device.type, "cuda")
+        self.assertTrue(torch.equal(called_keys, keys))
+        self.assertTrue(torch.equal(called_grads, grads))
+
     def test_local_lookup_flat_fails_loudly_for_non_local_backend(self):
         client = self._build_client(backend="grpc")
 
