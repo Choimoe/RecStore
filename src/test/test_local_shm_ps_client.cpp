@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <chrono>
+#include <filesystem>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -16,15 +17,21 @@
 namespace recstore {
 namespace {
 
-json MakeLocalShmConfig(const std::string& region_name,
-                        uint32_t ready_queue_count       = 1,
-                        uint32_t ready_queue_burst_limit = 8) {
-  return {
+class LocalShmPSClientTest : public ::testing::Test {
+protected:
+  json MakeLocalShmConfig(const std::string& region_name,
+                          uint32_t ready_queue_count       = 1,
+                          uint32_t ready_queue_burst_limit = 8) {
+    const std::string storage_path = "/tmp/" + region_name + "_kv_store";
+    cleanup_paths_.push_back(storage_path);
+    std::error_code ec;
+    std::filesystem::remove_all(storage_path, ec);
+    return {
       {"cache_ps",
        {{"num_threads", 1},
         {"ps_type", "LOCAL_SHM"},
         {"base_kv_config",
-         {{"path", "/tmp/recstore_local_shm_test"},
+         {{"path", storage_path},
           {"index_type", "DRAM"},
           {"value_type", "DRAM"},
           {"capacity", 1024},
@@ -36,10 +43,29 @@ json MakeLocalShmConfig(const std::string& region_name,
         {"ready_queue_burst_limit", ready_queue_burst_limit},
         {"slot_buffer_bytes", 1 << 20},
         {"client_timeout_ms", 1000}}},
-  };
+    };
+  }
+
+  void TearDown() override {
+    std::error_code ec;
+    for (const auto& path : cleanup_paths_) {
+      std::filesystem::remove_all(path, ec);
+    }
+  }
+
+private:
+  std::vector<std::string> cleanup_paths_;
+};
+
+TEST_F(LocalShmPSClientTest, StoragePathIsScopedToRegionName) {
+  const auto config_a = MakeLocalShmConfig("recstore_local_shm_ps_client_a");
+  const auto config_b = MakeLocalShmConfig("recstore_local_shm_ps_client_b");
+
+  EXPECT_NE(config_a["cache_ps"]["base_kv_config"]["path"],
+            config_b["cache_ps"]["base_kv_config"]["path"]);
 }
 
-TEST(LocalShmPSClientTest, FactoryClientTypeCanBeConstructed) {
+TEST_F(LocalShmPSClientTest, FactoryClientTypeCanBeConstructed) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_factory_" + std::to_string(::getpid()));
   LocalShmParameterServer server;
@@ -56,7 +82,7 @@ TEST(LocalShmPSClientTest, FactoryClientTypeCanBeConstructed) {
   server_thread.join();
 }
 
-TEST(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
+TEST_F(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_rw_" + std::to_string(::getpid()));
   LocalShmParameterServer server;
@@ -90,7 +116,7 @@ TEST(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
   server_thread.join();
 }
 
-TEST(LocalShmPSClientTest, GetParameterFlatRoundTripUsesFixedEmbeddingDim) {
+TEST_F(LocalShmPSClientTest, GetParameterFlatRoundTripUsesFixedEmbeddingDim) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_flat_get_" + std::to_string(::getpid()));
   LocalShmParameterServer server;
@@ -119,8 +145,8 @@ TEST(LocalShmPSClientTest, GetParameterFlatRoundTripUsesFixedEmbeddingDim) {
   server_thread.join();
 }
 
-TEST(LocalShmPSClientTest,
-     SubmitWaitAndReleaseGetParameterFlatExposesSlotPayload) {
+TEST_F(LocalShmPSClientTest,
+       SubmitWaitAndReleaseGetParameterFlatExposesSlotPayload) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_flat_handle_" + std::to_string(::getpid()));
   LocalShmParameterServer server;
@@ -162,7 +188,7 @@ TEST(LocalShmPSClientTest,
   server_thread.join();
 }
 
-TEST(LocalShmPSClientTest, GetParameterFlatRejectsMismatchedEmbeddingDim) {
+TEST_F(LocalShmPSClientTest, GetParameterFlatRejectsMismatchedEmbeddingDim) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_flat_dim_mismatch_" +
       std::to_string(::getpid()));
@@ -187,7 +213,7 @@ TEST(LocalShmPSClientTest, GetParameterFlatRejectsMismatchedEmbeddingDim) {
   server_thread.join();
 }
 
-TEST(LocalShmPSClientTest, UpdateParameterFlatRejectsMismatchedEmbeddingDim) {
+TEST_F(LocalShmPSClientTest, UpdateParameterFlatRejectsMismatchedEmbeddingDim) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_update_dim_mismatch_" +
       std::to_string(::getpid()));
@@ -214,7 +240,7 @@ TEST(LocalShmPSClientTest, UpdateParameterFlatRejectsMismatchedEmbeddingDim) {
   server_thread.join();
 }
 
-TEST(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
+TEST_F(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_multi_" + std::to_string(::getpid()), 2);
   LocalShmParameterServer server;
@@ -263,7 +289,7 @@ TEST(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
   server_thread.join();
 }
 
-TEST(LocalShmPSClientTest, LocalRankEnvironmentSelectsReadyQueue) {
+TEST_F(LocalShmPSClientTest, LocalRankEnvironmentSelectsReadyQueue) {
   auto config = MakeLocalShmConfig(
       "recstore_local_shm_ps_client_env_" + std::to_string(::getpid()), 2);
   config["local_shm"]["client_timeout_ms"] = 100;
@@ -290,7 +316,7 @@ TEST(LocalShmPSClientTest, LocalRankEnvironmentSelectsReadyQueue) {
   ::unsetenv("LOCAL_RANK");
 }
 
-TEST(LocalShmPSClientTest, ServerDrainReadyQueueHonorsBurstLimit) {
+TEST_F(LocalShmPSClientTest, ServerDrainReadyQueueHonorsBurstLimit) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_server_burst_" + std::to_string(::getpid()), 2, 2);
   LocalShmRegion region;
