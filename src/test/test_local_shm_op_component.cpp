@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <filesystem>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -16,28 +17,54 @@
 
 namespace {
 
-json MakeLocalShmConfig(const std::string& region_name) {
-  return {
-      {"cache_ps",
-       {{"num_threads", 1},
-        {"ps_type", "LOCAL_SHM"},
-        {"base_kv_config",
-         {{"path", "/tmp/recstore_local_shm_component_test"},
-          {"index_type", "DRAM"},
-          {"value_type", "DRAM"},
-          {"capacity", 1024},
-          {"value_size", 16}}}}},
-      {"local_shm",
-       {{"region_name", region_name},
-        {"slot_count", 8},
-        {"ready_queue_count", 1},
-        {"ready_queue_burst_limit", 8},
-        {"slot_buffer_bytes", 1 << 20},
-        {"client_timeout_ms", 1000}}},
-  };
+class LocalShmOpComponentTest : public ::testing::Test {
+protected:
+  json MakeLocalShmConfig(const std::string& region_name) {
+    const std::string storage_path = "/tmp/" + region_name + "_kv_store";
+    cleanup_paths_.push_back(storage_path);
+    std::error_code ec;
+    std::filesystem::remove_all(storage_path, ec);
+    return {
+        {"cache_ps",
+         {{"num_threads", 1},
+          {"ps_type", "LOCAL_SHM"},
+          {"base_kv_config",
+           {{"path", storage_path},
+            {"index_type", "DRAM"},
+            {"value_type", "DRAM"},
+            {"capacity", 1024},
+            {"value_size", 16}}}}},
+        {"local_shm",
+         {{"region_name", region_name},
+          {"local_rank", 0},
+          {"slot_count", 8},
+          {"ready_queue_count", 1},
+          {"ready_queue_burst_limit", 8},
+          {"slot_buffer_bytes", 1 << 20},
+          {"client_timeout_ms", 1000}}},
+    };
+  }
+
+  void TearDown() override {
+    std::error_code ec;
+    for (const auto& path : cleanup_paths_) {
+      std::filesystem::remove_all(path, ec);
+    }
+  }
+
+private:
+  std::vector<std::string> cleanup_paths_;
+};
+
+TEST_F(LocalShmOpComponentTest, StoragePathIsScopedToRegionName) {
+  const auto config_a = MakeLocalShmConfig("recstore_local_shm_component_a");
+  const auto config_b = MakeLocalShmConfig("recstore_local_shm_component_b");
+
+  EXPECT_NE(config_a["cache_ps"]["base_kv_config"]["path"],
+            config_b["cache_ps"]["base_kv_config"]["path"]);
 }
 
-TEST(LocalShmOpComponentTest, LookupFlatReadsValuesFromLocalShmClient) {
+TEST_F(LocalShmOpComponentTest, LookupFlatReadsValuesFromLocalShmClient) {
   const auto config = MakeLocalShmConfig(
       "recstore_local_shm_component_" + std::to_string(::getpid()));
   recstore::LocalShmParameterServer server;
