@@ -541,6 +541,26 @@ class TestShardedRecstoreClient(unittest.TestCase):
             [(20000, "table0", [7, 3], grads.to(dtype=torch.float32).tolist())],
         )
 
+    def test_local_flat_ops_allow_hierkv_backend(self) -> None:
+        runtime_dir = self._make_runtime_dir()
+        fake_client = _FakeClient()
+        fake_client.ops.backend = "hierkv"
+        client = ShardedRecstoreClient(fake_client, runtime_dir)
+        client.register_tensor_meta("table0", shape=(16, 4), dtype=torch.float32)
+        client._activate_shard(0)
+
+        ids = torch.tensor([7, 3], dtype=torch.int32)
+        grads = torch.ones((2, 4), dtype=torch.float64)
+        out = client.local_lookup_flat("table0", ids)
+        client.local_update_flat("table0", ids, grads)
+
+        self.assertEqual(out.shape, (2, 4))
+        self.assertEqual(fake_client.ops.lookup_calls, [(20000, [7, 3], 4)])
+        self.assertEqual(
+            fake_client.ops.update_calls,
+            [(20000, "table0", [7, 3], grads.to(dtype=torch.float32).tolist())],
+        )
+
     def test_local_flat_ops_fail_loudly_for_non_local_backend(self) -> None:
         runtime_dir = self._make_runtime_dir()
         fake_client = _FakeClient()
@@ -549,9 +569,9 @@ class TestShardedRecstoreClient(unittest.TestCase):
         client.register_tensor_meta("table0", shape=(16, 4), dtype=torch.float32)
         client._activate_shard(0)
 
-        with self.assertRaisesRegex(RuntimeError, "local_shm"):
+        with self.assertRaisesRegex(RuntimeError, "local_shm or hierkv"):
             client.local_lookup_flat("table0", torch.tensor([1], dtype=torch.int64))
-        with self.assertRaisesRegex(RuntimeError, "local_shm"):
+        with self.assertRaisesRegex(RuntimeError, "local_shm or hierkv"):
             client.local_update_flat(
                 "table0",
                 torch.tensor([1], dtype=torch.int64),

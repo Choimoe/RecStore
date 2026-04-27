@@ -68,10 +68,22 @@ class TestKVClientLocalFastPath(unittest.TestCase):
         self.assertTrue(torch.equal(called_keys, keys))
         self.assertTrue(torch.equal(called_grads, grads))
 
+    def test_local_flat_ops_allow_hierkv_backend(self):
+        client = self._build_client(backend="hierkv")
+
+        keys = torch.tensor([7, 3], dtype=torch.int64)
+        grads = torch.ones((2, 4), dtype=torch.float32)
+        out = client.local_lookup_flat("table_a", keys)
+        client.local_update_flat("table_a", keys, grads)
+
+        self.assertEqual(out.shape, (2, 4))
+        self.assertEqual(len(client.ops.lookup_calls), 1)
+        self.assertEqual(len(client.ops.update_calls), 1)
+
     def test_local_lookup_flat_fails_loudly_for_non_local_backend(self):
         client = self._build_client(backend="grpc")
 
-        with self.assertRaisesRegex(RuntimeError, "local_shm"):
+        with self.assertRaisesRegex(RuntimeError, "local_shm or hierkv"):
             client.local_lookup_flat("table_a", torch.tensor([1], dtype=torch.int64))
 
         self.assertEqual(client.ops.lookup_calls, [])
@@ -79,7 +91,7 @@ class TestKVClientLocalFastPath(unittest.TestCase):
     def test_local_update_flat_fails_loudly_for_non_local_backend(self):
         client = self._build_client(backend="brpc")
 
-        with self.assertRaisesRegex(RuntimeError, "local_shm"):
+        with self.assertRaisesRegex(RuntimeError, "local_shm or hierkv"):
             client.local_update_flat(
                 "table_a",
                 torch.tensor([1], dtype=torch.int64),

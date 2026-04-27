@@ -7,7 +7,62 @@ import torch
 try:
     from ...torchrec_dlrm.dlrm import DenseArch, InteractionArch, OverArch
 except ImportError:
-    from torchrec_dlrm.dlrm import DenseArch, InteractionArch, OverArch
+    try:
+        from torchrec_dlrm.dlrm import DenseArch, InteractionArch, OverArch
+    except ImportError:
+        class DenseArch(torch.nn.Module):
+            def __init__(self, in_features: int, layer_sizes: list[int], device) -> None:
+                super().__init__()
+                layers: list[torch.nn.Module] = []
+                current_in = int(in_features)
+                for idx, out_features in enumerate(layer_sizes):
+                    layers.append(torch.nn.Linear(current_in, int(out_features), device=device))
+                    if idx != len(layer_sizes) - 1:
+                        layers.append(torch.nn.ReLU())
+                    current_in = int(out_features)
+                self.model = torch.nn.Sequential(*layers)
+
+            def forward(self, dense_features):
+                return self.model(dense_features)
+
+        class InteractionArch(torch.nn.Module):
+            def __init__(self, num_sparse_features: int) -> None:
+                super().__init__()
+                self.num_sparse_features = int(num_sparse_features)
+
+            def forward(self, embedded_dense, embedded_sparse):
+                features = torch.cat([embedded_dense.unsqueeze(1), embedded_sparse], dim=1)
+                interactions: list[torch.Tensor] = []
+                num_features = features.shape[1]
+                for left in range(num_features):
+                    for right in range(left + 1, num_features):
+                        interactions.append(
+                            (features[:, left, :] * features[:, right, :]).sum(dim=1, keepdim=True)
+                        )
+                if interactions:
+                    pairwise = torch.cat(interactions, dim=1)
+                else:
+                    pairwise = torch.empty(
+                        (embedded_dense.shape[0], 0),
+                        dtype=embedded_dense.dtype,
+                        device=embedded_dense.device,
+                    )
+                return torch.cat([embedded_dense, pairwise], dim=1)
+
+        class OverArch(torch.nn.Module):
+            def __init__(self, in_features: int, layer_sizes: list[int], device) -> None:
+                super().__init__()
+                layers: list[torch.nn.Module] = []
+                current_in = int(in_features)
+                for idx, out_features in enumerate(layer_sizes):
+                    layers.append(torch.nn.Linear(current_in, int(out_features), device=device))
+                    if idx != len(layer_sizes) - 1:
+                        layers.append(torch.nn.ReLU())
+                    current_in = int(out_features)
+                self.model = torch.nn.Sequential(*layers)
+
+            def forward(self, interacted_features):
+                return self.model(interacted_features)
 
 
 def sync_device(torch, device) -> None:

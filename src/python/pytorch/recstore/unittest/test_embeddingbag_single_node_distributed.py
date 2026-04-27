@@ -284,6 +284,62 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
             )
         )
 
+    def test_forward_uses_owner_lookup_fast_path_with_hierkv_backend(self):
+        ebc = self._build_ebc()
+        ebc.enable_single_node_distributed_fast_path = True
+        ebc.single_node_distributed_mode = "single_node"
+        ebc.single_node_ps_backend = "hierkv"
+        self.embeddingbag_module.torch.distributed = _FakeDist(
+            initialized=True,
+            rank=0,
+            world_size=2,
+        )
+
+        def fake_exchange_lookup_ids(payload, *, world_size, backend):
+            del payload, world_size, backend
+            return [
+                self.embeddingbag_module.LookupIdsPayload(
+                    rank=0,
+                    destination_ranks=torch.tensor([0], dtype=torch.int64),
+                    source_ranks=torch.tensor([0], dtype=torch.int64),
+                    row_positions=torch.tensor([0], dtype=torch.int64),
+                    fused_ids=torch.tensor([9], dtype=torch.int64),
+                ),
+            ]
+
+        def fake_exchange_lookup_embedding_responses(payload, *, world_size, backend):
+            del world_size, backend
+            return [payload]
+
+        original_exchange_lookup_ids = getattr(
+            self.embeddingbag_module, "exchange_lookup_ids", None
+        )
+        original_exchange_lookup_embedding_responses = getattr(
+            self.embeddingbag_module, "exchange_lookup_embedding_responses", None
+        )
+        self.embeddingbag_module.exchange_lookup_ids = fake_exchange_lookup_ids
+        self.embeddingbag_module.exchange_lookup_embedding_responses = (
+            fake_exchange_lookup_embedding_responses
+        )
+        try:
+            features = self._build_features([9])
+            out = ebc(features)
+        finally:
+            if original_exchange_lookup_ids is None:
+                delattr(self.embeddingbag_module, "exchange_lookup_ids")
+            else:
+                self.embeddingbag_module.exchange_lookup_ids = original_exchange_lookup_ids
+            if original_exchange_lookup_embedding_responses is None:
+                delattr(self.embeddingbag_module, "exchange_lookup_embedding_responses")
+            else:
+                self.embeddingbag_module.exchange_lookup_embedding_responses = (
+                    original_exchange_lookup_embedding_responses
+                )
+
+        self.assertEqual(len(ebc.kv_client.pull_calls), 0)
+        self.assertEqual(len(ebc.kv_client.local_lookup_calls), 1)
+        self.assertTrue(torch.equal(out.values(), torch.tensor([[109.0, 109.5]], dtype=torch.float32)))
+
     def test_forward_fast_path_restores_original_order_for_repeated_fused_ids(self):
         ebc = self._build_ebc()
         ebc.enable_single_node_distributed_fast_path = True
