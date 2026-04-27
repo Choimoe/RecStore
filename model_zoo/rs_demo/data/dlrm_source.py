@@ -20,11 +20,15 @@ def build_kjt_batch_from_dense_sparse_labels(
     dense_batch: torch.Tensor,
     sparse_batch: torch.Tensor,
     labels_batch: torch.Tensor,
+    *,
+    device: torch.device | None = None,
 ):
     del labels_batch
     cat_names = get_default_cat_names()
 
     sparse_mat = sparse_batch.to(torch.long)
+    if device is not None and sparse_mat.device != device:
+        sparse_mat = sparse_mat.to(device)
     batch_size = sparse_mat.shape[0]
     values_list = [sparse_mat[:, i] for i in range(26)]
     values = torch.cat(values_list, dim=0)
@@ -68,6 +72,9 @@ class _SimpleKeyedJaggedTensor:
 
     def keys(self) -> list[str]:
         return list(self._keys)
+
+    def device(self) -> torch.device:
+        return self._values.device
 
     def __getitem__(self, key: str) -> _SimpleJaggedValues:
         return self._mapping[key]

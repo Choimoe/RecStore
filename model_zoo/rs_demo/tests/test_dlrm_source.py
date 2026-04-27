@@ -50,6 +50,31 @@ class TestDlrmSourceFallback(unittest.TestCase):
             )
         )
 
+    def test_build_kjt_batch_accepts_device_and_places_sparse_values_on_it(self) -> None:
+        real_import_module = dlrm_source.importlib.import_module
+
+        def _patched_import(name: str):
+            if name in {"torchrec.datasets.criteo", "torchrec.sparse.jagged_tensor"}:
+                raise ModuleNotFoundError(name)
+            return real_import_module(name)
+
+        dense = torch.zeros((2, 13), dtype=torch.float32)
+        sparse = torch.arange(52, dtype=torch.int64).reshape(2, 26)
+        labels = torch.zeros((2, 1), dtype=torch.float32)
+
+        with mock.patch(
+            "model_zoo.rs_demo.data.dlrm_source.importlib.import_module",
+            side_effect=_patched_import,
+        ):
+            _, sparse_features = dlrm_source.build_kjt_batch_from_dense_sparse_labels(
+                dense,
+                sparse,
+                labels,
+                device=torch.device("cpu"),
+            )
+
+        self.assertEqual(sparse_features["cat_0"].values().device.type, "cpu")
+
 
 if __name__ == "__main__":
     unittest.main()
