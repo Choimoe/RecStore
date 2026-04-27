@@ -45,10 +45,10 @@ enum UpdateProfileIndex : std::size_t {
   kUpdateProfileSize,
 };
 
-thread_local std::vector<double> g_last_local_lookup_flat_profile(
-    kLookupProfileSize, 0.0);
-thread_local std::vector<double> g_last_local_update_flat_profile(
-    kUpdateProfileSize, 0.0);
+thread_local std::vector<double>
+    g_last_local_lookup_flat_profile(kLookupProfileSize, 0.0);
+thread_local std::vector<double>
+    g_last_local_update_flat_profile(kUpdateProfileSize, 0.0);
 
 inline std::chrono::steady_clock::time_point SteadyNow() {
   return std::chrono::steady_clock::now();
@@ -61,17 +61,15 @@ inline double ElapsedMs(std::chrono::steady_clock::time_point start) {
 }
 
 inline void ResetLocalLookupFlatProfile() {
-  std::fill(
-      g_last_local_lookup_flat_profile.begin(),
-      g_last_local_lookup_flat_profile.end(),
-      0.0);
+  std::fill(g_last_local_lookup_flat_profile.begin(),
+            g_last_local_lookup_flat_profile.end(),
+            0.0);
 }
 
 inline void ResetLocalUpdateFlatProfile() {
-  std::fill(
-      g_last_local_update_flat_profile.begin(),
-      g_last_local_update_flat_profile.end(),
-      0.0);
+  std::fill(g_last_local_update_flat_profile.begin(),
+            g_last_local_update_flat_profile.end(),
+            0.0);
 }
 
 } // namespace
@@ -190,8 +188,8 @@ torch::Tensor
 local_lookup_flat_torch(const torch::Tensor& keys, int64_t embedding_dim) {
   ResetLocalLookupFlatProfile();
   const auto total_start = SteadyNow();
-  bool is_cuda     = keys.is_cuda();
-  auto orig_device = keys.device();
+  bool is_cuda           = keys.is_cuda();
+  auto orig_device       = keys.device();
   torch::Tensor cpu_keys = keys;
   if (is_cuda) {
     const auto stage_start = SteadyNow();
@@ -236,7 +234,7 @@ local_lookup_flat_torch(const torch::Tensor& keys, int64_t embedding_dim) {
       kv_op->SubmitLocalLookupFlat(rec_keys, embedding_dim, &handle) == 0,
       "Failed to submit local_shm flat lookup.");
   g_last_local_lookup_flat_profile[kLookupSubmitMs] = ElapsedMs(submit_start);
-  const auto wait_start = SteadyNow();
+  const auto wait_start                             = SteadyNow();
   const int wait_ret = kv_op->WaitLocalLookupFlat(&handle);
   g_last_local_lookup_flat_profile[kLookupWaitMs] = ElapsedMs(wait_start);
   if (wait_ret != 0) {
@@ -257,11 +255,10 @@ local_lookup_flat_torch(const torch::Tensor& keys, int64_t embedding_dim) {
     TORCH_CHECK(false,
                 "local_shm flat lookup returned unexpected payload metadata.");
   }
-  const auto pin_start         = SteadyNow();
+  const auto pin_start = SteadyNow();
   const bool payload_is_pinned =
       EnsurePinnedLocalShmPayload(payload_values, payload_bytes);
-  g_last_local_lookup_flat_profile[kLookupPayloadPinMs] =
-      ElapsedMs(pin_start);
+  g_last_local_lookup_flat_profile[kLookupPayloadPinMs] = ElapsedMs(pin_start);
   if (payload_is_pinned) {
     try {
       LocalShmFlatGetHandle handle_for_release = handle;
@@ -416,15 +413,14 @@ void local_update_flat_torch(const std::string& table_name,
   torch::Tensor cpu_keys = keys;
   if (keys.is_cuda()) {
     const auto keys_stage_start = SteadyNow();
-    cpu_keys                    = StageCudaTensorToPinnedCpu(keys, torch::kInt64);
+    cpu_keys = StageCudaTensorToPinnedCpu(keys, torch::kInt64);
     g_last_local_update_flat_profile[kUpdateKeysStageMs] =
         ElapsedMs(keys_stage_start);
   }
   torch::Tensor cpu_grads = grads;
   if (grads.is_cuda()) {
     const auto grads_stage_start = SteadyNow();
-    cpu_grads =
-        StageCudaTensorToPinnedCpu(grads, torch::kFloat32);
+    cpu_grads = StageCudaTensorToPinnedCpu(grads, torch::kFloat32);
     g_last_local_update_flat_profile[kUpdateGradsStageMs] =
         ElapsedMs(grads_stage_start);
   }
@@ -448,8 +444,8 @@ std::vector<double> get_last_local_update_flat_profile_torch() {
 }
 
 bool warmup_local_lookup_flat_cuda_region_torch() {
-  auto kv_op = GetConcreteKVClientOp();
-  const void* payload_base = nullptr;
+  auto kv_op                = GetConcreteKVClientOp();
+  const void* payload_base  = nullptr;
   std::size_t payload_bytes = 0;
   if (!kv_op->GetLocalLookupFlatPayloadRegion(&payload_base, &payload_bytes)) {
     return false;
@@ -533,15 +529,12 @@ TORCH_LIBRARY(recstore_ops, m) {
   m.def("set_ps_config", set_ps_config_torch);
   m.def("set_ps_backend", set_ps_backend_torch);
   m.def("current_ps_backend", current_ps_backend_torch);
-  m.def(
-      "get_last_local_lookup_flat_profile",
-      get_last_local_lookup_flat_profile_torch);
-  m.def(
-      "get_last_local_update_flat_profile",
-      get_last_local_update_flat_profile_torch);
-  m.def(
-      "warmup_local_lookup_flat_cuda_region",
-      warmup_local_lookup_flat_cuda_region_torch);
+  m.def("get_last_local_lookup_flat_profile",
+        get_last_local_lookup_flat_profile_torch);
+  m.def("get_last_local_update_flat_profile",
+        get_last_local_update_flat_profile_torch);
+  m.def("warmup_local_lookup_flat_cuda_region",
+        warmup_local_lookup_flat_cuda_region_torch);
 }
 
 } // namespace framework

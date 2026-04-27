@@ -6,18 +6,18 @@
 #include <string>
 
 #ifdef ENABLE_PERF_REPORT
-#include "base/report/report_client.h"
+#  include "base/report/report_client.h"
 #endif
 
 namespace recstore {
 
 struct LocalShmStageReportContext {
-  bool active            = false;
-  uint64_t request_id    = 0;
-  uint32_t opcode        = 0;
+  bool active             = false;
+  uint64_t request_id     = 0;
+  uint32_t opcode         = 0;
   uint32_t ready_queue_id = 0;
-  uint32_t key_count     = 0;
-  uint32_t embedding_dim = 0;
+  uint32_t key_count      = 0;
+  uint32_t embedding_dim  = 0;
 };
 
 inline thread_local LocalShmStageReportContext g_local_shm_stage_report_context;
@@ -47,8 +47,7 @@ inline void ReportLocalShmStageMetric(const char* metric_name, double value) {
     return;
   }
   const std::string unique_id = LocalShmStageReportUniqueId();
-  report(
-      "local_shm_server_stages", unique_id.c_str(), metric_name, value);
+  report("local_shm_server_stages", unique_id.c_str(), metric_name, value);
 #else
   (void)metric_name;
   (void)value;
@@ -62,11 +61,12 @@ inline void ReportLocalShmStageMetadataOnce() {
   }
   ReportLocalShmStageMetric(
       "opcode", static_cast<double>(g_local_shm_stage_report_context.opcode));
-  ReportLocalShmStageMetric("ready_queue_id",
-                            static_cast<double>(
-                                g_local_shm_stage_report_context.ready_queue_id));
   ReportLocalShmStageMetric(
-      "key_count", static_cast<double>(g_local_shm_stage_report_context.key_count));
+      "ready_queue_id",
+      static_cast<double>(g_local_shm_stage_report_context.ready_queue_id));
+  ReportLocalShmStageMetric(
+      "key_count",
+      static_cast<double>(g_local_shm_stage_report_context.key_count));
   ReportLocalShmStageMetric(
       "embedding_dim",
       static_cast<double>(g_local_shm_stage_report_context.embedding_dim));
@@ -74,11 +74,12 @@ inline void ReportLocalShmStageMetadataOnce() {
 
 class LocalShmStageReportScope {
 public:
-  LocalShmStageReportScope(uint64_t request_id,
-                           uint32_t opcode,
-                           uint32_t ready_queue_id,
-                           uint32_t key_count,
-                           uint32_t embedding_dim)
+  LocalShmStageReportScope(
+      uint64_t request_id,
+      uint32_t opcode,
+      uint32_t ready_queue_id,
+      uint32_t key_count,
+      uint32_t embedding_dim)
       : previous_(g_local_shm_stage_report_context) {
     if (!IsLocalShmStageReportEnabled()) {
       return;
@@ -103,8 +104,8 @@ private:
   LocalShmStageReportContext previous_{};
 };
 
-inline double LocalShmElapsedUs(
-    const std::chrono::steady_clock::time_point& start) {
+inline double
+LocalShmElapsedUs(const std::chrono::steady_clock::time_point& start) {
   return std::chrono::duration_cast<std::chrono::duration<double, std::micro>>(
              std::chrono::steady_clock::now() - start)
       .count();

@@ -179,8 +179,7 @@ public:
       packs.emplace_back(keys[i], values[i].Size(), values[i].Data());
     }
     recstore::ReportLocalShmStageMetric(
-        "cache_ps_get_pack_us",
-        recstore::LocalShmElapsedUs(pack_build_start));
+        "cache_ps_get_pack_us", recstore::LocalShmElapsedUs(pack_build_start));
 
 #ifdef ENABLE_PERF_REPORT
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -243,11 +242,10 @@ public:
             dynamic_cast<KVEngineExtendibleHash*>(base_kv_.get());
         extendible_hash != nullptr) {
       const auto direct_start = std::chrono::steady_clock::now();
-      const bool ok = extendible_hash->BatchGetFlat(
+      const bool ok           = extendible_hash->BatchGetFlat(
           keys, values, num_rows, embedding_dim, tid);
       recstore::ReportLocalShmStageMetric(
-          "cache_ps_get_direct_us",
-          recstore::LocalShmElapsedUs(direct_start));
+          "cache_ps_get_direct_us", recstore::LocalShmElapsedUs(direct_start));
       return ok;
     }
 

@@ -117,7 +117,7 @@ bool LocalShmPSClient::GetSlotPayloadRegion(const void** base,
       region_.slot_buffer_bytes() == 0) {
     return false;
   }
-  *base = region_.slot_payload(0);
+  *base  = region_.slot_payload(0);
   *bytes = static_cast<std::size_t>(region_.slot_count()) *
            AlignUp(region_.slot_buffer_bytes());
   return *base != nullptr && *bytes > 0;
