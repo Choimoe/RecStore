@@ -35,6 +35,23 @@ bool IsReadWriteSuccess(BasePSClient* client, int ret) {
   return ret != 0;
 }
 
+LocalShmPSClient* GetLocalShmClientOrThrow(BasePSClient* client,
+                                          const std::string& backend_name,
+                                          const char* api_name) {
+  if (backend_name != "local_shm") {
+    throw std::runtime_error(
+        std::string(api_name) +
+        " requires local_shm backend, but current backend is " + backend_name);
+  }
+  auto* local_client = dynamic_cast<LocalShmPSClient*>(client);
+  if (local_client == nullptr) {
+    throw std::runtime_error(
+        std::string(api_name) +
+        " requires LocalShmPSClient backend instance.");
+  }
+  return local_client;
+}
+
 std::string BackendNameFromConfig(const json& config) {
   switch (ResolveFrameworkPSClientType(config)) {
   case PSClientType::kGrpc:
@@ -320,11 +337,6 @@ std::string KVClientOp::CurrentPSBackend() const {
 
 void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
                                  base::RecTensor& values) {
-  if (ps_backend_name_ != "local_shm") {
-    throw std::runtime_error(
-        "local_lookup_flat requires local_shm backend, but current backend is " +
-        ps_backend_name_);
-  }
   validate_keys(keys);
   validate_embeddings(values, "Values");
 
@@ -335,11 +347,8 @@ void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
         " but values has length " + std::to_string(values.shape(0)));
   }
 
-  auto* local_client = dynamic_cast<LocalShmPSClient*>(ps_client_);
-  if (local_client == nullptr) {
-    throw std::runtime_error(
-        "local_lookup_flat requires LocalShmPSClient backend instance.");
-  }
+  auto* local_client =
+      GetLocalShmClientOrThrow(ps_client_, ps_backend_name_, "local_lookup_flat");
 
   const uint64_t* keys_data = keys.data_as<uint64_t>();
   base::ConstArray<uint64_t> keys_array(keys_data, L);
@@ -352,14 +361,34 @@ void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
   }
 }
 
+int KVClientOp::SubmitLocalLookupFlat(const base::RecTensor& keys,
+                                      int64_t embedding_dim,
+                                      LocalShmFlatGetHandle* handle) {
+  validate_keys(keys);
+  const int64_t L = keys.shape(0);
+  const uint64_t* keys_data = keys.data_as<uint64_t>();
+  base::ConstArray<uint64_t> keys_array(keys_data, L);
+  auto* local_client =
+      GetLocalShmClientOrThrow(ps_client_, ps_backend_name_, "local_lookup_flat");
+  return local_client->SubmitGetParameterFlat(keys_array, L, embedding_dim, handle);
+}
+
+int KVClientOp::WaitLocalLookupFlat(LocalShmFlatGetHandle* handle) {
+  auto* local_client =
+      GetLocalShmClientOrThrow(ps_client_, ps_backend_name_, "local_lookup_flat");
+  return local_client->WaitGetParameterFlat(handle);
+}
+
+void KVClientOp::ReleaseLocalLookupFlat(LocalShmFlatGetHandle* handle) {
+  auto* local_client =
+      GetLocalShmClientOrThrow(ps_client_, ps_backend_name_, "local_lookup_flat");
+  local_client->ReleaseGetParameterFlat(handle);
+}
+
 void KVClientOp::LocalUpdateFlat(const std::string& table_name,
                                  const base::RecTensor& keys,
                                  const base::RecTensor& grads) {
-  if (ps_backend_name_ != "local_shm") {
-    throw std::runtime_error(
-        "local_update_flat requires local_shm backend, but current backend is " +
-        ps_backend_name_);
-  }
+  GetLocalShmClientOrThrow(ps_client_, ps_backend_name_, "local_update_flat");
   EmbUpdate(table_name, keys, grads);
 }
 

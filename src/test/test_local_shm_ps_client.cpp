@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <chrono>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -113,6 +114,48 @@ TEST(LocalShmPSClientTest, GetParameterFlatRoundTripUsesFixedEmbeddingDim) {
   EXPECT_EQ(readback[1], 3.0f);
   EXPECT_EQ(readback[4], 6.0f);
   EXPECT_EQ(readback[7], 9.0f);
+
+  server.Stop();
+  server_thread.join();
+}
+
+TEST(LocalShmPSClientTest, SubmitWaitAndReleaseGetParameterFlatExposesSlotPayload) {
+  const auto config = MakeLocalShmConfig(
+      "recstore_local_shm_ps_client_flat_handle_" + std::to_string(::getpid()));
+  LocalShmParameterServer server;
+  server.Init(config);
+
+  std::thread server_thread([&]() { server.Run(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  LocalShmPSClient client(config["local_shm"]);
+  ASSERT_EQ(client.InitEmbeddingTable("table_slot", {128, 4}), 0);
+
+  std::vector<uint64_t> keys             = {9, 13};
+  std::vector<std::vector<float>> values = {
+      {9.0f, 10.0f, 11.0f, 12.0f}, {13.0f, 14.0f, 15.0f, 16.0f}};
+  base::ConstArray<uint64_t> key_array(keys);
+  ASSERT_EQ(client.PutParameter(key_array, values), 0);
+
+  LocalShmFlatGetHandle handle;
+  ASSERT_EQ(client.SubmitGetParameterFlat(key_array, 2, 4, &handle), 0);
+  ASSERT_NE(handle.slot_id, std::numeric_limits<uint32_t>::max());
+  ASSERT_EQ(client.WaitGetParameterFlat(&handle), 0);
+  ASSERT_NE(handle.values, nullptr);
+  ASSERT_EQ(handle.num_rows, 2);
+  ASSERT_EQ(handle.embedding_dim, 4);
+  ASSERT_EQ(handle.output_bytes, sizeof(float) * 8);
+
+  EXPECT_FLOAT_EQ(handle.values[0], 9.0f);
+  EXPECT_FLOAT_EQ(handle.values[1], 10.0f);
+  EXPECT_FLOAT_EQ(handle.values[4], 13.0f);
+  EXPECT_FLOAT_EQ(handle.values[7], 16.0f);
+
+  client.ReleaseGetParameterFlat(&handle);
+  EXPECT_EQ(handle.values, nullptr);
+  EXPECT_EQ(handle.num_rows, 0);
+  EXPECT_EQ(handle.embedding_dim, 0);
+  EXPECT_EQ(handle.output_bytes, 0);
 
   server.Stop();
   server_thread.join();
