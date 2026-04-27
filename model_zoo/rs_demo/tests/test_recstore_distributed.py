@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import ctypes
 import importlib
 import json
-import struct
 import tempfile
 import unittest
 from unittest import mock
@@ -13,6 +11,7 @@ import torch
 
 from model_zoo.rs_demo.runtime.recstore_distributed import (
     ShardedRecstoreClient,
+    _city_hash64_of_uint64,
 )
 
 
@@ -164,14 +163,7 @@ class TestShardedRecstoreClient(unittest.TestCase):
 
     @staticmethod
     def _cityhash_shard_for_key(key: int, num_shards: int) -> int:
-        lib = ctypes.CDLL(
-            "/app/RecStore/third_party/cityhash/src/.libs/libcityhash.so.0.0.0"
-        )
-        city_hash64 = lib._Z10CityHash64PKcm
-        city_hash64.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
-        city_hash64.restype = ctypes.c_uint64
-        raw = struct.pack("<Q", int(key) & 0xFFFFFFFFFFFFFFFF)
-        return int(city_hash64(raw, len(raw)) % num_shards)
+        return int(_city_hash64_of_uint64(int(key)) % num_shards)
 
     def test_routes_init_write_read_and_update_by_shard(self) -> None:
         runtime_dir = self._make_runtime_dir()
