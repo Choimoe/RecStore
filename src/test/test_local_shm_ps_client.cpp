@@ -110,6 +110,21 @@ TEST_F(LocalShmPSClientTest, FactoryClientTypeCanBeConstructed) {
   server_thread.join();
 }
 
+TEST_F(LocalShmPSClientTest, InitCreatesOneRuntimePerReadyQueue) {
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_multi_queue"),
+      /*ready_queue_count=*/2);
+  LocalShmParameterServer server;
+
+  server.Init(config);
+
+  ASSERT_EQ(server.runtimes_.size(), 2u);
+  ASSERT_NE(server.runtimes_[0], nullptr);
+  ASSERT_NE(server.runtimes_[1], nullptr);
+  EXPECT_EQ(server.runtimes_[0]->ready_queue_id_, 0u);
+  EXPECT_EQ(server.runtimes_[1]->ready_queue_id_, 1u);
+}
+
 TEST_F(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
   const auto config =
       MakeLocalShmConfig(MakeUniqueRegionName("recstore_local_shm_ps_client_rw"));
@@ -168,6 +183,42 @@ TEST_F(LocalShmPSClientTest, GetParameterFlatRoundTripUsesFixedEmbeddingDim) {
   EXPECT_EQ(readback[1], 3.0f);
   EXPECT_EQ(readback[4], 6.0f);
   EXPECT_EQ(readback[7], 9.0f);
+
+  server.Stop();
+  server_thread.join();
+}
+
+TEST_F(LocalShmPSClientTest, GetParameterFlatZerosMissingRowsOnly) {
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_flat_partial_hit"));
+  LocalShmParameterServer server;
+  server.Init(config);
+
+  std::thread server_thread([&]() { server.Run(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  LocalShmPSClient client(config["local_shm"]);
+  ASSERT_EQ(client.InitEmbeddingTable("table_partial_hit", {128, 4}), 0);
+
+  std::vector<uint64_t> put_keys             = {2};
+  std::vector<std::vector<float>> put_values = {
+      {2.0f, 3.0f, 4.0f, 5.0f}};
+  base::ConstArray<uint64_t> put_key_array(put_keys);
+  ASSERT_EQ(client.PutParameter(put_key_array, put_values), 0);
+
+  std::vector<uint64_t> get_keys = {2, 999};
+  base::ConstArray<uint64_t> get_key_array(get_keys);
+  std::vector<float> readback(8, -1.0f);
+  ASSERT_EQ(client.GetParameterFlat(get_key_array, readback.data(), 2, 4), 0);
+
+  EXPECT_FLOAT_EQ(readback[0], 2.0f);
+  EXPECT_FLOAT_EQ(readback[1], 3.0f);
+  EXPECT_FLOAT_EQ(readback[2], 4.0f);
+  EXPECT_FLOAT_EQ(readback[3], 5.0f);
+  EXPECT_FLOAT_EQ(readback[4], 0.0f);
+  EXPECT_FLOAT_EQ(readback[5], 0.0f);
+  EXPECT_FLOAT_EQ(readback[6], 0.0f);
+  EXPECT_FLOAT_EQ(readback[7], 0.0f);
 
   server.Stop();
   server_thread.join();
