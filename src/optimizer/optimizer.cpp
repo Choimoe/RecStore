@@ -1,4 +1,5 @@
 #include "optimizer.h"
+#include "ps/local_shm/local_shm_stage_report.h"
 #include <cstring>
 
 namespace {
@@ -102,13 +103,19 @@ void SGD::UpdateFlat(
   }
 
   std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
+  const auto batch_get_start = std::chrono::steady_clock::now();
   std::vector<base::ConstArray<float>> current_values;
   it->second->BatchGet(key_vec, &current_values, tid);
+  recstore::ReportLocalShmStageMetric(
+      "sgd_update_batch_get_us", recstore::LocalShmElapsedUs(batch_get_start));
 
+  const auto apply_start = std::chrono::steady_clock::now();
+  int64_t missing_rows   = 0;
   for (int64_t row = 0; row < num_rows; ++row) {
     const float* row_grad = grads + row * embedding_dim;
     const auto& current   = current_values[static_cast<size_t>(row)];
     if (current.Size() == 0) {
+      ++missing_rows;
       std::vector<float> zero_init(static_cast<size_t>(embedding_dim), 0.0f);
       for (int64_t col = 0; col < embedding_dim; ++col) {
         zero_init[static_cast<size_t>(col)] = -learning_rate_ * row_grad[col];
@@ -129,6 +136,10 @@ void SGD::UpdateFlat(
       data[col] -= learning_rate_ * row_grad[col];
     }
   }
+  recstore::ReportLocalShmStageMetric(
+      "sgd_update_apply_us", recstore::LocalShmElapsedUs(apply_start));
+  recstore::ReportLocalShmStageMetric(
+      "sgd_update_missing_rows", static_cast<double>(missing_rows));
 }
 
 void AdaGrad::Init(const std::vector<std::string> table_name,

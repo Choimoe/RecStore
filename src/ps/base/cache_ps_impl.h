@@ -15,9 +15,11 @@
 #include "base/timer.h"
 #include "parameters.h"
 #include "storage/kv_engine/base_kv.h"
+#include "storage/kv_engine/engine_extendible_hash.h"
 #include "storage/kv_engine/engine_factory.h"
 #include "storage/kv_engine/engine_selector.h"
 #include "optimizer/optimizer.h"
+#include "ps/local_shm/local_shm_stage_report.h"
 
 #ifdef ENABLE_PERF_REPORT
 #  include <chrono>
@@ -165,12 +167,20 @@ public:
 #ifdef ENABLE_PERF_REPORT
     auto start_time = std::chrono::high_resolution_clock::now();
 #endif
+    const auto batch_get_start = std::chrono::steady_clock::now();
     std::vector<base::ConstArray<float>> values;
     base_kv_->BatchGet(keys, &values, tid);
+    recstore::ReportLocalShmStageMetric(
+        "cache_ps_get_batch_get_us",
+        recstore::LocalShmElapsedUs(batch_get_start));
 
+    const auto pack_build_start = std::chrono::steady_clock::now();
     for (int i = 0; i < keys.Size(); i++) {
       packs.emplace_back(keys[i], values[i].Size(), values[i].Data());
     }
+    recstore::ReportLocalShmStageMetric(
+        "cache_ps_get_pack_us",
+        recstore::LocalShmElapsedUs(pack_build_start));
 
 #ifdef ENABLE_PERF_REPORT
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -229,8 +239,24 @@ public:
       return false;
     }
 
+    if (auto* extendible_hash =
+            dynamic_cast<KVEngineExtendibleHash*>(base_kv_.get());
+        extendible_hash != nullptr) {
+      const auto direct_start = std::chrono::steady_clock::now();
+      const bool ok = extendible_hash->BatchGetFlat(
+          keys, values, num_rows, embedding_dim, tid);
+      recstore::ReportLocalShmStageMetric(
+          "cache_ps_get_direct_us",
+          recstore::LocalShmElapsedUs(direct_start));
+      return ok;
+    }
+
+    const auto batch_get_start = std::chrono::steady_clock::now();
     std::vector<base::ConstArray<float>> value_slices;
     base_kv_->BatchGet(keys, &value_slices, tid);
+    recstore::ReportLocalShmStageMetric(
+        "cache_ps_get_batch_get_us",
+        recstore::LocalShmElapsedUs(batch_get_start));
     if (value_slices.size() != static_cast<size_t>(num_rows)) {
       LOG(ERROR) << "GetParameterFlat BatchGet returned " << value_slices.size()
                  << " rows, expected " << num_rows;
@@ -248,6 +274,7 @@ public:
       }
     }
 
+    const auto copy_start = std::chrono::steady_clock::now();
     std::fill_n(
         values,
         static_cast<size_t>(num_rows) * static_cast<size_t>(embedding_dim),
@@ -260,6 +287,8 @@ public:
                     values + row * embedding_dim);
       }
     }
+    recstore::ReportLocalShmStageMetric(
+        "cache_ps_get_copy_us", recstore::LocalShmElapsedUs(copy_start));
     return true;
   }
 

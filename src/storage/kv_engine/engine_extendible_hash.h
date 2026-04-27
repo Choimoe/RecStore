@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <shared_mutex>
+#include <vector>
 
 #include "../index/dram_cceh/extendible_hash.h"
 #include "storage/index/index.h"
@@ -187,6 +191,69 @@ public:
             base::ConstArray<float>((float*)data, size / sizeof(float));
       }
     }
+  }
+
+  bool BatchGetFlat(base::ConstArray<uint64_t> keys,
+                    float* values,
+                    int64_t num_rows,
+                    int64_t embedding_dim,
+                    unsigned tid) {
+    if (values == nullptr) {
+      return false;
+    }
+    if (num_rows < 0 || embedding_dim <= 0) {
+      return false;
+    }
+    if (keys.Size() != static_cast<size_t>(num_rows)) {
+      return false;
+    }
+
+#ifndef XMH_VARIABLE_SIZE_KV
+    if (static_cast<int64_t>(value_size_) !=
+        embedding_dim * static_cast<int64_t>(sizeof(float))) {
+      return false;
+    }
+#endif
+
+    const size_t row_bytes =
+        static_cast<size_t>(embedding_dim) * sizeof(float);
+    std::atomic<bool> ok{true};
+    std::vector<uint64_t> key_snapshot(keys.Data(), keys.Data() + keys.Size());
+
+#pragma omp parallel for num_threads(8) if (keys.Size() > 1024)
+    for (int64_t row = 0; row < num_rows; ++row) {
+      const uint64_t key = key_snapshot[static_cast<size_t>(row)];
+      float* row_ptr = values + row * embedding_dim;
+      std::memset(row_ptr, 0, row_bytes);
+      std::shared_lock<std::shared_mutex> lk(KeyMutex(key));
+      Key_t hash_key = key;
+      Value_t read_value;
+      hash_table_->Get(hash_key, read_value, tid);
+
+      if (read_value == NONE) {
+        continue;
+      }
+
+      base::PetKVData shmkv_data;
+      shmkv_data.data_value = read_value;
+      char* data = shm_malloc_->GetMallocData(shmkv_data.shm_malloc_offset());
+      if (data == nullptr) {
+        continue;
+      }
+
+#ifdef XMH_VARIABLE_SIZE_KV
+      const int size = shm_malloc_->GetMallocSize(
+          shmkv_data.shm_malloc_offset());
+      if (size != static_cast<int>(row_bytes)) {
+        ok.store(false, std::memory_order_relaxed);
+        continue;
+      }
+#endif
+
+      std::memcpy(row_ptr, data, row_bytes);
+    }
+
+    return ok.load(std::memory_order_relaxed);
   }
 
   ~KVEngineExtendibleHash() {

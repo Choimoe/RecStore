@@ -38,6 +38,11 @@ target_link_libraries(local_shm_ps_server_runtime PRIVATE
     pthread
 )
 
+if(TARGET report_client)
+  target_compile_definitions(local_shm_ps_server_runtime PRIVATE ENABLE_PERF_REPORT)
+  target_link_libraries(local_shm_ps_server_runtime PRIVATE report_client)
+endif()
+
 add_executable(local_shm_ps_server
     local_shm_server_main.cpp
 )
