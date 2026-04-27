@@ -27,22 +27,22 @@ protected:
     std::error_code ec;
     std::filesystem::remove_all(storage_path, ec);
     return {
-      {"cache_ps",
-       {{"num_threads", 1},
-        {"ps_type", "LOCAL_SHM"},
-        {"base_kv_config",
-         {{"path", storage_path},
-          {"index_type", "DRAM"},
-          {"value_type", "DRAM"},
-          {"capacity", 1024},
-          {"value_size", 16}}}}},
-      {"local_shm",
-       {{"region_name", region_name},
-        {"slot_count", 8},
-        {"ready_queue_count", ready_queue_count},
-        {"ready_queue_burst_limit", ready_queue_burst_limit},
-        {"slot_buffer_bytes", 1 << 20},
-        {"client_timeout_ms", 1000}}},
+        {"cache_ps",
+         {{"num_threads", 1},
+          {"ps_type", "LOCAL_SHM"},
+          {"base_kv_config",
+           {{"path", storage_path},
+            {"index_type", "DRAM"},
+            {"value_type", "DRAM"},
+            {"capacity", 1024},
+            {"value_size", 16}}}}},
+        {"local_shm",
+         {{"region_name", region_name},
+          {"slot_count", 8},
+          {"ready_queue_count", ready_queue_count},
+          {"ready_queue_burst_limit", ready_queue_burst_limit},
+          {"slot_buffer_bytes", 1 << 20},
+          {"client_timeout_ms", 1000}}},
     };
   }
 
