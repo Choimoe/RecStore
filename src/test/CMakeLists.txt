@@ -2,6 +2,18 @@ find_package(folly REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+function(add_python_unittest _name)
+    add_test(
+        NAME ${_name}
+        COMMAND ${Python3_EXECUTABLE} -m unittest ${ARGN}
+    )
+    set_tests_properties(
+        ${_name}
+        PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    )
+endfunction()
+
 add_subdirectory(small_tests)
 add_subdirectory(server_mgr)
 
@@ -198,29 +210,117 @@ target_link_libraries(test_local_shm_ps_client PUBLIC
 )
 add_test(NAME test_local_shm_ps_client COMMAND test_local_shm_ps_client)
 
-add_test(
-    NAME test_run_local_shm_mixed_benchmark_py
-    COMMAND ${Python3_EXECUTABLE} -m unittest
-            src/test/scripts/test_run_local_shm_mixed_benchmark.py
+add_python_unittest(
+    test_run_local_shm_mixed_benchmark_py
+    src/test/scripts/test_run_local_shm_mixed_benchmark.py
 )
 set_tests_properties(
     test_run_local_shm_mixed_benchmark_py
     PROPERTIES
-    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     LABELS "local_shm;python"
 )
 
-add_test(
-    NAME test_run_local_shm_multi_process_benchmark_py
-    COMMAND ${Python3_EXECUTABLE} -m unittest
-            src/test/scripts/test_run_local_shm_multi_process_benchmark.py
+add_python_unittest(
+    test_run_local_shm_multi_process_benchmark_py
+    src/test/scripts/test_run_local_shm_multi_process_benchmark.py
 )
 set_tests_properties(
     test_run_local_shm_multi_process_benchmark_py
     PROPERTIES
-    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     LABELS "local_shm;python"
 )
+
+add_python_unittest(
+    test_run_hierkv_recstore_mixed_benchmark_py
+    src/test/scripts/test_run_hierkv_recstore_mixed_benchmark.py
+)
+set_tests_properties(
+    test_run_hierkv_recstore_mixed_benchmark_py
+    PROPERTIES
+    LABELS "hierkv;python"
+)
+
+add_python_unittest(
+    test_hierkv_python_ops_py
+    src.python.pytorch.recstore.unittest.test_kvclient_local_fast_path
+    src.python.pytorch.recstore.unittest.test_hierkv_integration
+    src.python.pytorch.recstore.unittest.test_embeddingbag_single_node_distributed
+    src.python.pytorch.recstore.unittest.test_sparse_optimizer_single_node_distributed
+    model_zoo.rs_demo.tests.test_recstore_distributed
+)
+set_tests_properties(
+    test_hierkv_python_ops_py
+    PROPERTIES
+    LABELS "hierkv;python;integration"
+)
+
+add_python_unittest(
+    test_hierkv_rs_demo_py
+    model_zoo.rs_demo.tests.test_hybrid_dlrm
+    model_zoo.rs_demo.tests.test_recstore_runner
+)
+set_tests_properties(
+    test_hierkv_rs_demo_py
+    PROPERTIES
+    LABELS "hierkv;python;rs_demo"
+)
+
+set(HUGECTR_TENSOR2_HEADER
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include/tensor2.hpp
+)
+set(HUGECTR_CONFIG_TEMPLATE
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include/config.hpp.in
+)
+
+if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER AND
+   EXISTS ${HUGECTR_TENSOR2_HEADER} AND
+   EXISTS ${HUGECTR_CONFIG_TEMPLATE})
+    set(HUGECTR_TEST_GENERATED_INCLUDE_DIR
+        ${PROJECT_BINARY_DIR}/third_party/HugeCTR/HugeCTR/include
+    )
+    file(MAKE_DIRECTORY ${HUGECTR_TEST_GENERATED_INCLUDE_DIR})
+    configure_file(
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include/config.hpp.in
+        ${HUGECTR_TEST_GENERATED_INCLUDE_DIR}/config.hpp
+        @ONLY
+    )
+
+    add_executable(test_hugectr_emb
+        test_hugectr_emb.cpp
+        ${PROJECT_SOURCE_DIR}/src/framework/hugectr/op_hugectr.cc
+        ${PROJECT_SOURCE_DIR}/src/framework/hugectr/hierkv_backend.cc
+        ${PROJECT_SOURCE_DIR}/src/framework/op.cc
+        ${PROJECT_SOURCE_DIR}/src/framework/common/ps_client_config_adapter.cc
+        ${PROJECT_SOURCE_DIR}/src/ps/client_factory.cc
+        ${PROJECT_SOURCE_DIR}/src/ps/rdma/rdma_ps_client_adapter.cc
+    )
+    target_include_directories(test_hugectr_emb PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/src/ps/grpc
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
+        ${HUGECTR_TEST_GENERATED_INCLUDE_DIR}
+        ${CUDA_TOOLKIT_INCLUDE}
+    )
+    target_link_libraries(test_hugectr_emb PUBLIC
+        base
+        wq_ps_client
+        grpc_ps_client
+        brpc_ps_client
+        local_shm_ps_client
+        protobuf::libprotobuf
+        gRPC::grpc++
+        glog::glog
+        ${CUDA_CUDART_LIBRARY}
+    )
+    target_link_options(test_hugectr_emb PUBLIC -Wl,--no-as-needed)
+    add_test(NAME test_hugectr_emb COMMAND test_hugectr_emb)
+    set_tests_properties(test_hugectr_emb PROPERTIES LABELS "hierkv;hugectr")
+else()
+    message(STATUS
+        "Skipping HugeCTR runtime tests: CUDA or HugeCTR headers/templates are unavailable."
+    )
+endif()
 
 add_executable(brpc_ps_server_unit_test
     test_brpc_ps_server.cpp
