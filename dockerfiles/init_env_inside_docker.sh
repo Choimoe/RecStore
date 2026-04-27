@@ -88,7 +88,6 @@ step_glog() {
     sudo rm -f /usr/lib/x86_64-linux-gnu/libglog.so.0*
 
     cd ${PROJECT_PATH}/third_party/glog/
-    git checkout v0.5.0
     rm -rf _build
     mkdir -p _build
     cd _build
@@ -112,8 +111,6 @@ step_folly() {
     export CC=`which gcc`
     export CXX=`which g++`
     cd ${PROJECT_PATH}/third_party/folly
-    # git checkout v2021.01.04.00
-    git checkout v2023.09.11.00
     rm -rf _build
     mkdir -p _build
     cd _build
@@ -200,7 +197,6 @@ step_arrow() {
 
 step_cpptrace() {
     cd ${PROJECT_PATH}/third_party/cpptrace
-    git checkout v0.3.1
     rm -rf build
     mkdir -p build && cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release ${CMAKE_REQUIRE}

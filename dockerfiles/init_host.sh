@@ -11,7 +11,7 @@ sudo apt install -y libmemcached-dev
 # git submodule add https://github.com/google/glog third_party/glog
 # sudo rm -f /usr/lib/x86_64-linux-gnu/libglog.so.0*
 
-cd ${PROJECT_PATH}/third_party/glog/ && git checkout v0.5.0 && rm -rf _build && mkdir _build && cd _build && CXXFLAGS="-fPIC" cmake .. && make -j20 && make DESTDIR=${PROJECT_PATH}/third_party/glog/glog-install-fPIC install
+cd ${PROJECT_PATH}/third_party/glog/ && rm -rf _build && mkdir _build && cd _build && CXXFLAGS="-fPIC" cmake .. && make -j20 && make DESTDIR=${PROJECT_PATH}/third_party/glog/glog-install-fPIC install
 
 
 # git submodule add https://github.com/fmtlib/fmt third_party/fmt
@@ -22,8 +22,6 @@ cd ${PROJECT_PATH}/third_party/fmt/ && rm -rf _build && mkdir _build && cd _buil
 export CC=`which gcc`
 export CXX=`which g++`
 cd ${PROJECT_PATH}/third_party/folly && \
-# git checkout v2021.01.04.00 && \
-git checkout v2023.09.11.00 && \
 rm -rf _build && mkdir -p _build && cd _build \
 && CFLAGS='-fPIC' CXXFLAGS='-fPIC -Wl,-lrt' cmake .. -DCMAKE_INCLUDE_PATH=${PROJECT_PATH}/third_party/glog/glog-install-fPIC/usr/local/include -DCMAKE_LIBRARY_PATH=${PROJECT_PATH}/third_party/glog/glog-install-fPIC/usr/local/lib \
 && make -j20 && make DESTDIR=${PROJECT_PATH}/third_party/folly/folly-install-fPIC install && make clean
