@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <sys/mman.h>
 
 #include "base/json.h"
 #include "base/tensor.h"
@@ -16,30 +19,81 @@
 
 namespace {
 
-json MakeLocalShmConfig(const std::string& region_name) {
-  return {
-      {"cache_ps",
-       {{"num_threads", 1},
-        {"ps_type", "LOCAL_SHM"},
-        {"base_kv_config",
-         {{"path", "/tmp/recstore_local_shm_component_test"},
-          {"index_type", "DRAM"},
-          {"value_type", "DRAM"},
-          {"capacity", 1024},
-          {"value_size", 16}}}}},
-      {"local_shm",
-       {{"region_name", region_name},
-        {"slot_count", 8},
-        {"ready_queue_count", 1},
-        {"ready_queue_burst_limit", 8},
-        {"slot_buffer_bytes", 1 << 20},
-        {"client_timeout_ms", 1000}}},
-  };
+std::string NormalizeRegionNameForShm(const std::string& region_name) {
+  if (!region_name.empty() && region_name.front() == '/') {
+    return region_name;
+  }
+  return "/" + region_name;
 }
 
-TEST(LocalShmOpComponentTest, LookupFlatReadsValuesFromLocalShmClient) {
-  const auto config = MakeLocalShmConfig(
-      "recstore_local_shm_component_" + std::to_string(::getpid()));
+void RemoveRegionIfExists(const std::string& region_name) {
+  ::shm_unlink(NormalizeRegionNameForShm(region_name).c_str());
+}
+
+std::string MakeUniqueRegionName(const std::string& prefix) {
+  static std::atomic<uint64_t> counter{0};
+  return prefix + "_" + std::to_string(::getpid()) + "_" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()) +
+         "_" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+}
+
+class LocalShmOpComponentTest : public ::testing::Test {
+protected:
+  json MakeLocalShmConfig(const std::string& region_name) {
+    const std::string storage_path = "/tmp/" + region_name + "_kv_store";
+    cleanup_paths_.push_back(storage_path);
+    cleanup_region_names_.push_back(region_name);
+    std::error_code ec;
+    std::filesystem::remove_all(storage_path, ec);
+    RemoveRegionIfExists(region_name);
+    return {
+        {"cache_ps",
+         {{"num_threads", 1},
+          {"ps_type", "LOCAL_SHM"},
+          {"base_kv_config",
+           {{"path", storage_path},
+            {"index_type", "DRAM"},
+            {"value_type", "DRAM"},
+            {"capacity", 1024},
+            {"value_size", 16}}}}},
+        {"local_shm",
+         {{"region_name", region_name},
+          {"local_rank", 0},
+          {"slot_count", 8},
+          {"ready_queue_count", 1},
+          {"ready_queue_burst_limit", 8},
+          {"slot_buffer_bytes", 1 << 20},
+          {"client_timeout_ms", 1000}}},
+    };
+  }
+
+  void TearDown() override {
+    std::error_code ec;
+    for (const auto& path : cleanup_paths_) {
+      std::filesystem::remove_all(path, ec);
+    }
+    for (const auto& region_name : cleanup_region_names_) {
+      RemoveRegionIfExists(region_name);
+    }
+  }
+
+private:
+  std::vector<std::string> cleanup_paths_;
+  std::vector<std::string> cleanup_region_names_;
+};
+
+TEST_F(LocalShmOpComponentTest, StoragePathIsScopedToRegionName) {
+  const auto config_a = MakeLocalShmConfig("recstore_local_shm_component_a");
+  const auto config_b = MakeLocalShmConfig("recstore_local_shm_component_b");
+
+  EXPECT_NE(config_a["cache_ps"]["base_kv_config"]["path"],
+            config_b["cache_ps"]["base_kv_config"]["path"]);
+}
+
+TEST_F(LocalShmOpComponentTest, LookupFlatReadsValuesFromLocalShmClient) {
+  const auto config =
+      MakeLocalShmConfig(MakeUniqueRegionName("recstore_local_shm_component"));
   recstore::LocalShmParameterServer server;
   server.Init(config);
 

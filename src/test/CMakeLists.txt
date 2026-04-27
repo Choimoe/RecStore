@@ -197,6 +197,11 @@ target_link_libraries(test_local_shm_ps_client PUBLIC
     pthread
 )
 add_test(NAME test_local_shm_ps_client COMMAND test_local_shm_ps_client)
+set_tests_properties(test_local_shm_ps_client PROPERTIES
+    TIMEOUT 30
+    RUN_SERIAL TRUE
+    RESOURCE_LOCK local_shm_tests
+)
 
 add_executable(test_op_runtime_support test_op_runtime_support.cpp)
 target_sources(test_op_runtime_support PRIVATE
@@ -232,6 +237,11 @@ target_link_libraries(test_local_shm_op_component PUBLIC
     pthread
 )
 add_test(NAME test_local_shm_op_component COMMAND test_local_shm_op_component)
+set_tests_properties(test_local_shm_op_component PROPERTIES
+    TIMEOUT 30
+    RUN_SERIAL TRUE
+    RESOURCE_LOCK local_shm_tests
+)
 
 add_test(
     NAME test_run_local_shm_mixed_benchmark_py

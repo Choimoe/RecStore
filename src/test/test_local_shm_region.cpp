@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <string>
 #include <vector>
+#include <sys/mman.h>
 
 #include "ps/local_shm/local_shm_queue.h"
 #include "ps/local_shm/local_shm_region.h"
@@ -10,7 +13,18 @@ namespace recstore {
 namespace {
 
 std::string UniqueRegionName() {
-  return "recstore_local_shm_region_test_" + std::to_string(::getpid());
+  static std::atomic<uint64_t> counter{0};
+  return "recstore_local_shm_region_test_" + std::to_string(::getpid()) + "_" +
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()) +
+         "_" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+}
+
+std::string NormalizeRegionNameForShm(const std::string& region_name) {
+  if (!region_name.empty() && region_name.front() == '/') {
+    return region_name;
+  }
+  return "/" + region_name;
 }
 
 TEST(LocalShmRegionTest, CreateAndAttachRegion) {
@@ -18,6 +32,8 @@ TEST(LocalShmRegionTest, CreateAndAttachRegion) {
   constexpr uint32_t kSlotCount       = 4;
   constexpr uint32_t kSlotBytes       = 4096;
   constexpr uint32_t kReadyQueueCount = 3;
+
+  ::shm_unlink(NormalizeRegionNameForShm(region_name).c_str());
 
   LocalShmRegion server_region;
   ASSERT_TRUE(server_region.Create(
@@ -60,6 +76,10 @@ TEST(LocalShmRegionTest, CreateAndAttachRegion) {
         client_region.ready_queue_cells(ready_queue_id),
         &slot_id));
   }
+
+  client_region.Close();
+  server_region.Close();
+  ::shm_unlink(NormalizeRegionNameForShm(region_name).c_str());
 }
 
 } // namespace
