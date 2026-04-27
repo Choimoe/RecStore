@@ -28,11 +28,12 @@ void FinishWithStatus(LocalShmSlotHeader* header, LocalStatusCode code) {
 
 } // namespace
 
-LocalShmStoreRuntime::LocalShmStoreRuntime(LocalShmRegion* region,
-                                           ::CachePS* cache_ps,
-                                           uint32_t ready_queue_id,
-                                           uint32_t worker_tid,
-                                           uint32_t ready_queue_burst_limit)
+LocalShmStoreRuntime::LocalShmStoreRuntime(
+    LocalShmRegion* region,
+    ::CachePS* cache_ps,
+    uint32_t ready_queue_id,
+    uint32_t worker_tid,
+    uint32_t ready_queue_burst_limit)
     : region_(region),
       cache_ps_(cache_ps),
       ready_queue_id_(ready_queue_id),
@@ -45,7 +46,7 @@ void LocalShmStoreRuntime::Run() {
     auto* control = region_->control();
     const uint32_t observed_before_wait =
         control->request_doorbell.load(std::memory_order_acquire);
-    uint32_t processed               = 0;
+    uint32_t processed = 0;
     DrainReadyQueue(ready_queue_id_, &processed);
     if (processed == 0) {
       if (!stop_.load(std::memory_order_acquire)) {
@@ -88,14 +89,15 @@ void LocalShmStoreRuntime::Stop() {
 }
 
 void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
-  auto* header  = region_->slot_header(slot_id);
-  auto* payload = region_->slot_payload(slot_id);
+  auto* header             = region_->slot_header(slot_id);
+  auto* payload            = region_->slot_payload(slot_id);
   const auto process_start = std::chrono::steady_clock::now();
-  LocalShmStageReportScope stage_scope(header->request_id,
-                                       header->opcode,
-                                       ready_queue_id_,
-                                       header->key_count,
-                                       header->embedding_dim);
+  LocalShmStageReportScope stage_scope(
+      header->request_id,
+      header->opcode,
+      ready_queue_id_,
+      header->key_count,
+      header->embedding_dim);
   try {
     switch (static_cast<LocalOpcode>(header->opcode)) {
     case LocalOpcode::kInitTable: {
@@ -168,8 +170,8 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
           if (packs[row].dim > 0 && packs[row].emb_data != nullptr) {
             std::copy_n(
                 packs[row].emb_data,
-                    packs[row].dim,
-                    out + row * static_cast<std::size_t>(max_embedding_dim));
+                packs[row].dim,
+                out + row * static_cast<std::size_t>(max_embedding_dim));
           }
         }
         ReportLocalShmStageMetric(
@@ -252,7 +254,7 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       const auto* grads = reinterpret_cast<const float*>(cursor);
       const base::ConstArray<uint64_t> key_array(keys, header->key_count);
       const auto backend_start = std::chrono::steady_clock::now();
-      const bool ok = cache_ps_->UpdateParameterFlat(
+      const bool ok            = cache_ps_->UpdateParameterFlat(
           table_name,
           key_array,
           grads,

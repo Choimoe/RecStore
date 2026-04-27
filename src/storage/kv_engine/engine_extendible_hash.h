@@ -215,15 +215,14 @@ public:
     }
 #endif
 
-    const size_t row_bytes =
-        static_cast<size_t>(embedding_dim) * sizeof(float);
+    const size_t row_bytes = static_cast<size_t>(embedding_dim) * sizeof(float);
     std::atomic<bool> ok{true};
     std::vector<uint64_t> key_snapshot(keys.Data(), keys.Data() + keys.Size());
 
 #pragma omp parallel for num_threads(8) if (keys.Size() > 1024)
     for (int64_t row = 0; row < num_rows; ++row) {
       const uint64_t key = key_snapshot[static_cast<size_t>(row)];
-      float* row_ptr = values + row * embedding_dim;
+      float* row_ptr     = values + row * embedding_dim;
       std::memset(row_ptr, 0, row_bytes);
       std::shared_lock<std::shared_mutex> lk(KeyMutex(key));
       Key_t hash_key = key;
@@ -242,8 +241,8 @@ public:
       }
 
 #ifdef XMH_VARIABLE_SIZE_KV
-      const int size = shm_malloc_->GetMallocSize(
-          shmkv_data.shm_malloc_offset());
+      const int size =
+          shm_malloc_->GetMallocSize(shmkv_data.shm_malloc_offset());
       if (size != static_cast<int>(row_bytes)) {
         ok.store(false, std::memory_order_relaxed);
         continue;

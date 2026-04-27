@@ -59,14 +59,14 @@ protected:
             {"value_type", "DRAM"},
             {"capacity", 1024},
             {"value_size", 16}}}}},
-      {"local_shm",
-       {{"region_name", region_name},
-        {"local_rank", 0},
-        {"slot_count", 8},
-        {"ready_queue_count", ready_queue_count},
-        {"ready_queue_burst_limit", ready_queue_burst_limit},
-        {"slot_buffer_bytes", 1 << 20},
-        {"client_timeout_ms", 1000}}},
+        {"local_shm",
+         {{"region_name", region_name},
+          {"local_rank", 0},
+          {"slot_count", 8},
+          {"ready_queue_count", ready_queue_count},
+          {"ready_queue_burst_limit", ready_queue_burst_limit},
+          {"slot_buffer_bytes", 1 << 20},
+          {"client_timeout_ms", 1000}}},
     };
   }
 
@@ -94,8 +94,8 @@ TEST_F(LocalShmPSClientTest, StoragePathIsScopedToRegionName) {
 }
 
 TEST_F(LocalShmPSClientTest, FactoryClientTypeCanBeConstructed) {
-  const auto config =
-      MakeLocalShmConfig(MakeUniqueRegionName("recstore_local_shm_ps_client_factory"));
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_factory"));
   LocalShmParameterServer server;
   server.Init(config);
 
@@ -126,8 +126,8 @@ TEST_F(LocalShmPSClientTest, InitCreatesOneRuntimePerReadyQueue) {
 }
 
 TEST_F(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
-  const auto config =
-      MakeLocalShmConfig(MakeUniqueRegionName("recstore_local_shm_ps_client_rw"));
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_rw"));
   LocalShmParameterServer server;
   server.Init(config);
 
@@ -201,8 +201,7 @@ TEST_F(LocalShmPSClientTest, GetParameterFlatZerosMissingRowsOnly) {
   ASSERT_EQ(client.InitEmbeddingTable("table_partial_hit", {128, 4}), 0);
 
   std::vector<uint64_t> put_keys             = {2};
-  std::vector<std::vector<float>> put_values = {
-      {2.0f, 3.0f, 4.0f, 5.0f}};
+  std::vector<std::vector<float>> put_values = {{2.0f, 3.0f, 4.0f, 5.0f}};
   base::ConstArray<uint64_t> put_key_array(put_keys);
   ASSERT_EQ(client.PutParameter(put_key_array, put_values), 0);
 
@@ -292,8 +291,8 @@ TEST_F(LocalShmPSClientTest, GetParameterFlatRejectsMismatchedEmbeddingDim) {
 }
 
 TEST_F(LocalShmPSClientTest, UpdateParameterFlatRejectsMismatchedEmbeddingDim) {
-  const auto config = MakeLocalShmConfig(MakeUniqueRegionName(
-      "recstore_local_shm_ps_client_update_dim_mismatch"));
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_update_dim_mismatch"));
   LocalShmParameterServer server;
   server.Init(config);
 
