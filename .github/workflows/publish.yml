@@ -1,24 +1,15 @@
-name: Docker Build and Publish
+name: Docker Publish
 
 on:
   push:
     paths:
-      - 'dockerfiles/Dockerfile.recstore'
-      - 'dockerfiles/init_env_inside_docker.sh'
-      - '.gitmodules'
-      - 'third_party/**'
       - '.github/workflows/publish.yml'
   workflow_dispatch:
     inputs:
-      run_init:
-        description: "Run dockerfiles/init_env_inside_docker.sh before pushing image"
+      source_tag:
+        description: "Existing image tag to reuse"
         required: false
-        default: true
-        type: boolean
-      init_args:
-        description: "Environment variables prefix for init script (manual trigger only)"
-        required: false
-        default: "CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_HUGECTR=1 SKIP_LIBIBVERBS=1"
+        default: "latest"
         type: string
 
 permissions:
@@ -27,29 +18,14 @@ permissions:
 
 jobs:
   publish:
-    name: Build and Push Docker Image
+    name: Retag and Push Docker Image
     runs-on: ubuntu-latest
-    env:
-      LOCAL_IMAGE: recstore-local:${{ github.sha }}
-      FINAL_IMAGE: recstore-final:${{ github.sha }}
-      DEFAULT_INIT_ARGS: CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_HUGECTR=1 SKIP_LIBIBVERBS=1
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Sync and update submodules
-        run: |
-          set -euo pipefail
-          git submodule sync --recursive
-          git submodule update --init --recursive --jobs 4 --depth 1
-
       - name: Preflight publish checks
         id: preflight
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_SOURCE_TAG: ${{ inputs.source_tag || '' }}
         run: |
           set -euo pipefail
           if [ -z "${TOKEN}" ]; then
@@ -63,12 +39,19 @@ jobs:
             exit 1
           fi
 
+          SOURCE_TAG="latest"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${INPUT_SOURCE_TAG}" ]; then
+            SOURCE_TAG="${INPUT_SOURCE_TAG}"
+          fi
+
           echo "image_repo=${IMAGE_REPO}" >> "${GITHUB_OUTPUT}"
+          echo "source_tag=${SOURCE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "Preflight summary:"
           echo "  - Actor: ${GITHUB_ACTOR}"
           echo "  - Repository: ${GITHUB_REPOSITORY}"
           echo "  - Event: ${GITHUB_EVENT_NAME}"
           echo "  - Image repo: ${IMAGE_REPO}"
+          echo "  - Source tag: ${SOURCE_TAG}"
 
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             echo "  - Manual run: true"
@@ -76,64 +59,22 @@ jobs:
 
           echo "::notice::If publish fails with permission denied, verify repository Actions permission is set to Read and write permissions."
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build image locally
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: dockerfiles/Dockerfile.recstore
-          push: false
-          load: true
-          platforms: linux/amd64
-          tags: ${{ env.LOCAL_IMAGE }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Initialize image inside container
-        if: github.event_name != 'workflow_dispatch' || inputs.run_init
-        env:
-          INIT_ARGS_INPUT: ${{ inputs.init_args }}
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${INIT_ARGS_INPUT:-}" ]; then
-            INIT_ARGS="${INIT_ARGS_INPUT}"
-          else
-            INIT_ARGS="${DEFAULT_INIT_ARGS}"
-          fi
-
-          INIT_CONTAINER="recstore-init-${GITHUB_RUN_ID}"
-          docker create --name "${INIT_CONTAINER}" "${LOCAL_IMAGE}" bash -lc 'sleep infinity'
-          docker cp "${GITHUB_WORKSPACE}/." "${INIT_CONTAINER}:/workspace"
-          docker start "${INIT_CONTAINER}"
-          docker exec "${INIT_CONTAINER}" bash -lc "set -euo pipefail; cd /workspace; export DEBIAN_FRONTEND=noninteractive; ${INIT_ARGS} bash dockerfiles/init_env_inside_docker.sh"
-          docker exec "${INIT_CONTAINER}" bash -lc '
-            set -euo pipefail
-            mkdir -p /opt/recstore-cache
-            rm -rf /opt/recstore-cache/third_party
-            cp -a /workspace/third_party /opt/recstore-cache/third_party
-            if [ -f /workspace/.gitmodules ]; then
-              cp -a /workspace/.gitmodules /opt/recstore-cache/.gitmodules
-            fi
-            echo "Cached initialized third_party at /opt/recstore-cache/third_party"
-          '
-          docker exec "${INIT_CONTAINER}" bash -lc 'rm -rf /tmp/env_setup_markers'
-          docker commit "${INIT_CONTAINER}" "${FINAL_IMAGE}"
-          docker rm -f "${INIT_CONTAINER}" || true
-
-      - name: Use non-initialized image as final
-        if: github.event_name == 'workflow_dispatch' && !inputs.run_init
-        run: |
-          set -euo pipefail
-          docker tag "${LOCAL_IMAGE}" "${FINAL_IMAGE}"
-
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull source image
+        env:
+          IMAGE_REPO: ${{ steps.preflight.outputs.image_repo }}
+          SOURCE_TAG: ${{ steps.preflight.outputs.source_tag }}
+        run: |
+          set -euo pipefail
+          SOURCE_IMAGE="${IMAGE_REPO}:${SOURCE_TAG}"
+          echo "Pulling source image: ${SOURCE_IMAGE}"
+          docker pull "${SOURCE_IMAGE}"
 
       - name: Extract Docker metadata
         id: meta
@@ -147,11 +88,15 @@ jobs:
             type=raw,value=manual,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Push final image tags
+        env:
+          IMAGE_REPO: ${{ steps.preflight.outputs.image_repo }}
+          SOURCE_TAG: ${{ steps.preflight.outputs.source_tag }}
         run: |
           set -euo pipefail
+          SOURCE_IMAGE="${IMAGE_REPO}:${SOURCE_TAG}"
           while IFS= read -r tag; do
             if [ -n "${tag}" ]; then
-              docker tag "${FINAL_IMAGE}" "${tag}"
+              docker tag "${SOURCE_IMAGE}" "${tag}"
               docker push "${tag}"
             fi
           done << 'EOF'
