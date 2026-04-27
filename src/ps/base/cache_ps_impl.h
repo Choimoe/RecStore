@@ -15,6 +15,7 @@
 #include "base/timer.h"
 #include "parameters.h"
 #include "storage/kv_engine/base_kv.h"
+#include "storage/kv_engine/engine_extendible_hash.h"
 #include "storage/kv_engine/engine_factory.h"
 #include "storage/kv_engine/engine_selector.h"
 #include "optimizer/optimizer.h"
@@ -236,6 +237,18 @@ public:
       LOG(ERROR) << "GetParameterFlat keys size mismatch " << keys.Size()
                  << " vs " << num_rows;
       return false;
+    }
+
+    if (auto* extendible_hash =
+            dynamic_cast<KVEngineExtendibleHash*>(base_kv_.get());
+        extendible_hash != nullptr) {
+      const auto direct_start = std::chrono::steady_clock::now();
+      const bool ok = extendible_hash->BatchGetFlat(
+          keys, values, num_rows, embedding_dim, tid);
+      recstore::ReportLocalShmStageMetric(
+          "cache_ps_get_direct_us",
+          recstore::LocalShmElapsedUs(direct_start));
+      return ok;
     }
 
     const auto batch_get_start = std::chrono::steady_clock::now();
