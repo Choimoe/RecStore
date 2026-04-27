@@ -132,6 +132,20 @@ class TestKVClientLocalFastPath(unittest.TestCase):
 
         self.assertEqual(client.ops.update_calls, [])
 
+    def test_local_fast_path_rejects_non_cpu_non_cuda_devices(self):
+        client = self._build_client()
+
+        meta_ids = torch.empty((1,), dtype=torch.int64, device="meta")
+        meta_grads = torch.empty((1, 4), dtype=torch.float32, device="meta")
+
+        with self.assertRaisesRegex(RuntimeError, "cpu or cuda"):
+            client.local_lookup_flat("table_a", meta_ids)
+        with self.assertRaisesRegex(RuntimeError, "cpu or cuda"):
+            client.local_update_flat("table_a", meta_ids, meta_grads)
+
+        self.assertEqual(client.ops.lookup_calls, [])
+        self.assertEqual(client.ops.update_calls, [])
+
     def test_set_ps_backend_switches_backend_explicitly(self):
         client = self._build_client(backend="grpc")
 

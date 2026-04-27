@@ -255,6 +255,10 @@ class RecStoreClient:
             ids = ids.to(dtype=torch.int64)
         if not ids.is_contiguous():
             ids = ids.contiguous()
+        if preserve_device and ids.device.type not in ("cpu", "cuda"):
+            raise RuntimeError(
+                f"local_shm fast path only supports cpu or cuda tensors, got {ids.device.type}."
+            )
         if not preserve_device and ids.device.type != 'cpu':
             ids = ids.to('cpu')
         return ids
@@ -271,6 +275,10 @@ class RecStoreClient:
             grads = grads.to(dtype=torch.float32)
         if not grads.is_contiguous():
             grads = grads.contiguous()
+        if preserve_device and grads.device.type not in ("cpu", "cuda"):
+            raise RuntimeError(
+                f"local_shm fast path only supports cpu or cuda tensors, got {grads.device.type}."
+            )
         if not preserve_device and grads.device.type != 'cpu':
             grads = grads.to('cpu')
         return grads
