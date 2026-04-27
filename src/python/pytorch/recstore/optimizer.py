@@ -1,5 +1,6 @@
 import torch
 from typing import List, Union, Dict, Tuple, Any
+from time import perf_counter
 from .single_node_exchange import SparseGradPayload, exchange_sparse_grads
 
 _LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
@@ -223,6 +224,25 @@ class SparseOptimizer:
         self.param_groups = [{"params": params, "lr": lr}]
         self.kv_client = _get_kv_client_if_needed(params)
         self._inflight_handles: List[Tuple[Any, int]] = []
+        self.reset_perf_stats()
+
+    def reset_perf_stats(self) -> None:
+        self._perf_stats: Dict[str, float] = {
+            "update_trace_merge_ms": 0.0,
+            "update_owner_exchange_ms": 0.0,
+            "update_local_apply_ms": 0.0,
+            "update_async_enqueue_ms": 0.0,
+            "update_flush_wait_ms": 0.0,
+        }
+
+    def _perf_add(self, key: str, delta_ms: float) -> None:
+        self._perf_stats[key] = self._perf_stats.get(key, 0.0) + float(delta_ms)
+
+    def consume_perf_stats(self, reset: bool = True) -> Dict[str, float]:
+        stats = dict(self._perf_stats)
+        if reset:
+            self.reset_perf_stats()
+        return stats
 
     def step(self):
         """
@@ -250,7 +270,9 @@ class SparseOptimizer:
             self._inflight_handles.clear()
             return
         for kv_client, handle in self._inflight_handles:
+            t_wait_start = perf_counter()
             kv_client.wait(handle)
+            self._perf_add("update_flush_wait_ms", (perf_counter() - t_wait_start) * 1e3)
         self._inflight_handles.clear()
 
 class SparseSGD(SparseOptimizer):
@@ -264,11 +286,72 @@ class SparseSGD(SparseOptimizer):
                         _process_dist_embedding_module(mod, lr)
                     elif hasattr(mod, '_config_names') and hasattr(mod, '_trace'):
                         if _can_use_single_node_distributed_fast_path(mod):
-                            _process_generic_module_with_trace_single_node_distributed(mod)
+                            t_merge_start = perf_counter()
+                            traces_by_name = _collect_traces_by_name(mod)
+                            for name, entries in traces_by_name.items():
+                                all_ids = torch.cat([ids for ids, _ in entries], dim=0)
+                                all_grads = torch.cat([grads for _, grads in entries], dim=0)
+                                owner_unique_ids, summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
+                                self._perf_add("update_trace_merge_ms", (perf_counter() - t_merge_start) * 1e3)
+                                if getattr(mod, "single_node_owner_policy", "hash_mod_world_size") != "hash_mod_world_size":
+                                    raise RuntimeError("single-node distributed sparse update currently requires hash_mod_world_size")
+                                normalized_ids = owner_unique_ids.detach().to(dtype=torch.int64)
+                                normalized_grads = summed_grads.detach().to(dtype=torch.float32)
+                                destination_ranks = torch.remainder(normalized_ids, int(torch.distributed.get_world_size()))
+                                payload_device = normalized_ids.device
+                                local_payload = SparseGradPayload(
+                                    rank=int(torch.distributed.get_rank()),
+                                    destination_ranks=destination_ranks,
+                                    source_ranks=torch.full(
+                                        (normalized_ids.numel(),),
+                                        int(torch.distributed.get_rank()),
+                                        dtype=torch.int64,
+                                        device=payload_device,
+                                    ),
+                                    row_positions=torch.arange(
+                                        normalized_ids.numel(),
+                                        dtype=torch.int64,
+                                        device=payload_device,
+                                    ),
+                                    fused_ids=normalized_ids,
+                                    grads=normalized_grads,
+                                )
+                                t_exchange_start = perf_counter()
+                                gathered_payloads = exchange_sparse_grads(
+                                    local_payload,
+                                    world_size=int(torch.distributed.get_world_size()),
+                                    backend=torch.distributed,
+                                )
+                                self._perf_add("update_owner_exchange_ms", (perf_counter() - t_exchange_start) * 1e3)
+                                owner_ids: list[int] = []
+                                owner_grads: list[torch.Tensor] = []
+                                for payload in gathered_payloads:
+                                    owner_ids.extend(payload.fused_ids.detach().cpu().tolist())
+                                    owner_grads.append(payload.grads)
+                                if owner_ids:
+                                    owner_grads_tensor = torch.cat(owner_grads, dim=0)
+                                    owner_ids_tensor = torch.tensor(
+                                        owner_ids,
+                                        dtype=torch.int64,
+                                        device=owner_grads_tensor.device,
+                                    )
+                                    owner_unique_ids, owner_summed_grads = _aggregate_ids_and_grads(
+                                        owner_ids_tensor,
+                                        owner_grads_tensor,
+                                    )
+                                    t_apply_start = perf_counter()
+                                    mod.kv_client.local_update_flat(
+                                        name=name,
+                                        ids=owner_unique_ids,
+                                        grads=owner_summed_grads,
+                                    )
+                                    self._perf_add("update_local_apply_ms", (perf_counter() - t_apply_start) * 1e3)
                         else:
+                            t_enqueue_start = perf_counter()
                             self._inflight_handles.extend(
                                 _process_generic_module_with_trace(mod, lr, self.kv_client)
                             )
+                            self._perf_add("update_async_enqueue_ms", (perf_counter() - t_enqueue_start) * 1e3)
                     else:
                         print(f"Warning: Module type {type(mod).__name__} is not supported by SparseSGD optimizer.")
                     if hasattr(mod, 'reset_trace'):

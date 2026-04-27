@@ -46,6 +46,24 @@ def _bool_int(flag: bool) -> int:
     return 1 if flag else 0
 
 
+def _consume_perf_stats(obj: Any) -> dict[str, float]:
+    if obj is None:
+        return {}
+    consume = getattr(obj, "consume_perf_stats", None)
+    if consume is None:
+        return {}
+    stats = consume(reset=True)
+    return stats if isinstance(stats, dict) else {}
+
+
+def _reset_perf_stats(obj: Any) -> None:
+    if obj is None:
+        return
+    reset = getattr(obj, "reset_perf_stats", None)
+    if reset is not None:
+        reset()
+
+
 def _load_rows(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8") as f:
         return list(csv.DictReader(f))
@@ -80,6 +98,7 @@ def _append_worker_debug(cfg: RunConfig, rank: int, message: str) -> None:
 
 
 def _build_worker_fingerprint(repo_root: Path) -> dict[str, dict[str, str]]:
+    fallback_repo_root = Path(__file__).resolve().parents[3]
     rel_paths = [
         "model_zoo/rs_demo/cli.py",
         "model_zoo/rs_demo/config.py",
@@ -89,6 +108,8 @@ def _build_worker_fingerprint(repo_root: Path) -> dict[str, dict[str, str]]:
     files: dict[str, str] = {}
     for rel_path in rel_paths:
         path = repo_root / rel_path
+        if not path.exists():
+            path = fallback_repo_root / rel_path
         files[rel_path] = hashlib.md5(path.read_bytes()).hexdigest()
     return {"files": files}
 
@@ -220,7 +241,7 @@ class RecStoreRunner(BenchmarkRunner):
 
     def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig) -> list[str]:
         rdzv_endpoint = f"{cfg.master_addr}:{cfg.master_port}"
-        return [
+        cmd = [
             sys.executable,
             "-m",
             "torch.distributed.run",
@@ -293,6 +314,17 @@ class RecStoreRunner(BenchmarkRunner):
             str(cfg.read_mode),
             "--no-start-server",
         ]
+        if cfg.enable_single_node_distributed_fast_path:
+            cmd.extend(
+                [
+                    "--enable-single-node-distributed-fast-path",
+                    "--single-node-ps-backend",
+                    str(cfg.single_node_ps_backend),
+                    "--single-node-owner-policy",
+                    str(cfg.single_node_owner_policy),
+                ]
+            )
+        return cmd
 
     def _run_single_process(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
         return self._run_local_worker(
@@ -403,6 +435,7 @@ class RecStoreRunner(BenchmarkRunner):
             client = ShardedRecstoreClient(raw_client, self.runtime_dir)
             if cfg.enable_single_node_distributed_fast_path:
                 client.set_ps_backend(cfg.single_node_ps_backend)
+                client.activate_shard(rank)
             if cfg.read_before_update and cfg.read_mode == "prefetch":
                 print("[rs_demo] sharded recstore path uses prefetch read mode")
             elif cfg.read_mode != "direct":
@@ -436,6 +469,18 @@ class RecStoreRunner(BenchmarkRunner):
                 embedding_module.single_node_distributed_mode = "single_node"
                 embedding_module.single_node_ps_backend = cfg.single_node_ps_backend
                 embedding_module.single_node_owner_policy = cfg.single_node_owner_policy
+            _append_worker_debug(
+                cfg,
+                rank,
+                "fast_path_state "
+                f"enabled={getattr(embedding_module, 'enable_single_node_distributed_fast_path', False)} "
+                f"mode={getattr(embedding_module, 'single_node_distributed_mode', None)} "
+                f"backend={getattr(embedding_module, 'single_node_ps_backend', None)} "
+                f"owner_policy={getattr(embedding_module, 'single_node_owner_policy', None)} "
+                f"dist_initialized={dist.is_initialized()} "
+                f"dist_world_size={dist.get_world_size() if dist.is_initialized() else 'na'} "
+                f"can_use={embedding_module._can_use_single_node_distributed_fast_path()}",
+            )
             _barrier_for_step_alignment(
                 dist=dist,
                 device=device,
@@ -493,6 +538,8 @@ class RecStoreRunner(BenchmarkRunner):
                         dense_batch, sparse_batch, labels_batch
                     )
 
+                _reset_perf_stats(embedding_module)
+                _reset_perf_stats(sparse_optimizer)
                 sparse_optimizer.zero_grad()
                 embeddings = None
                 with stage_timer(row, "embed_lookup_local_ms"):
@@ -555,6 +602,8 @@ class RecStoreRunner(BenchmarkRunner):
                     sparse_optimizer.zero_grad()
                     sync_device(torch, device)
 
+                row.update(_consume_perf_stats(embedding_module))
+                row.update(_consume_perf_stats(sparse_optimizer))
                 if step >= cfg.warmup_steps:
                     update_lat_us.append(row["sparse_update_ms"] * 1e3)
                 row["step_total_ms"] = (time.perf_counter() - step_start) * 1e3

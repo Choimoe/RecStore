@@ -101,4 +101,16 @@ def finalize_recstore_row(row: dict) -> dict:
         + row["embed_pool_local_ms"]
         + row["output_unpack_ms"]
     )
+    row["lookup_breakdown_ms"] = (
+        float(row.get("lookup_wait_ms", 0.0))
+        + float(row.get("lookup_owner_exchange_ms", 0.0))
+        + float(row.get("lookup_local_lookup_ms", 0.0))
+        + float(row.get("lookup_reassemble_ms", 0.0))
+    )
+    row["sparse_update_breakdown_ms"] = (
+        float(row.get("update_trace_merge_ms", 0.0))
+        + float(row.get("update_owner_exchange_ms", 0.0))
+        + float(row.get("update_local_apply_ms", 0.0))
+        + float(row.get("update_flush_wait_ms", 0.0))
+    )
     return row

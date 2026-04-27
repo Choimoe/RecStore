@@ -2,7 +2,7 @@ import unittest
 import torch
 
 from ...torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection
-from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
+from model_zoo.rs_demo.data.dlrm_source import build_sparse_features
 
 
 class _FakeOps:
@@ -51,6 +51,32 @@ class _FakeOps:
         return self.emb_read(keys, embedding_dim)
 
 
+class _FakeKVClient:
+    def __init__(self, ops: _FakeOps) -> None:
+        self.ops = ops
+        self._tensor_meta = {}
+
+    def init_data(self, name, shape, dtype, base_offset: int = 0):
+        self._tensor_meta[name] = {
+            "shape": tuple(shape),
+            "dtype": dtype,
+            "base_offset": int(base_offset),
+        }
+
+    def pull(self, name: str, ids: torch.Tensor) -> torch.Tensor:
+        embedding_dim = int(self._tensor_meta[name]["shape"][1])
+        return self.ops.emb_read(ids, embedding_dim)
+
+    def prefetch(self, ids: torch.Tensor) -> int:
+        return int(self.ops.emb_prefetch(ids))
+
+    def wait_and_get(self, handle: int, embedding_dim: int, device=torch.device("cpu")) -> torch.Tensor:
+        out = self.ops.emb_wait_result(handle, embedding_dim)
+        if device.type == "cuda":
+            out = out.to(device)
+        return out
+
+
 class TestFusedPrefetch(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
@@ -66,7 +92,7 @@ class TestFusedPrefetch(unittest.TestCase):
         lengths_f2 = torch.tensor([1, 2], dtype=torch.int32)
         values = torch.cat([values_f1, values_f2], dim=0)
         lengths = torch.cat([lengths_f1, lengths_f2], dim=0)
-        kjt = KeyedJaggedTensor.from_lengths_sync(keys=keys, values=values, lengths=lengths)
+        kjt = build_sparse_features(keys=keys, values=values, lengths=lengths)
         return kjt
 
     def test_fused_prefetch_matches_sync(self):
@@ -74,10 +100,14 @@ class TestFusedPrefetch(unittest.TestCase):
             dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
             dict(name="t1", embedding_dim=4, num_embeddings=16, feature_names=["f2"]),
         ]
-        ebc = RecStoreEmbeddingBagCollection(configs, enable_fusion=True, fusion_k=30)
-        # Patch ops with fake backend and reinitialize data to zeros
         fake = _FakeOps()
-        ebc.kv_client.ops = fake
+        fake_client = _FakeKVClient(fake)
+        ebc = RecStoreEmbeddingBagCollection(
+            configs,
+            enable_fusion=True,
+            fusion_k=30,
+            kv_client=fake_client,
+        )
         # mirror init_data writes
         for idx, cfg in enumerate(configs):
             base_offset = (idx << 30)

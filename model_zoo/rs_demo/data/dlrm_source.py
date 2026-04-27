@@ -43,12 +43,16 @@ def get_default_cat_names() -> list[str]:
         return [f"cat_{idx}" for idx in range(26)]
 
 
-class _SimpleJaggedValues:
-    def __init__(self, values: torch.Tensor) -> None:
+class _SimpleJaggedFeature:
+    def __init__(self, values: torch.Tensor, lengths: torch.Tensor) -> None:
         self._values = values
+        self._lengths = lengths
 
     def values(self) -> torch.Tensor:
         return self._values
+
+    def lengths(self) -> torch.Tensor:
+        return self._lengths
 
 
 class _SimpleKeyedJaggedTensor:
@@ -58,18 +62,27 @@ class _SimpleKeyedJaggedTensor:
         self._lengths = lengths
         self._mapping = self._build_mapping()
 
-    def _build_mapping(self) -> dict[str, _SimpleJaggedValues]:
-        mapping: dict[str, _SimpleJaggedValues] = {}
+    def _build_mapping(self) -> dict[str, _SimpleJaggedFeature]:
+        mapping: dict[str, _SimpleJaggedFeature] = {}
         batch_size = self._lengths.shape[0] // len(self._keys)
+        value_offset = 0
         for key_idx, key in enumerate(self._keys):
-            chunk = self._values[key_idx * batch_size : (key_idx + 1) * batch_size].contiguous()
-            mapping[key] = _SimpleJaggedValues(chunk)
+            lengths_chunk = self._lengths[
+                key_idx * batch_size : (key_idx + 1) * batch_size
+            ].contiguous()
+            value_count = int(lengths_chunk.sum().item())
+            values_chunk = self._values[value_offset : value_offset + value_count].contiguous()
+            value_offset += value_count
+            mapping[key] = _SimpleJaggedFeature(values_chunk, lengths_chunk)
         return mapping
 
     def keys(self) -> list[str]:
         return list(self._keys)
 
-    def __getitem__(self, key: str) -> _SimpleJaggedValues:
+    def device(self) -> torch.device:
+        return self._values.device
+
+    def __getitem__(self, key: str) -> _SimpleJaggedFeature:
         return self._mapping[key]
 
 

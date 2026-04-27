@@ -254,6 +254,52 @@ class TestSparseOptimizerSingleNodeDistributed(unittest.TestCase):
         self.assertTrue(torch.equal(ids, torch.tensor([6], dtype=torch.int64)))
         self.assertTrue(torch.allclose(grads, torch.tensor([[5.0, 5.0]], dtype=torch.float32)))
 
+    def test_perf_stats_capture_fast_path_exchange_and_local_update(self):
+        kv_client = _FakeLegacyKVClient()
+        mod = _FakeFastPathModule(
+            trace=[
+                (
+                    "table0",
+                    torch.tensor([6, 7], dtype=torch.int64),
+                    torch.tensor(
+                        [
+                            [1.0, 1.0],
+                            [9.0, 9.0],
+                        ],
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+            kv_client=kv_client,
+            backend="hierkv",
+        )
+        optimizer = SparseSGD([mod], lr=0.1)
+        optimizer_module.torch.distributed = _FakeDist(rank=0, world_size=2)
+
+        def fake_exchange_sparse_grads(payload, *, world_size, backend):
+            del payload, world_size, backend
+            return [
+                SparseGradPayload(
+                    rank=0,
+                    destination_ranks=torch.tensor([0], dtype=torch.int64),
+                    source_ranks=torch.tensor([0], dtype=torch.int64),
+                    row_positions=torch.tensor([0], dtype=torch.int64),
+                    fused_ids=torch.tensor([6], dtype=torch.int64),
+                    grads=torch.tensor([[5.0, 5.0]], dtype=torch.float32),
+                ),
+            ]
+
+        optimizer_module.exchange_sparse_grads = fake_exchange_sparse_grads
+
+        optimizer.reset_perf_stats()
+        optimizer.step()
+        stats = optimizer.consume_perf_stats()
+
+        self.assertGreaterEqual(stats["update_trace_merge_ms"], 0.0)
+        self.assertGreaterEqual(stats["update_owner_exchange_ms"], 0.0)
+        self.assertGreaterEqual(stats["update_local_apply_ms"], 0.0)
+        self.assertEqual(stats["update_async_enqueue_ms"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
