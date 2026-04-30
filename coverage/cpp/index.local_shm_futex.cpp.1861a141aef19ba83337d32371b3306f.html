@@ -43,8 +43,8 @@
       </tr>
       <tr>
         <th scope="row">Lines:</th>
-        <td class="coverage-high">96.4%</td>
-        <td class="coverage-high">27 / 0 / 28</td>
+        <td class="coverage-high">92.9%</td>
+        <td class="coverage-high">26 / 0 / 28</td>
       </tr>
       <tr>
         <th scope="row">Functions:</th>
@@ -53,8 +53,8 @@
       </tr>
       <tr>
         <th scope="row">Branches:</th>
-        <td class="coverage-low">62.5%</td>
-        <td class="coverage-low">15 / 0 / 24</td>
+        <td class="coverage-low">58.3%</td>
+        <td class="coverage-low">14 / 0 / 24</td>
       </tr>
     </table>
   </div>
@@ -90,9 +90,9 @@
   <div class="Box-row Box-row--focus-gray py-2 d-flex">
     <div role="gridcell" class="color-fg-muted flex-auto min-width-0 col-md-2"><a href="#l47">recstore::FutexWaitUntilValueChange(std::atomic&lt;unsigned int&gt;*, unsigned int, std::chrono::duration&lt;long, std::ratio&lt;1l, 1000l&gt; &gt;) (src/ps/local_shm/local_shm_futex.cpp:47)</a>    </div>
     <div role="gridcell" class="color-fg-muted flex-auto min-width-0 d-flex flex-justify-end flex-wrap flex-items-baseline" data-sort="150">called 150 times</div>
-    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">94.1%</div>
-    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">62.5%</div>
-    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">79.0%</div>
+    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">88.2%</div>
+    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">58.3%</div>
+    <div role="gridcell" class="color-fg-muted d-flex flex-justify-end flex-wrap col-2">76.0%</div>
   </div>
   <div class="Box-row Box-row--focus-gray py-2 d-flex">
     <div role="gridcell" class="color-fg-muted flex-auto min-width-0 col-md-2"><a href="#l36">recstore::FutexWake(std::atomic&lt;unsigned int&gt;*, int) (src/ps/local_shm/local_shm_futex.cpp:36)</a>    </div>
@@ -110,8 +110,8 @@
   <div class="Box-header d-flex flex-space-between sticky">
     src/ps/local_shm/local_shm_futex.cpp
     <div class="toggle-buttons">
-      <button type="button" class="button_toggle_coveredLine show_coveredLine" value="coveredLine" title="Toggle covered lines">20 covered</button>
-      <button type="button" class="button_toggle_uncoveredLine show_uncoveredLine" value="uncoveredLine" title="Toggle uncovered lines">1 uncovered</button>
+      <button type="button" class="button_toggle_coveredLine show_coveredLine" value="coveredLine" title="Toggle covered lines">19 covered</button>
+      <button type="button" class="button_toggle_uncoveredLine show_uncoveredLine" value="uncoveredLine" title="Toggle uncovered lines">2 uncovered</button>
       <button type="button" class="button_toggle_partialCoveredLine show_partialCoveredLine" value="partialCoveredLine" title="Toggle partial covered lines">7 partial covered</button>
       <button type="button" class="button_toggle_excludedLine show_excludedLine" value="excludedLine" title="Toggle excluded lines">0 excluded</button>
     </div>
@@ -601,8 +601,8 @@
           <details class="linebranchDetails">
             <summary class="linebranchSummary">2/2</summary>
             <div class="linebranchContents">
-              <div class="takenBranch">&check; Branch 0 taken 146 times.</div>
-              <div class="takenBranch">&check; Branch 1 taken 4 times.</div>
+              <div class="takenBranch">&check; Branch 0 taken 148 times.</div>
+              <div class="takenBranch">&check; Branch 1 taken 2 times.</div>
             </div>
           </details>
         </td>
@@ -627,24 +627,24 @@
         <td class="lineno"><a id="l64" href="#l64">64</a></td>
         <td class="linebranch">
           <details class="linebranchDetails">
-            <summary class="linebranchSummary">3/4</summary>
+            <summary class="linebranchSummary">2/4</summary>
             <div class="linebranchContents">
               <div class="takenBranch">&check; Branch 0 taken 2 times.</div>
-              <div class="takenBranch">&check; Branch 1 taken 2 times.</div>
+              <div class="notTakenBranch">&cross; Branch 1 not taken.</div>
               <div class="notTakenBranch">&cross; Branch 2 not taken.</div>
               <div class="takenBranch">&check; Branch 3 taken 2 times.</div>
             </div>
           </details>
         </td>
-        <td class="linecount partialCoveredLine show_partialCoveredLine">4</td>
+        <td class="linecount partialCoveredLine show_partialCoveredLine">2</td>
         <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EAGAIN</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EINTR</span><span class="p">)</span><span class="w"> </span><span class="p">{</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l65" href="#l65">65</a></td>
         <td class="linebranch">
         </td>
-        <td class="linecount coveredLine show_coveredLine">2</td>
-        <td class="src  coveredLine show_coveredLine"><span class="w">      </span><span class="k">continue</span><span class="p">;</span></td>
+        <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">      </span><span class="k">continue</span><span class="p">;</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l66" href="#l66">66</a></td>
@@ -737,7 +737,7 @@
         <hr class="block-separator"/>
         <footer class="text-center">
           Created using <a href="http://gcovr.com/en/8.6">GCOVR (Version 8.6)</a>
-          at 2026-04-30 10:18:44
+          at 2026-04-30 10:39:46
         </footer>
       </div>
     </div>
