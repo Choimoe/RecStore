@@ -27,10 +27,11 @@ public:
   void BatchGet(const std::vector<uint64_t>& keys,
                 std::vector<base::ConstArray<float>>* values,
                 unsigned tid);
-  bool ApplySgdUpdateFlat(const base::ConstArray<uint64_t>& keys,
-                          const float* grads,
-                          int64_t num_rows,
-                          int64_t embedding_dim,
-                          float learning_rate,
-                          unsigned tid);
+  bool ApplySgdUpdateFlat(
+      const base::ConstArray<uint64_t>& keys,
+      const float* grads,
+      int64_t num_rows,
+      int64_t embedding_dim,
+      float learning_rate,
+      unsigned tid);
 };

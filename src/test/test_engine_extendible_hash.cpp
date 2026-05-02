@@ -240,14 +240,15 @@ TEST_F(KVEngineExtendibleHashTest, BatchGetFlatOverwritesHitsAndZerosMisses) {
   }
 }
 
-TEST_F(KVEngineExtendibleHashTest, ApplySgdUpdateFlatUpdatesHitsAndInitializesMisses) {
+TEST_F(KVEngineExtendibleHashTest,
+       ApplySgdUpdateFlatUpdatesHitsAndInitializesMisses) {
   const int embedding_dim = 32;
   const uint8_t tag       = 3;
   const float lr          = 0.25f;
   const int tag_bits      = static_cast<int>(sizeof(tag) * 8);
   const int shift         = static_cast<int>(sizeof(uint64_t) * 8) - tag_bits;
   const uint64_t key_mask = ~0ULL >> tag_bits;
-  auto tagged_key = [&](uint64_t key) {
+  auto tagged_key         = [&](uint64_t key) {
     return (static_cast<uint64_t>(tag) << shift) | (key & key_mask);
   };
 
@@ -288,19 +289,15 @@ TEST_F(KVEngineExtendibleHashTest, ApplySgdUpdateFlatUpdatesHitsAndInitializesMi
   }
   std::vector<base::ConstArray<float>> values;
   kv_engine_->BatchGet(
-      base::ConstArray<uint64_t>(get_keys.data(), get_keys.size()),
-      &values,
-      0);
+      base::ConstArray<uint64_t>(get_keys.data(), get_keys.size()), &values, 0);
 
   ASSERT_EQ(values.size(), keys.size());
   for (int col = 0; col < embedding_dim; ++col) {
     EXPECT_FLOAT_EQ(values[0][col], initial[col] - lr * grads[col])
         << "col=" << col;
-    EXPECT_FLOAT_EQ(
-        values[1][col], -lr * grads[embedding_dim + col])
+    EXPECT_FLOAT_EQ(values[1][col], -lr * grads[embedding_dim + col])
         << "col=" << col;
-    EXPECT_FLOAT_EQ(
-        values[2][col], -lr * grads[2 * embedding_dim + col])
+    EXPECT_FLOAT_EQ(values[2][col], -lr * grads[2 * embedding_dim + col])
         << "col=" << col;
   }
 }

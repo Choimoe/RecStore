@@ -172,13 +172,14 @@ public:
     LOG(FATAL) << "not implemented";
   }
 
-  virtual bool ApplySgdUpdateFlat(base::ConstArray<uint64_t> keys,
-                                  const float* grads,
-                                  int64_t num_rows,
-                                  int64_t embedding_dim,
-                                  float learning_rate,
-                                  uint8_t tag,
-                                  unsigned tid) {
+  virtual bool ApplySgdUpdateFlat(
+      base::ConstArray<uint64_t> keys,
+      const float* grads,
+      int64_t num_rows,
+      int64_t embedding_dim,
+      float learning_rate,
+      uint8_t tag,
+      unsigned tid) {
     return false;
   }
 

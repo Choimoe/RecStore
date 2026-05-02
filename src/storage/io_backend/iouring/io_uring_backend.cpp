@@ -64,7 +64,8 @@ private:
     ssize_t ret = pread(fd, buffer, PAGE_SIZE, page_id * PAGE_SIZE);
     CHECK_EQ(ret, static_cast<ssize_t>(PAGE_SIZE))
         << "Fallback pread failed: "
-        << ((ret < 0) ? std::string(strerror(errno)) : std::string("short read"));
+        << ((ret < 0) ? std::string(strerror(errno))
+                      : std::string("short read"));
   }
 
   void WritePageFallback(PageID_t page_id, char* buffer) {

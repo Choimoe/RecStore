@@ -257,13 +257,14 @@ public:
     return ok.load(std::memory_order_relaxed);
   }
 
-  bool ApplySgdUpdateFlat(base::ConstArray<uint64_t> keys,
-                          const float* grads,
-                          int64_t num_rows,
-                          int64_t embedding_dim,
-                          float learning_rate,
-                          uint8_t tag,
-                          unsigned tid) override {
+  bool ApplySgdUpdateFlat(
+      base::ConstArray<uint64_t> keys,
+      const float* grads,
+      int64_t num_rows,
+      int64_t embedding_dim,
+      float learning_rate,
+      uint8_t tag,
+      unsigned tid) override {
     if (grads == nullptr || num_rows < 0 || embedding_dim <= 0) {
       return false;
     }
@@ -278,19 +279,18 @@ public:
     }
 #endif
 
-    const int tag_bits = static_cast<int>(sizeof(tag) * 8);
-    const int shift    = static_cast<int>(sizeof(uint64_t) * 8) - tag_bits;
+    const int tag_bits      = static_cast<int>(sizeof(tag) * 8);
+    const int shift         = static_cast<int>(sizeof(uint64_t) * 8) - tag_bits;
     const uint64_t key_mask = ~0ULL >> tag_bits;
-    const size_t row_bytes  = static_cast<size_t>(embedding_dim) * sizeof(float);
+    const size_t row_bytes = static_cast<size_t>(embedding_dim) * sizeof(float);
     std::atomic<bool> ok{true};
 
 #pragma omp parallel for num_threads(8) if (keys.Size() > 1024)
     for (int64_t row = 0; row < num_rows; ++row) {
-      const uint64_t key =
-          (static_cast<uint64_t>(tag) << shift) |
-          (keys[static_cast<size_t>(row)] & key_mask);
+      const uint64_t key = (static_cast<uint64_t>(tag) << shift) |
+                           (keys[static_cast<size_t>(row)] & key_mask);
       const float* row_grad = grads + row * embedding_dim;
-      Key_t hash_key = key;
+      Key_t hash_key        = key;
       Value_t read_value;
       {
         std::shared_lock<std::shared_mutex> lk(KeyMutex(key));
