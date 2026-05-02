@@ -103,23 +103,35 @@ void TestFactoryClient(const std::vector<int>& ports) {
             << std::endl;
 
   try {
+    std::cout << "Factory: ClearPS begin" << std::endl;
     client->ClearPS();
+    std::cout << "Factory: ClearPS done" << std::endl;
     std::vector<uint64_t> keys_vec = {1, 2, 3};
     base::ConstArray<uint64_t> keys(keys_vec);
     std::vector<std::vector<float>> emptyvalues(keys_vec.size());
     std::vector<std::vector<float>> rightvalues = {{1}, {2, 2}, {3, 3, 3}};
     std::vector<std::vector<float>> values;
+    std::cout << "Factory: initial GetParameter begin" << std::endl;
     client->GetParameter(keys, &values);
+    std::cout << "Factory: initial GetParameter done" << std::endl;
     CHECK(check_eq_2d(values, emptyvalues));
     std::cout << "pass first check" << std::endl;
 
+    std::cout << "Factory: PutParameter begin" << std::endl;
     client->PutParameter(keys, rightvalues);
+    std::cout << "Factory: PutParameter done" << std::endl;
+    std::cout << "Factory: verify GetParameter begin" << std::endl;
     client->GetParameter(keys, &values);
+    std::cout << "Factory: verify GetParameter done" << std::endl;
     CHECK(check_eq_2d(values, rightvalues));
     std::cout << "pass second check" << std::endl;
 
+    std::cout << "Factory: second ClearPS begin" << std::endl;
     client->ClearPS();
+    std::cout << "Factory: second ClearPS done" << std::endl;
+    std::cout << "Factory: post-clear GetParameter begin" << std::endl;
     client->GetParameter(keys, &values);
+    std::cout << "Factory: post-clear GetParameter done" << std::endl;
     CHECK(check_eq_2d(values, emptyvalues));
 
     std::cout << "load fake data" << std::endl;

@@ -41,6 +41,11 @@ using recstoreps::UpdateParameterResponse;
 
 namespace {
 
+void SetRpcDeadline(grpc::ClientContext* context, int timeout_ms = 15000) {
+  context->set_deadline(
+      std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms));
+}
+
 int BuildUpdateBlocksFromFlat(
     const base::ConstArray<uint64_t>& keys,
     const float* grads,
@@ -656,7 +661,12 @@ bool GRPCParameterClient::ClearPS() {
   CommandResponse response;
   request.set_command(PSCommand::CLEAR_PS);
   grpc::ClientContext context;
+  SetRpcDeadline(&context);
   grpc::Status status = stubs_[0]->Command(&context, request, &response);
+  if (!status.ok()) {
+    LOG(ERROR) << "gRPC ClearPS failed: " << status.error_code() << " "
+               << status.error_message();
+  }
   return status.ok();
 }
 
@@ -668,6 +678,7 @@ bool GRPCParameterClient::LoadFakeData(int64_t n) {
   request.set_command(PSCommand::LOAD_FAKE_DATA);
   request.add_arg1(&n, sizeof(int64_t));
   grpc::ClientContext context;
+  SetRpcDeadline(&context);
   grpc::Status status = stubs_[0]->Command(&context, request, &response);
   if (!status.ok()) {
     LOG(ERROR) << "gRPC LoadFakeData failed: " << status.error_code() << " "
@@ -689,6 +700,7 @@ bool GRPCParameterClient::DumpFakeData(int64_t n) {
   request.set_command(PSCommand::DUMP_FAKE_DATA);
   request.add_arg1(&n, sizeof(int64_t));
   grpc::ClientContext context;
+  SetRpcDeadline(&context);
   grpc::Status status = stubs_[0]->Command(&context, request, &response);
   if (!status.ok()) {
     LOG(ERROR) << "gRPC DumpFakeData failed: " << status.error_code() << " "
@@ -716,6 +728,7 @@ bool GRPCParameterClient::LoadCkpt(
     request.add_arg2(each);
   }
   grpc::ClientContext context;
+  SetRpcDeadline(&context, 30000);
   grpc::Status status = stubs_[0]->Command(&context, request, &response);
   return status.ok();
 }
@@ -748,6 +761,7 @@ bool GRPCParameterClient::PutParameter(
     CHECK_EQ(blocks.size(), 1);
     request.mutable_parameter_value()->swap(blocks[0]);
     grpc::ClientContext context;
+    SetRpcDeadline(&context);
     grpc::Status status = stubs_[0]->PutParameter(&context, request, &response);
     if (status.ok()) {
       continue;
@@ -804,6 +818,7 @@ int GRPCParameterClient::UpdateParameter(
   }
 
   grpc::ClientContext context;
+  SetRpcDeadline(&context);
 #ifdef ENABLE_PERF_REPORT
   if (trace_id != 0) {
     context.AddMetadata("x-recstore-trace-id", std::to_string(trace_id));
@@ -890,6 +905,7 @@ int GRPCParameterClient::UpdateParameterFlat(
   }
 
   grpc::ClientContext context;
+  SetRpcDeadline(&context);
 #ifdef ENABLE_PERF_REPORT
   if (trace_id != 0) {
     context.AddMetadata("x-recstore-trace-id", std::to_string(trace_id));
