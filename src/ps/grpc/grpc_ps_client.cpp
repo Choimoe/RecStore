@@ -518,10 +518,10 @@ void GRPCParameterClient::WaitForPrefetch(uint64_t prefetch_id) {
     LOG(ERROR) << "Invalid prefetch_id: " << prefetch_id;
     return;
   }
-  auto& pb      = it->second;
-  void* got_tag = nullptr;
-  bool ok       = false;
-  int idle_rounds = 0;
+  auto& pb                     = it->second;
+  void* got_tag                = nullptr;
+  bool ok                      = false;
+  int idle_rounds              = 0;
   constexpr auto kPollInterval = std::chrono::milliseconds(200);
   constexpr int kMaxIdleRounds = 150; // 30s
   while (pb.completed_count_ < pb.batch_size_) {
