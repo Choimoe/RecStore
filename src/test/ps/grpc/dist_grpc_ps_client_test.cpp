@@ -249,21 +249,26 @@ void TestPrefetch(const std::vector<int>& ports) {
 
   uint64_t prefetch_id = client.PrefetchParameter(keys_array);
   CHECK(prefetch_id != 0);
+  std::cout << "Issued prefetch request" << std::endl;
   CHECK(!client.IsPrefetchDone(999999));
   client.WaitForPrefetch(prefetch_id);
+  std::cout << "Prefetch wait completed" << std::endl;
   CHECK(client.IsPrefetchDone(prefetch_id));
 
   std::vector<std::vector<float>> fetched_values;
   CHECK(client.GetPrefetchResult(prefetch_id, &fetched_values));
+  std::cout << "Fetched structured prefetch result" << std::endl;
   CHECK(check_eq_2d(fetched_values, values));
   CHECK(!client.GetPrefetchResult(prefetch_id, &fetched_values));
 
   uint64_t flat_prefetch_id = client.PrefetchParameter(keys_array);
   CHECK(flat_prefetch_id != 0);
+  std::cout << "Issued flat prefetch request" << std::endl;
   std::vector<float> flat_values;
   int64_t num_rows = 0;
   CHECK(client.GetPrefetchResultFlat(
       flat_prefetch_id, &flat_values, &num_rows, 3));
+  std::cout << "Fetched flat prefetch result" << std::endl;
   CHECK(num_rows == static_cast<int64_t>(keys.size()));
   CHECK(flat_values.size() == keys.size() * 3);
   for (size_t i = 0; i < keys.size(); ++i) {

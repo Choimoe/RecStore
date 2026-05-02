@@ -521,16 +521,34 @@ void GRPCParameterClient::WaitForPrefetch(uint64_t prefetch_id) {
   auto& pb      = it->second;
   void* got_tag = nullptr;
   bool ok       = false;
+  int idle_rounds = 0;
+  constexpr auto kPollInterval = std::chrono::milliseconds(200);
+  constexpr int kMaxIdleRounds = 150; // 30s
   while (pb.completed_count_ < pb.batch_size_) {
-    auto status = pb.cqs_->Next(&got_tag, &ok);
-    if (!status) {
+    auto deadline = std::chrono::system_clock::now() + kPollInterval;
+    auto status   = pb.cqs_->AsyncNext(&got_tag, &ok, deadline);
+    if (status == grpc::CompletionQueue::NextStatus::GOT_EVENT) {
+      idle_rounds = 0;
+      if (unlikely(!ok)) {
+        LOG(ERROR) << "CompletionQueue returned not ok for prefetch";
+      }
+      pb.completed_count_++;
+      continue;
+    }
+    if (status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
+      idle_rounds++;
+      if (idle_rounds >= kMaxIdleRounds) {
+        LOG(ERROR) << "WaitForPrefetch timed out for prefetch_id "
+                   << prefetch_id << ", completed " << pb.completed_count_
+                   << "/" << pb.batch_size_;
+        break;
+      }
+      continue;
+    }
+    if (status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
       LOG(ERROR) << "CompletionQueue shutdown while waiting prefetch";
       break;
     }
-    if (unlikely(!ok)) {
-      LOG(ERROR) << "CompletionQueue returned not ok for prefetch";
-    }
-    pb.completed_count_++;
   }
 }
 
