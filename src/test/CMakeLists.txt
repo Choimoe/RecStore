@@ -136,7 +136,6 @@ target_link_libraries(test_ps_client_factory PUBLIC
     base
     wq_ps_client
     grpc_ps_client
-    brpc_ps_client
     local_shm_ps_client
     gflags
     glog
@@ -144,6 +143,10 @@ target_link_libraries(test_ps_client_factory PUBLIC
     gtest_main
     pthread
 )
+if(TARGET brpc_ps_client)
+    target_link_libraries(test_ps_client_factory PUBLIC brpc_ps_client)
+    target_compile_definitions(test_ps_client_factory PRIVATE RECSTORE_HAS_BRPC_PS_CLIENT)
+endif()
 target_link_options(test_ps_client_factory PUBLIC -Wl,--no-as-needed)
 add_test(NAME test_ps_client_factory COMMAND test_ps_client_factory)
 
@@ -211,7 +214,6 @@ target_link_libraries(test_op_runtime_support PUBLIC
     base
     wq_ps_client
     grpc_ps_client
-    brpc_ps_client
     local_shm_ps_client
     gflags
     glog
@@ -219,6 +221,10 @@ target_link_libraries(test_op_runtime_support PUBLIC
     gtest_main
     pthread
 )
+if(TARGET brpc_ps_client)
+    target_link_libraries(test_op_runtime_support PUBLIC brpc_ps_client)
+    target_compile_definitions(test_op_runtime_support PRIVATE RECSTORE_HAS_BRPC_PS_CLIENT)
+endif()
 add_test(NAME test_op_runtime_support COMMAND test_op_runtime_support)
 
 add_executable(test_op test_op.cpp)
@@ -236,7 +242,6 @@ target_link_libraries(test_op PUBLIC
     base
     wq_ps_client
     grpc_ps_client
-    brpc_ps_client
     local_shm_ps_client
     gflags
     glog
@@ -244,6 +249,10 @@ target_link_libraries(test_op PUBLIC
     gtest_main
     pthread
 )
+if(TARGET brpc_ps_client)
+    target_link_libraries(test_op PUBLIC brpc_ps_client)
+    target_compile_definitions(test_op PRIVATE RECSTORE_HAS_BRPC_PS_CLIENT)
+endif()
 add_test(NAME test_op COMMAND test_op)
 
 add_executable(test_local_shm_op_component test_local_shm_op_component.cpp)
@@ -365,13 +374,16 @@ if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER AND
         base
         wq_ps_client
         grpc_ps_client
-        brpc_ps_client
         local_shm_ps_client
         protobuf::libprotobuf
         gRPC::grpc++
         glog::glog
         ${CUDA_CUDART_LIBRARY}
     )
+    if(TARGET brpc_ps_client)
+        target_link_libraries(test_hugectr_emb PUBLIC brpc_ps_client)
+        target_compile_definitions(test_hugectr_emb PRIVATE RECSTORE_HAS_BRPC_PS_CLIENT)
+    endif()
     target_link_options(test_hugectr_emb PUBLIC -Wl,--no-as-needed)
     add_test(NAME test_hugectr_emb COMMAND test_hugectr_emb)
     set_tests_properties(test_hugectr_emb PROPERTIES LABELS "hierkv;hugectr")

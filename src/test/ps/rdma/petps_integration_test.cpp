@@ -149,6 +149,6 @@ TEST(PetPSIntegrationTest, PutRemoteControlV2EncodeDecode) {
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
-  base::Init init(&argc, &argv);
+  base::Init(&argc, &argv);
   return RUN_ALL_TESTS();
 }

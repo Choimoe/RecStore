@@ -37,13 +37,16 @@ find_package(gRPC REQUIRED)
 target_link_libraries(recstore_torch_ops PRIVATE
     wq_ps_client
     grpc_ps_client
-    brpc_ps_client
     local_shm_ps_client
     protobuf::libprotobuf
     gRPC::grpc++
     glog::glog
     ${TORCH_LIBRARIES}
 )
+if(TARGET brpc_ps_client)
+    target_link_libraries(recstore_torch_ops PRIVATE brpc_ps_client)
+    target_compile_definitions(recstore_torch_ops PRIVATE RECSTORE_HAS_BRPC_PS_CLIENT)
+endif()
 
 if(TARGET framework_gpu_cache)
     target_compile_definitions(recstore_torch_ops PRIVATE RECSTORE_ENABLE_GPU_CACHE)

@@ -3,10 +3,13 @@
 #include <stdexcept>
 
 #include "base/factory.h"
-#include "ps/brpc/brpc_ps_client.h"
 #include "ps/grpc/grpc_ps_client.h"
 #include "ps/local_shm/local_shm_client.h"
 #include "ps/rdma/rdma_ps_client_adapter.h"
+
+#ifdef RECSTORE_HAS_BRPC_PS_CLIENT
+#  include "ps/brpc/brpc_ps_client.h"
+#endif
 
 namespace recstore {
 
@@ -35,10 +38,11 @@ CreatePSClient(const PSClientCreateOptions& options) {
     return std::make_unique<RDMAPSClientAdapter>(options.raw_config);
   }
 
-  BasePSClient* client = base::Factory<BasePSClient, json>::NewInstance(
-      TypeKeyForFactory(options.type), options.transport_config);
-  if (client != nullptr) {
-    return std::unique_ptr<BasePSClient>(client);
+  auto& creators = base::Factory<BasePSClient, json>::creators();
+  auto creator   = creators.find(TypeKeyForFactory(options.type));
+  if (creator != creators.end() && creator->second != nullptr) {
+    return std::unique_ptr<BasePSClient>(
+        creator->second->create(options.transport_config));
   }
 
   if (options.type == PSClientType::kGrpc) {
@@ -46,7 +50,11 @@ CreatePSClient(const PSClientCreateOptions& options) {
   }
 
   if (options.type == PSClientType::kBrpc) {
+#ifdef RECSTORE_HAS_BRPC_PS_CLIENT
     return std::make_unique<BRPCParameterClient>(options.transport_config);
+#else
+    throw std::runtime_error("bRPC parameter client is not available");
+#endif
   }
 
   if (options.type == PSClientType::kLocalShm) {

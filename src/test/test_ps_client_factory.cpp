@@ -2,7 +2,9 @@
 
 #include "framework/common/ps_client_config_adapter.h"
 #include "ps/client_factory.h"
-#include "ps/brpc/brpc_ps_client.h"
+#ifdef RECSTORE_HAS_BRPC_PS_CLIENT
+#  include "ps/brpc/brpc_ps_client.h"
+#endif
 #include "ps/local_shm/local_shm_client.h"
 
 namespace recstore {
@@ -87,6 +89,7 @@ TEST(PSClientFactoryTest, ResolvesDistributedClientConfigWithFieldFallback) {
             "city_hash");
 }
 
+#ifdef RECSTORE_HAS_BRPC_PS_CLIENT
 TEST(PSClientFactoryTest, CreatesBrpcClientWithoutFactoryRegistration) {
   json config = {
       {"cache_ps", {{"ps_type", "BRPC"}}},
@@ -98,6 +101,22 @@ TEST(PSClientFactoryTest, CreatesBrpcClientWithoutFactoryRegistration) {
   ASSERT_NE(client, nullptr);
   EXPECT_NE(dynamic_cast<BRPCParameterClient*>(client.get()), nullptr);
 }
+#else
+TEST(PSClientFactoryTest, ReportsBrpcUnavailableWhenNotBuilt) {
+  json config = {
+      {"cache_ps", {{"ps_type", "BRPC"}}},
+      {"client", {{"host", "127.0.0.1"}, {"port", 25000}, {"shard", 0}}},
+  };
+
+  EXPECT_THROW(
+      {
+        auto client =
+            CreatePSClient(ResolvePSClientOptionsFromFrameworkConfig(config));
+        (void)client;
+      },
+      std::runtime_error);
+}
+#endif
 
 TEST(PSClientFactoryTest, CreatesLocalShmClientFromConfig) {
   json config = {

@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-inline bool ReadBinaryFile(const std::string& filename,
-                           std::vector<char>* file_contents) {
+inline bool
+ReadBinaryFile(const std::string& filename, std::vector<char>* file_contents) {
   std::ifstream file(filename, std::ios::binary);
   if (!file.is_open()) {
     return false;

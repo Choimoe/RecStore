@@ -36,8 +36,10 @@ public:
     size_t max_queue_size_ = 0;
   };
 
-  explicit CPUThreadPoolExecutor(size_t num_threads,
-                                 Options options = Options())
+  explicit CPUThreadPoolExecutor(size_t num_threads)
+      : CPUThreadPoolExecutor(num_threads, Options()) {}
+
+  CPUThreadPoolExecutor(size_t num_threads, Options options)
       : options_(options) {
     if (num_threads == 0) {
       throw std::invalid_argument("CPUThreadPoolExecutor requires threads");
@@ -91,8 +93,9 @@ public:
 
   void join() {
     std::unique_lock<std::mutex> lock(mutex_);
-    idle_cv_.wait(lock,
-                  [this] { return tasks_.empty() && pending_tasks_ == 0; });
+    idle_cv_.wait(lock, [this] {
+      return tasks_.empty() && pending_tasks_ == 0;
+    });
   }
 
 private:

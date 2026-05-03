@@ -54,12 +54,15 @@ target_link_libraries(recstore_tf_ops PRIVATE
     ${TENSORFLOW_LIBRARIES}
     wq_ps_client
     grpc_ps_client
-    brpc_ps_client
     local_shm_ps_client
     protobuf::libprotobuf
     gRPC::grpc++
     glog::glog
 )
+if(TARGET brpc_ps_client)
+    target_link_libraries(recstore_tf_ops PRIVATE brpc_ps_client)
+    target_compile_definitions(recstore_tf_ops PRIVATE RECSTORE_HAS_BRPC_PS_CLIENT)
+endif()
 
 # --- Set C++ standard ---
 set_target_properties(recstore_tf_ops PROPERTIES

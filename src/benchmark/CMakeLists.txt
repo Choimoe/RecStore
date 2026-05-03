@@ -16,32 +16,46 @@ add_executable(benchmark_client benchmark_client.cc)
 target_link_libraries(benchmark_client PUBLIC ${warp_wq_ps_client} base)
 target_link_libraries(benchmark_client PUBLIC OpenMP::OpenMP_CXX)
 
-add_executable(ps_transport_benchmark
-    ps_transport_benchmark.cc
-    ${PROJECT_SOURCE_DIR}/src/framework/common/ps_client_config_adapter.cc
-    ${PROJECT_SOURCE_DIR}/src/ps/client_factory.cc
-    ${PROJECT_SOURCE_DIR}/src/ps/rdma/rdma_ps_client_adapter.cc
-)
-target_link_libraries(ps_transport_benchmark PUBLIC
-    base
-    grpc_ps_client
-    brpc_ps_client
-    local_shm_ps_client
-    ${warp_wq_ps_client}
-    OpenMP::OpenMP_CXX
-)
+if(TARGET brpc_ps_client)
+    add_executable(ps_transport_benchmark
+        ps_transport_benchmark.cc
+        ${PROJECT_SOURCE_DIR}/src/framework/common/ps_client_config_adapter.cc
+        ${PROJECT_SOURCE_DIR}/src/ps/client_factory.cc
+        ${PROJECT_SOURCE_DIR}/src/ps/rdma/rdma_ps_client_adapter.cc
+    )
+    target_link_libraries(ps_transport_benchmark PUBLIC
+        base
+        grpc_ps_client
+        brpc_ps_client
+        local_shm_ps_client
+        ${warp_wq_ps_client}
+        OpenMP::OpenMP_CXX
+    )
+    target_compile_definitions(ps_transport_benchmark PRIVATE
+        RECSTORE_HAS_BRPC_PS_CLIENT
+    )
+else()
+    message(STATUS "Skipping ps_transport_benchmark because bRPC client is unavailable")
+endif()
 
-add_executable(recstore_mixed_benchmark
-    recstore_mixed_benchmark.cc
-    ${PROJECT_SOURCE_DIR}/src/framework/common/ps_client_config_adapter.cc
-    ${PROJECT_SOURCE_DIR}/src/ps/client_factory.cc
-    ${PROJECT_SOURCE_DIR}/src/ps/rdma/rdma_ps_client_adapter.cc
-)
-target_link_libraries(recstore_mixed_benchmark PUBLIC
-    base
-    grpc_ps_client
-    brpc_ps_client
-    local_shm_ps_client
-    ${warp_wq_ps_client}
-    OpenMP::OpenMP_CXX
-)
+if(TARGET brpc_ps_client)
+    add_executable(recstore_mixed_benchmark
+        recstore_mixed_benchmark.cc
+        ${PROJECT_SOURCE_DIR}/src/framework/common/ps_client_config_adapter.cc
+        ${PROJECT_SOURCE_DIR}/src/ps/client_factory.cc
+        ${PROJECT_SOURCE_DIR}/src/ps/rdma/rdma_ps_client_adapter.cc
+    )
+    target_link_libraries(recstore_mixed_benchmark PUBLIC
+        base
+        grpc_ps_client
+        brpc_ps_client
+        local_shm_ps_client
+        ${warp_wq_ps_client}
+        OpenMP::OpenMP_CXX
+    )
+    target_compile_definitions(recstore_mixed_benchmark PRIVATE
+        RECSTORE_HAS_BRPC_PS_CLIENT
+    )
+else()
+    message(STATUS "Skipping recstore_mixed_benchmark because bRPC client is unavailable")
+endif()
