@@ -43,7 +43,9 @@ public:
 
   void join() {
     std::unique_lock<std::mutex> lock(mutex_);
-    idle_cv_.wait(lock, [this] { return tasks_.empty() && active_tasks_ == 0; });
+    idle_cv_.wait(lock, [this] {
+      return tasks_.empty() && active_tasks_ == 0;
+    });
   }
 
 private:

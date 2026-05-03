@@ -72,7 +72,7 @@ public:
     // base::NamedLockGuard _(lock_, "insert");
     base::NamedLockGuard lock_guard(lock_, "insert");
     epoch_manager_->Protect();
-    auto readed_index = base::Atomic::load(&index_);
+    auto readed_index                 = base::Atomic::load(&index_);
     (*readed_index)[newNode->GetID()] = newNode;
     epoch_manager_->UnProtect();
     epoch_manager_->BumpCurrentEpoch();
