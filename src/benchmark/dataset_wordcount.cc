@@ -1,9 +1,8 @@
 #include "base/base.h"
 #include "base/glob.h"
-#include "folly/GLog.h"
-#include "folly/system/MemoryMapping.h"
 #include "parse_dataset.h"
 
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,9 +17,10 @@ DEFINE_int32(thread_count, 8, "");
 std::unordered_map<uint64_t, uint64_t>
 CountIDOccurrence(const std::string& dataset_file) {
   std::unordered_map<uint64_t, uint64_t> counter;
-  auto file_mmap = folly::MemoryMapping(dataset_file.c_str());
+  std::vector<char> file_contents;
+  CHECK(ReadBinaryFile(dataset_file, &file_contents));
   PetCursor cursor(
-      (char*)file_mmap.range().begin(), (char*)file_mmap.range().end());
+      file_contents.data(), file_contents.data() + file_contents.size());
 
   auto nr_request = cursor.ReadInt();
   for (int64_t i = 0; i < nr_request; i++) {
@@ -52,7 +52,6 @@ void MergeCounter(std::unordered_map<uint64_t, uint64_t>& a,
 }
 
 int main(int argc, char** argv) {
-  folly::Init(&argc, &argv);
   CHECK_NE(FLAGS_output_file, "");
 
   std::vector<std::string> dataset_files;
@@ -68,10 +67,8 @@ int main(int argc, char** argv) {
   int file_num_per_thread =
       (nr_dataset_files + FLAGS_thread_count - 1) / FLAGS_thread_count;
 
-  std::vector<std::unordered_map<uint64_t, uint64_t>*> per_thread_counter;
-  for (int i = 0; i < FLAGS_thread_count; i++) {
-    per_thread_counter.push_back(new std::unordered_map<uint64_t, uint64_t>());
-  }
+  std::vector<std::unordered_map<uint64_t, uint64_t>> per_thread_counter(
+      FLAGS_thread_count);
 
   for (int i = 0; i < FLAGS_thread_count; i++) {
     th[i] = std::thread(
@@ -89,7 +86,7 @@ int main(int argc, char** argv) {
                   << " %";
 
             auto file_counter = CountIDOccurrence(dataset_files[j]);
-            MergeCounter(*per_thread_counter[i], file_counter);
+            MergeCounter(per_thread_counter[i], file_counter);
           }
         });
   }
@@ -98,24 +95,19 @@ int main(int argc, char** argv) {
   }
 
   for (int i = 1; i < FLAGS_thread_count; i++) {
-    MergeCounter(*per_thread_counter[0], *per_thread_counter[i]);
+    MergeCounter(per_thread_counter[0], per_thread_counter[i]);
   }
-  auto* final_counter = per_thread_counter[0];
+  auto& final_counter = per_thread_counter[0];
 
   LOG(INFO) << "finished counter";
 
-  folly::MemoryMapping::Options options;
-  options.setWritable(true).setGrow(true);
-  system(("touch " + FLAGS_output_file).c_str());
-  auto file_mmap = folly::MemoryMapping(
-      FLAGS_output_file.c_str(), 0, final_counter->size() * 16, options);
-  uint64_t* data  = (uint64_t*)file_mmap.range().begin();
-  uint64_t offset = 0;
-  for (auto p : *final_counter) {
-    data[offset]     = p.first;
-    data[offset + 1] = p.second;
-    offset += 2;
+  std::ofstream out(FLAGS_output_file, std::ios::binary | std::ios::trunc);
+  CHECK(out.is_open());
+  for (const auto& p : final_counter) {
+    out.write(reinterpret_cast<const char*>(&p.first), sizeof(uint64_t));
+    out.write(reinterpret_cast<const char*>(&p.second), sizeof(uint64_t));
   }
+  CHECK(out.good());
 
   return 0;
 }

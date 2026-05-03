@@ -49,6 +49,5 @@ add_executable(local_shm_ps_server
 
 target_link_libraries(local_shm_ps_server PUBLIC
     local_shm_ps_server_runtime
-    Folly::folly
     pthread
 )

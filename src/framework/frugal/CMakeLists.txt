@@ -42,7 +42,6 @@ add_library(recstore_pytorch MODULE
 target_include_directories(recstore_pytorch PUBLIC ${TORCH_INCLUDE_DIRS})
 target_link_libraries(recstore_pytorch PUBLIC ${TORCH_LIBRARIES} )
 target_link_libraries(recstore_pytorch PUBLIC base gpu_cache TBB::tbb)
-target_link_libraries(recstore_pytorch PUBLIC Folly::folly)
 target_link_libraries(recstore_pytorch PRIVATE Python3::Python)
 
 set_target_properties(recstore_pytorch PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
@@ -59,7 +58,6 @@ target_include_directories(recstore_pytorch_test PUBLIC ${TORCH_INCLUDE_DIRS})
 target_link_libraries(recstore_pytorch_test PUBLIC 
 ${TORCH_LIBRARIES} base Python3::Python
 gpu_cache)
-target_link_libraries(recstore_pytorch_test PUBLIC Folly::folly)
 
 set_target_properties(recstore_pytorch_test PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 set_target_properties(recstore_pytorch_test PROPERTIES CUDA_ARCHITECTURES OFF)

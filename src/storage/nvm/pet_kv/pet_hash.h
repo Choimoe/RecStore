@@ -1,7 +1,7 @@
 #pragma once
 
 #include <emmintrin.h> //NOLINT
-#include <folly/GLog.h>
+#include <glog/logging.h>
 #include <nmmintrin.h> //NOLINT
 
 #include <cmath>

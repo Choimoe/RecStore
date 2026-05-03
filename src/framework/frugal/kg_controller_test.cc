@@ -372,7 +372,7 @@ private:
 } // namespace recstore
 
 int main(int argc, char** argv) {
-  folly::init(&argc, &argv);
+  gflags::ParseCommandLineFlags(&argc, &argv, true);
   std::string json_str = base::SFormat(
       R"({{
             "num_gpus": 4,

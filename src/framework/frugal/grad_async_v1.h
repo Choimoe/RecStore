@@ -14,8 +14,8 @@
 #include "base/pq.h"
 #include "base/queue.h"
 #include "base/string.h"
-#include "base/thread.h"
 #include "base/timer.h"
+#include "frugal_thread_pool.h"
 #include "grad_base.h"
 #include "grad_memory_manager.h"
 #include "parallel_pq.h"
@@ -190,7 +190,7 @@ protected:
 
   // for method 2
   const int kUpdatePqWorkerNum_ = 0;
-  std::unique_ptr<base::CPUThreadPoolExecutor> update_pq_thread_pool_;
+  std::unique_ptr<FrugalCPUThreadPoolExecutor> update_pq_thread_pool_;
 
 public:
   GradAsyncProcessing(const std::string& json_str,
@@ -227,11 +227,8 @@ public:
     if (update_pq_use_omp_ == 2) {
       int temp = json_config_.value("kUpdatePqWorkerNum", 8);
       *((int*)&kUpdatePqWorkerNum_) = temp;
-      base::CPUThreadPoolExecutor::Options option;
-      option.setBlocking(
-          base::CPUThreadPoolExecutor::Options::Blocking::prohibit);
-      update_pq_thread_pool_.reset(new base::CPUThreadPoolExecutor(
-          kUpdatePqWorkerNum_, std::move(option)));
+      update_pq_thread_pool_.reset(
+          new FrugalCPUThreadPoolExecutor(kUpdatePqWorkerNum_));
     }
   }
 
@@ -307,8 +304,8 @@ public:
 
       CHECK_EQ(*p_old_end, old_end);
       if (new_end != old_end) {
-        // RECSTORE_LOG_EVERY_MS(WARNING, 1000) << folly::sformat(
-        // LOG(WARNING) << folly::sformat(
+        // RECSTORE_LOG_EVERY_MS(WARNING, 1000) << base::SFormat(
+        // LOG(WARNING) << base::SFormat(
         //     "Rank{}: Detect new sample comes, old_end{}, new_end{}", rank,
         //     old_end, new_end);
 

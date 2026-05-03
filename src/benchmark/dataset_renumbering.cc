@@ -8,9 +8,6 @@
 #include "parse_dataset.h"
 
 #include "base/string.h"
-#include "folly/GLog.h"
-#include "folly/system/MemoryMapping.h"
-#include "folly/concurrency/ConcurrentHashMap.h"
 #include <oneapi/tbb/parallel_sort.h>
 
 // input & output
@@ -34,12 +31,12 @@ struct FileMeta {
 // ID to counter
 FileMeta
 RenumberID(const std::string& dataset_file,
-           folly::ConcurrentHashMap<uint64_t, uint64_t>* renumber_map) {
+           const std::unordered_map<uint64_t, uint64_t>& renumber_map) {
   FileMeta file_meta;
   file_meta.dataset_file = dataset_file;
 
   std::vector<char> file_content;
-  CHECK(folly::readFile(dataset_file.c_str(), file_content));
+  CHECK(ReadBinaryFile(dataset_file, &file_content));
 
   PetCursor cursor(
       file_content.data(), file_content.data() + file_content.size());
@@ -56,18 +53,22 @@ RenumberID(const std::string& dataset_file,
       int dim     = cursor.ReadInt();
       CHECK(4 <= dim && dim <= 64) << dim;
       CHECK(dim == 4 || dim == 8 || dim == 16 || dim == 32 || dim == 64) << dim;
-      CHECK(renumber_map->find(key) != renumber_map->end());
-      key = (*renumber_map)[key];
+      auto it = renumber_map.find(key);
+      CHECK(it != renumber_map.end());
+      key = it->second;
     }
   }
-  CHECK(folly::writeFile(file_content, dataset_file.c_str()));
+  std::ofstream output(dataset_file, std::ios::binary | std::ios::trunc);
+  CHECK(output.is_open());
+  output.write(file_content.data(), file_content.size());
+  CHECK(output.good());
   return file_meta;
 }
 
 // ID to counter
 void Check(const std::string& dataset_file, uint64_t max_key) {
   std::vector<char> file_content;
-  CHECK(folly::readFile(dataset_file.c_str(), file_content));
+  CHECK(ReadBinaryFile(dataset_file, &file_content));
 
   PetCursor cursor(
       file_content.data(), file_content.data() + file_content.size());
@@ -85,8 +86,6 @@ void Check(const std::string& dataset_file, uint64_t max_key) {
 }
 
 int main(int argc, char** argv) {
-  folly::Init(&argc, &argv);
-
   std::vector<std::string> dataset_files;
   for (auto& p : glob::glob(FLAGS_dataset_file_str)) {
     dataset_files.push_back(p);
@@ -100,14 +99,15 @@ int main(int argc, char** argv) {
       FLAGS_count_bin_file, std::ios::binary | std::ios::ate);
   std::streamsize size = if_count_bin_file.tellg();
   if_count_bin_file.seekg(0, std::ios::beg);
-  uint64_t* data = (uint64_t*)new char[size];
-  if_count_bin_file.read((char*)data, size);
+  std::vector<char> count_bin_content(static_cast<std::size_t>(size));
+  if_count_bin_file.read(count_bin_content.data(), size);
+  CHECK(if_count_bin_file.good() || if_count_bin_file.eof());
+  auto* data = reinterpret_cast<uint64_t*>(count_bin_content.data());
   CHECK(size % (2 * sizeof(uint64_t)) == 0);
   uint64 key_num = size / sizeof(uint64) / 2;
-  folly::ConcurrentHashMap<uint64_t, uint64_t>* id_count_map =
-      new folly::ConcurrentHashMap<uint64_t, uint64_t>();
+  std::unordered_map<uint64_t, uint64_t> id_count_map;
   std::vector<uint64_t> ids;
-  id_count_map->reserve(key_num);
+  id_count_map.reserve(key_num);
   ids.reserve(key_num);
 
   LOG(INFO) << "start parse id 2 count map";
@@ -117,6 +117,8 @@ int main(int argc, char** argv) {
       (key_num + id_count_map_thread - 1) / id_count_map_thread;
 
   std::vector<std::thread> id_count_map_threads;
+  std::vector<std::unordered_map<uint64_t, uint64_t>> per_thread_maps(
+      id_count_map_thread);
 
   for (int tid = 0; tid < id_count_map_thread; tid++) {
     uint64_t thread_start = tid * id_count_map_per_thread_count;
@@ -127,8 +129,8 @@ int main(int argc, char** argv) {
          thread_start,
          thread_end,
          id_count_map_per_thread_count,
-         id_count_map,
-         data]() {
+         data,
+         &per_thread_maps]() {
           for (auto i = thread_start; i < thread_end; i++) {
             // key: data[i];
             // count: data[i + 1];
@@ -137,41 +139,43 @@ int main(int argc, char** argv) {
                   << 100 * (i - thread_start) / id_count_map_per_thread_count
                   << " %";
             }
-            id_count_map->insert(data[2 * i], data[2 * i + 1]);
+            per_thread_maps[tid][data[2 * i]] = data[2 * i + 1];
           }
         });
   }
   for (auto& t : id_count_map_threads)
     t.join();
 
+  for (const auto& per_thread_map : per_thread_maps) {
+    for (const auto& entry : per_thread_map) {
+      id_count_map[entry.first] = entry.second;
+    }
+  }
+
   LOG(INFO) << "parse id 2 count map done";
   for (uint64_t i = 0; i < key_num; i++) {
     ids.push_back(data[2 * i]);
   }
-  delete[] ((char*)data);
 
   LOG(INFO) << "push_back ids done";
 
   // Sort by count
   LOG(INFO) << "start sort";
   oneapi::tbb::parallel_sort(ids, [&id_count_map](uint64_t a, uint64_t b) {
-    return (*id_count_map)[a] > (*id_count_map)[a];
+    return id_count_map.at(a) > id_count_map.at(b);
   });
-  delete id_count_map;
   LOG(INFO) << "sort done";
 
-  folly::ConcurrentHashMap<uint64_t, uint64_t>* renumber_map =
-      new folly::ConcurrentHashMap<uint64_t, uint64_t>();
-  // std::unordered_map<uint64_t, uint64_t> renumber_map;
-  renumber_map->reserve(key_num);
+  std::unordered_map<uint64_t, uint64_t> renumber_map;
+  renumber_map.reserve(key_num);
 
   LOG(INFO) << "renumber map start";
-#pragma omp parallel for num_threads(64)
-  for (auto i = 0; i < ids.size(); i++)
-    renumber_map->insert(ids[i], i);
+  for (std::size_t i = 0; i < ids.size(); i++) {
+    renumber_map[ids[i]] = i;
+  }
   LOG(INFO) << "renumber map done";
 
-  CHECK_EQ(ids.size(), renumber_map->size());
+  CHECK_EQ(ids.size(), renumber_map.size());
   CHECK_EQ(ids.size(), key_num);
   LOG(INFO) << base::SFormat("dataset has {} keys", key_num);
 
@@ -191,7 +195,7 @@ int main(int argc, char** argv) {
          nr_dataset_files,
          &mutex,
          &of,
-         renumber_map]() {
+         &renumber_map]() {
           for (int j = i * file_num_per_thread;
                j < std::min((i + 1) * file_num_per_thread, nr_dataset_files);
                j++) {

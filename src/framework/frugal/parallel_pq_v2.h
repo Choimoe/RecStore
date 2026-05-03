@@ -1,10 +1,10 @@
 #pragma once
 #include <array>
 #include <iostream>
+#include <mutex>
 #include <unordered_map>
 
 #include "base/lock.h"
-#include "folly/concurrency/ConcurrentHashMap.h"
 #include "memory/epoch_manager.h"
 #include "memory/malloc.h"
 
@@ -15,7 +15,7 @@ namespace recstore {
 
 template <typename T>
 class HashMapPool {
-  using index_type = folly::ConcurrentHashMap<int64_t, T*>;
+  using index_type = std::unordered_map<int64_t, T*>;
 
 public:
   HashMapPool(int pool_size, int64_t capacity) {
@@ -44,7 +44,7 @@ private:
 
 template <typename T>
 class PriorityHashTable {
-  using index_type = folly::ConcurrentHashMap<int64_t, T*>;
+  using index_type = std::unordered_map<int64_t, T*>;
 
 private:
   index_type* index_;
@@ -70,21 +70,17 @@ public:
   // maybe BUG
   void insert(T* newNode) {
     // base::NamedLockGuard _(lock_, "insert");
+    base::NamedLockGuard lock_guard(lock_, "insert");
     epoch_manager_->Protect();
     auto readed_index = base::Atomic::load(&index_);
-    bool success      = false;
-    while (!success) {
-      success =
-          readed_index->insert_or_assign(newNode->GetID(), newNode).second;
-      RECSTORE_LOG_EVERY_MS(ERROR, 1000)
-          << "insert failed, size(hashtable)=" << index_->size();
-    }
+    (*readed_index)[newNode->GetID()] = newNode;
     epoch_manager_->UnProtect();
     epoch_manager_->BumpCurrentEpoch();
   }
 
   void remove(T* node) {
     // base::NamedLockGuard _(lock_, "remove");
+    base::NamedLockGuard lock_guard(lock_, "remove");
     epoch_manager_->Protect();
     auto readed_index = base::Atomic::load(&index_);
     readed_index->erase(node->GetID());
@@ -94,10 +90,15 @@ public:
 
   index_type* Clean(index_type* new_index, std::function<void(T*)> drain_fn) {
     // base::NamedLockGuard _(lock_, "clean");
-    isCleaning_    = true;
-    auto old_index = base::Atomic::load(&index_);
-    bool success   = base::Atomic::CAS((void**)&index_, old_index, new_index);
-    auto epoch     = epoch_manager_->GetCurrentEpoch();
+    index_type* old_index = nullptr;
+    bool success          = false;
+    {
+      base::NamedLockGuard lock_guard(lock_, "clean");
+      isCleaning_ = true;
+      old_index   = base::Atomic::load(&index_);
+      success     = base::Atomic::CAS((void**)&index_, old_index, new_index);
+    }
+    auto epoch = epoch_manager_->GetCurrentEpoch();
 
     while (!epoch_manager_->IsSafeToReclaim(epoch)) {
       epoch_manager_->BumpCurrentEpoch();
@@ -114,36 +115,30 @@ public:
     // LOG(INFO) << "cleaning priorityhashtable, priority=" << queue_priority_
     //           << ", size=" << old_index->size();
 
-    if (!kUseParallelClean_) {
-      int count = 0;
-      for (auto [key, value] : *old_index) {
-        drain_fn(value);
-        count++;
-      }
-    } else {
-#pragma omp parallel num_threads(32)
-      {
-        int avg_shard =
-            (old_index->get_num_shards() + omp_get_num_threads() - 1) /
-            omp_get_num_threads();
-        int thread_id    = omp_get_thread_num();
-        auto shard_begin = old_index->get_shard(avg_shard * thread_id);
-        auto shard_end   = old_index->get_shard(avg_shard * (thread_id + 1));
-        for (; shard_begin != shard_end; ++shard_begin) {
-          auto& it = *shard_begin;
-          drain_fn(it.second);
-        }
-      }
+    if (kUseParallelClean_) {
+      RECSTORE_LOG_EVERY_MS(WARNING, 1000)
+          << "Parallel clean is disabled for standard unordered_map backend.";
+    }
+
+    for (auto [key, value] : *old_index) {
+      drain_fn(value);
     }
 
     old_index->clear();
-    isCleaning_ = false;
+    {
+      base::NamedLockGuard lock_guard(lock_, "clean_done");
+      isCleaning_ = false;
+    }
     return old_index;
   }
 
-  bool empty() const { return (!isCleaning_) && index_->size() == 0; }
+  bool empty() const {
+    base::NamedLockGuard lock_guard(lock_, "empty");
+    return (!isCleaning_) && index_->size() == 0;
+  }
 
   std::string ToString() const {
+    base::NamedLockGuard lock_guard(lock_, "ToString");
     std::stringstream ss;
     for (auto [key, value] : *index_) {
       ss << value->ToString() << " \n";
@@ -254,6 +249,7 @@ public:
 
   void ChunkClean(std::function<void(T*)> drain_fn) override {
     xmh::RAIITimer clean_timer("ChunkClean");
+    std::lock_guard<std::recursive_mutex> pq_guard(lock_);
 #if defined(PPQ_ALL_SCAN)
     for (int i = 0; i < kMaxPriority; i++) {
       if (qs_[i]->empty())
@@ -320,6 +316,7 @@ public:
 
 private:
   void Upsert(T* value) {
+    std::lock_guard<std::recursive_mutex> pq_guard(lock_);
     int new_priority = value->Priority();
 
 #if defined(PPQ_SELECTIVE_SCAN)
@@ -351,6 +348,7 @@ private:
 
   std::array<PriorityHashTable<T>*, kMaxPriority> qs_;
   ParallelPqIndexV2<T> index_;
+  mutable std::recursive_mutex lock_;
 
   HashMapPool<T> hash_map_pool_;
 

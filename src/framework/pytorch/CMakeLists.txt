@@ -42,7 +42,6 @@ target_link_libraries(recstore_torch_ops PRIVATE
     protobuf::libprotobuf
     gRPC::grpc++
     glog::glog
-    Folly::folly
     ${TORCH_LIBRARIES}
 )
 

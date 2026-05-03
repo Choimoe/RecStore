@@ -62,14 +62,14 @@ public:
 //   {
 //     int rank = 0;
 //     for (auto &grad : input_grads) {
-//       auto key = folly::sformat("{}_{}", step, rank);
+//       auto key = base::SFormat("{}_{}", step, rank);
 //       grad_tensors_[key] = grad;
 //       rank++;
 //     }
 //   }
 
 //   void RecycleGradTensor(int step) {
-//     auto key = folly::sformat("{}", step);
+//     auto key = base::SFormat("{}", step);
 //     auto it = grad_tensors_.find(key);
 //     if (it != grad_tensors_.end()) {
 //       grad_tensors_.erase(it);

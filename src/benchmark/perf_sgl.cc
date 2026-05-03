@@ -7,7 +7,6 @@
 
 #include "memory/shm_file.h"
 #include <cstdint>
-#include <folly/init/Init.h>
 #include <future>
 #include <string>
 #include <vector>
@@ -31,9 +30,7 @@ DEFINE_int32(async_req_num, 1, "");
 DEFINE_int32(sge_per_wr, 30, "# of scatter-gather-element per wr");
 DEFINE_int32(fake_pm_read_times, 0, "# of fake pm read, for motivation exp");
 
-// void FOLLY_NOINLINE ReadUint64(uint64_t *ptr) { asm volatile("" : "=m"(*ptr)
-// : "r"(*ptr)); }
-void FOLLY_ALWAYS_INLINE ReadUint64(uint64_t* ptr) {
+inline __attribute__((always_inline)) void ReadUint64(uint64_t* ptr) {
   asm volatile("" : "=m"(*ptr) : "r"(*ptr));
 }
 
@@ -248,7 +245,6 @@ private:
 };
 
 int main(int argc, char* argv[]) {
-  folly::init(&argc, &argv);
   xmh::Reporter::StartReportThread();
 
   base::PMMmapRegisterCenter::GetConfig().use_dram = FLAGS_use_dram;

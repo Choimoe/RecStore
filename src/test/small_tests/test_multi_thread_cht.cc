@@ -1,22 +1,25 @@
+#include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 
-#include "folly/concurrency/ConcurrentHashMap.h"
-
-folly::ConcurrentHashMap<int64_t, int64_t> hashTable;
+std::unordered_map<int64_t, int64_t> hashTable;
+std::mutex hashTableMu;
 
 void insertIntoHashTable(int tid) {
-  hashTable.assign(tid, tid);
+  {
+    std::lock_guard<std::mutex> guard(hashTableMu);
+    hashTable[tid] = tid;
+  }
   for (int _ = 0; _ < 10; _++) {
-    // int64_t key = 100;
-    // int64_t value = key + tid;
-    // auto [no_use, success] = hashTable.insert_or_assign(key, value);
-    // assert(success);
-    // CHECK(success);
-    auto iter = hashTable.assign_if_equal(tid, tid, tid + 1);
-    LOG(WARNING) << "tid" << tid << " " << iter.has_value() << "|"
-                 << hashTable[tid] << std::endl;
+    std::lock_guard<std::mutex> guard(hashTableMu);
+    auto iter = hashTable.find(tid);
+    if (iter != hashTable.end() && iter->second == tid) {
+      iter->second = tid + 1;
+    }
+    std::cout << "tid" << tid << " " << (iter != hashTable.end()) << "|"
+              << hashTable[tid] << std::endl;
   }
 }
 

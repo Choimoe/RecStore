@@ -1,5 +1,3 @@
-#include <folly/init/Init.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -192,8 +190,6 @@ std::vector<float> MakeFlatGradients(
 } // namespace
 
 int main(int argc, char** argv) {
-  folly::Init(&argc, &argv);
-
   const std::string transport   = NormalizeMixedTransport(FLAGS_transport);
   const std::string report_mode = FLAGS_report_mode;
   CHECK(report_mode == "summary" || report_mode == "per_round" ||

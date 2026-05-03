@@ -1,5 +1,6 @@
 #pragma once
-#include "folly/executors/CPUThreadPoolExecutor.h"
+#include "base/queue.h"
+#include "frugal_thread_pool.h"
 #include "grad_async_v1.h"
 #include "grad_base.h"
 #include "grad_memory_manager.h"
@@ -16,7 +17,7 @@ class GradAsyncProcessingV2 : public GradProcessingBase {
 
   // for method 2
   const int kUpdatePqWorkerNum_ = 0;
-  std::unique_ptr<folly::CPUThreadPoolExecutor> update_pq_thread_pool_;
+  std::unique_ptr<FrugalCPUThreadPoolExecutor> update_pq_thread_pool_;
 
 public:
   GradAsyncProcessingV2(const std::string& json_str,
@@ -36,7 +37,7 @@ public:
                 << nr_background_threads_;
       for (int i = 0; i < nr_background_threads_; ++i) {
         backthread_work_queues_.emplace_back(
-            std::make_unique<folly::ProducerConsumerQueue<GradWorkTask>>(100));
+            std::make_unique<base::ProducerConsumerQueue<GradWorkTask>>(100));
       }
     } else {
       LOG(INFO) << "Use main thread to update emb.";
@@ -54,11 +55,8 @@ public:
     if (update_pq_use_omp_ == 2) {
       int temp = json_config_.value("kUpdatePqWorkerNum", 8);
       *((int*)&kUpdatePqWorkerNum_) = temp;
-      folly::CPUThreadPoolExecutor::Options option;
-      option.setBlocking(
-          folly::CPUThreadPoolExecutor::Options::Blocking::prohibit);
-      update_pq_thread_pool_.reset(new folly::CPUThreadPoolExecutor(
-          kUpdatePqWorkerNum_, std::move(option)));
+      update_pq_thread_pool_.reset(
+          new FrugalCPUThreadPoolExecutor(kUpdatePqWorkerNum_));
     }
   }
 
@@ -445,7 +443,7 @@ private:
   std::thread detect_thread_;
   std::thread dispatch_thread_;
   std::vector<std::thread> backward_threads_;
-  std::vector<std::unique_ptr<folly::ProducerConsumerQueue<GradWorkTask>>>
+  std::vector<std::unique_ptr<base::ProducerConsumerQueue<GradWorkTask>>>
       backthread_work_queues_;
 
   std::vector<torch::Tensor> circle_buffer_end_cppseen_;

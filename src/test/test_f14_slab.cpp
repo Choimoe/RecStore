@@ -1,15 +1,16 @@
-#include <folly/container/F14Map.h>
-#include <thread>
+#include <atomic>
+#include <cstdint>
 #include <iostream>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
-using dict_type = folly::F14FastMap<
-    uint64_t,
-    uint64_t,
-    std::hash<uint64_t>,
-    std::equal_to<uint64_t>,
-    folly::f14::DefaultAlloc<std::pair<uint64_t const, uint64_t>>>;
+using dict_type = std::unordered_map<uint64_t, uint64_t>;
 
 dict_type hash_table_;
+std::mutex hash_table_mu;
 
 uint64_t KEY_SIZE   = 1000000;
 uint64_t THREAD_NUM = 2;
@@ -20,14 +21,11 @@ void test_map(int thread_id) {
   while (now_thread.load() != THREAD_NUM)
     ;
   for (int i = 0; i < KEY_SIZE; i++) {
-    bool ret = false;
-    while (ret == false) {
-      auto [a, b] = hash_table_.insert(
-          {thread_id * KEY_SIZE + i, thread_id * KEY_SIZE + i});
-      ret = b;
-    }
+    std::lock_guard<std::mutex> guard(hash_table_mu);
+    hash_table_.emplace(thread_id * KEY_SIZE + i, thread_id * KEY_SIZE + i);
   }
   for (int i = 0; i < KEY_SIZE; i++) {
+    std::lock_guard<std::mutex> guard(hash_table_mu);
     if (hash_table_.at(thread_id * KEY_SIZE + i) != thread_id * KEY_SIZE + i) {
       throw std::runtime_error("error");
     }

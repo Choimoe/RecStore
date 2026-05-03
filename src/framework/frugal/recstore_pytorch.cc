@@ -66,7 +66,7 @@ void ConstructRenumberingDict(torch::Tensor renumbering_dict,
   CHECK_EQ(remaining_start_id, n_entities);
 }
 
-void init_folly() {
+void init_recstore_runtime() {
   putenv("GLOG_logtostderr=1");
   xmh::Reporter::StartReportThread();
 }
@@ -137,7 +137,7 @@ TORCH_LIBRARY(librecstore_pytorch, m) {
 
   m.def("merge_op", &merge_op);
   m.def("uva_cache_query_op", &uva_cache_query_op);
-  m.def("init_folly", &init_folly);
+  m.def("init_recstore_runtime", &init_recstore_runtime);
 
   m.def("construct_renumbering_dict_op", &ConstructRenumberingDict);
 

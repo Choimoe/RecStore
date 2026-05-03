@@ -215,11 +215,11 @@ class IPCMemory {
                  << " GB";
 
     // system("touch /dev/shm/recstore_ipc_memory");
-    // folly::MemoryMapping::Options options =
-    //     folly::MemoryMapping::writable().setPrefault(true).setShared(true);
+    // MemoryMapping::Options options =
+    //     MemoryMapping::writable().setPrefault(true).setShared(true);
     // options.address = (void *)(0x100000000000);
 
-    // mapping_ = new folly::MemoryMapping("/dev/shm/recstore_ipc_memory",
+    // mapping_ = new MemoryMapping("/dev/shm/recstore_ipc_memory",
     // 0,
     //                                     kShmSize, options);
     // header_ =
@@ -381,7 +381,7 @@ private:
   }
 
 private:
-  // folly::MemoryMapping *mapping_;
+  // MemoryMapping *mapping_;
   IPCShmRegion* header_;
 };
 

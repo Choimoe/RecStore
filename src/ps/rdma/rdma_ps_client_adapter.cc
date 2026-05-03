@@ -8,9 +8,9 @@
 #include <thread>
 #include <utility>
 
-#include <folly/portability/GFlags.h>
-#include <folly/init/Init.h>
+#include <gflags/gflags.h>
 
+#include "base/init.h"
 #include "framework/common/ps_client_config_adapter.h"
 #include "ps/base/config.h"
 
@@ -67,7 +67,7 @@ void InitializeRdmaProcessRuntime() {
 
     int argc    = static_cast<int>(argv_strings.size());
     char** argv = argv_storage.data();
-    folly::init(&argc, &argv);
+    base::Init(&argc, &argv);
   });
 }
 

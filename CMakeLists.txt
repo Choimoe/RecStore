@@ -189,19 +189,9 @@ set(Torch_DIR "${PROJECT_SOURCE_DIR}/third_party/libtorch/libtorch/share/cmake/T
 
 
 
-set(folly_DIR "${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/lib/cmake/folly")
-set(FOLLY_ROOT_DIR "${folly_DIR}")
-
 set(FMT_DEBUG_POSTFIX "" CACHE STRING "Debug library postfix." FORCE)
 add_subdirectory(third_party/fmt)
-find_package(folly REQUIRED)
-if(TARGET Folly::folly)
-  set_target_properties(Folly::folly PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
-endif()
 find_package(gflags REQUIRED)
-
-include_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include)
-link_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/lib)
 
 set(glog_DIR "${PROJECT_SOURCE_DIR}/third_party/glog/glog-install-fPIC/usr/local/lib/cmake/glog")
 find_package(glog CONFIG REQUIRED)
@@ -235,10 +225,6 @@ include_directories(
 include_directories(
   ${PROJECT_SOURCE_DIR}
 )
-include_directories(
-  ${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include
-)
-
 
 set(ONEAPI_ROOT /opt/intel/oneapi)
 set(TBB_ROOT ${ONEAPI_ROOT}/tbb/latest/lib)

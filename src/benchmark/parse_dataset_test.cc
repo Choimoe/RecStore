@@ -1,14 +1,7 @@
 #include "base/base.h"
 #include "base/glob.h"
 
-#include "folly/Conv.h"
-#include "folly/FBString.h"
-#include "folly/FileUtil.h"
-#include "folly/GLog.h"
-#include "folly/Range.h"
-#include "folly/String.h"
-#include "folly/init/Init.h"
-#include "folly/system/MemoryMapping.h"
+#include "parse_dataset.h"
 
 #include <string>
 
@@ -49,10 +42,10 @@ private:
 };
 
 void ParseDataSet(const std::string& filename) {
-  auto file_mmap = folly::MemoryMapping(filename.c_str());
-  file_mmap.hintLinearScan();
+  std::vector<char> file_contents;
+  CHECK(ReadBinaryFile(filename, &file_contents));
   PetCursor cursor(
-      (char*)file_mmap.range().begin(), (char*)file_mmap.range().end());
+      file_contents.data(), file_contents.data() + file_contents.size());
 
   auto nr_request = cursor.ReadInt();
   for (int64_t i = 0; i < nr_request; i++) {
@@ -67,8 +60,6 @@ void ParseDataSet(const std::string& filename) {
   CHECK(cursor.isEnd());
 }
 int main(int argc, char** argv) {
-  folly::Init(&argc, &argv);
-
   std::vector<std::string> dataset_files;
   for (auto& p : glob::glob(FLAGS_dataset_file_str)) {
     dataset_files.push_back(p);

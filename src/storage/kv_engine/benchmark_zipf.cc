@@ -1,4 +1,4 @@
-#include <folly/GLog.h>
+#include <glog/logging.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>

@@ -4,7 +4,6 @@
 #include <unordered_map>
 
 #include "base/lock.h"
-#include "folly/concurrency/ConcurrentHashMap.h"
 #include "src/memory/malloc.h"
 
 // #define PPQ_ALL_SCAN
@@ -143,22 +142,40 @@ public:
 template <typename T>
 class ParallelPqIndex {
 private:
-  // folly::ConcurrentHashMap<T, Node<T> *> index_;
   std::vector<Node<T>*> index_;
+  mutable base::SpinLock lock_;
 
 public:
   ParallelPqIndex(int64_t capacity) { index_.resize(capacity, nullptr); }
 
-  void assign(const T& key, Node<T>* value) { index_[key->GetID()] = value; }
+  void assign(const T& key, Node<T>* value) {
+    base::LockGuard _(lock_);
+    index_[key->GetID()] = value;
+  }
 
-  void erase(const T& key) { index_[key->GetID()] = nullptr; }
+  void erase(const T& key) {
+    base::LockGuard _(lock_);
+    index_[key->GetID()] = nullptr;
+  }
 
-  bool find(const T& key) const { return index_[key->GetID()] != nullptr; }
+  bool find(const T& key) const {
+    base::LockGuard _(lock_);
+    return index_[key->GetID()] != nullptr;
+  }
 
-  Node<T>* operator[](const T& key) const { return index_[key->GetID()]; }
+  Node<T>* operator[](const T& key) const {
+    base::LockGuard _(lock_);
+    return index_[key->GetID()];
+  }
 
   bool try_insert(const T& key, Node<T>* value) {
-    return base::Atomic::CAS((void**)&index_[key->GetID()], nullptr, value);
+    base::LockGuard _(lock_);
+    auto& slot = index_[key->GetID()];
+    if (slot != nullptr) {
+      return false;
+    }
+    slot = value;
+    return true;
   }
 };
 
@@ -347,6 +364,7 @@ public:
   }
 
   void pop_x(const T& value) {
+    base::LockGuard pq_guard(lock_);
     LOG(FATAL) << "not USED now";
     // base::LockGuard guard(lock_);
     CHECK(index_.find(value));
@@ -365,6 +383,7 @@ public:
 
 private:
   void Upsert(T* value) {
+    base::LockGuard pq_guard(lock_);
     int new_priority = value->Priority();
 
 #if defined(PPQ_SELECTIVE_SCAN)
@@ -433,7 +452,7 @@ private:
   //   // atomically
   //   auto success = index_.try_insert(value, newNode);
   //   if (success) {
-  //     // LOG(ERROR) << folly::sformat("index_[{}] = {})", value->GetID(),
+  //     // LOG(ERROR) << base::SFormat("index_[{}] = {})", value->GetID(),
   //     //                              newNode);
   //     qs_[CastPriorityToQueueNo(priority)]->insert(newNode);
   //   } else {
@@ -443,6 +462,7 @@ private:
 
   std::array<DoublyLinkedList<T*>*, kMaxPriority> qs_;
   ParallelPqIndex<T*> index_;
+  mutable base::SpinLock lock_;
 
   mutable std::atomic_int priority_possible_min_{0};
   mutable std::atomic_int priority_possible_max_{kMaxPriority};

@@ -10,7 +10,7 @@ target_link_libraries(wq_ps_client PUBLIC base ps_common mayfly)
 set(warp_wq_ps_client -Wl,--whole-archive wq_ps_client -Wl,--no-whole-archive CACHE INTERNAL "wq_ps_client")
 
 add_executable(petps_server petps_server.cc raw_verbs_transport.cc)
-target_link_libraries(petps_server PUBLIC base ps_base kv_engine ps_common mayfly TBB::tbb Folly::folly)
+target_link_libraries(petps_server PUBLIC base ps_base kv_engine ps_common mayfly TBB::tbb)
 
 add_executable(
     petps_integration_test
@@ -21,7 +21,6 @@ target_link_libraries(petps_integration_test PUBLIC
     wq_ps_client
     base
     gtest
-    Folly::folly
     pthread
 )
 

@@ -52,7 +52,6 @@ target_link_libraries(test_naivekvell  spdk_wrapper gtest)
 
 
 # add_executable(perf_spdkkvell_from_gpu perf_spdkkvell_from_gpu.cu)
-# target_link_libraries(perf_spdkkvell_from_gpu spdk_wrapper Folly::folly)
 # set_target_properties(perf_spdkkvell_from_gpu PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 # set_target_properties(perf_spdkkvell_from_gpu PROPERTIES CUDA_ARCHITECTURES OFF)
 # set_property(TARGET perf_spdkkvell_from_gpu PROPERTY CUDA_STANDARD 17)

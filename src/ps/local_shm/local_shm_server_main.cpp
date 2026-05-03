@@ -1,10 +1,10 @@
 #include <fstream>
 
-#include <folly/init/Init.h>
 #include <gflags/gflags.h>
 
-#include "base/log.h"
+#include "base/init.h"
 #include "base/json.h"
+#include "base/log.h"
 #include "ps/local_shm/local_shm_server.h"
 
 DEFINE_string(config_path,
@@ -12,7 +12,7 @@ DEFINE_string(config_path,
               "Path to the recstore config for local_shm_server");
 
 int main(int argc, char** argv) {
-  folly::Init(&argc, &argv);
+  base::Init(&argc, &argv);
 
   std::ifstream config_file(FLAGS_config_path);
   if (!config_file.good()) {

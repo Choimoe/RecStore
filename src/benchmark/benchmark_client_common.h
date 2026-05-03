@@ -1,7 +1,5 @@
 #pragma once
 
-#include <folly/init/Init.h>
-
 #include "base/factory.h"
 #include "base/random.h"
 #include "base/string.h"

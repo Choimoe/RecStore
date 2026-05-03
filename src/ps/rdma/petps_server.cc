@@ -1,4 +1,4 @@
-#include <folly/init/Init.h>
+#include "base/init.h"
 
 #include <atomic>
 #include <chrono>
@@ -953,7 +953,7 @@ private:
 } // namespace recstore
 
 int main(int argc, char* argv[]) {
-  folly::init(&argc, &argv);
+  base::Init(&argc, &argv);
   if (ShouldTraceRdmaGet()) {
     std::cerr << "component=rdma_get_trace side=server event=enabled interval="
               << RdmaGetTraceInterval() << std::endl;

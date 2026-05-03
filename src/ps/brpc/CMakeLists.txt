@@ -66,7 +66,9 @@ if(BRPC_INCLUDE_PATH AND BRPC_LIB AND CUSTOM_PROTOBUF_INCLUDE AND CUSTOM_PROTOBU
     message(STATUS "Found Custom Protobuf: ${CUSTOM_PROTOBUF_LIB}")
     message(STATUS "Found System OpenSSL: ${SYSTEM_OPENSSL_SSL_LIB}")
 else()
-    message(FATAL_ERROR "Could NOT find custom bRPC or Protobuf! \n bRPC: ${BRPC_LIB} \n Proto: ${CUSTOM_PROTOBUF_LIB}")
+    message(WARNING "Skipping bRPC targets because custom bRPC or Protobuf was not found. \n bRPC: ${BRPC_LIB} \n Proto: ${CUSTOM_PROTOBUF_LIB}")
+    set(brpc_FOUND FALSE PARENT_SCOPE)
+    return()
 endif()
 
 if(brpc_FOUND)
@@ -175,7 +177,6 @@ if(brpc_FOUND)
     )
     target_link_libraries(dist_brpc_ps_client_test PUBLIC
         dist_brpc_ps_client
-        Folly::folly
         pthread
         stdc++fs
     )

@@ -3,18 +3,31 @@
 #include "base/glob.h"
 #include "base/timer.h"
 
-#include "folly/Conv.h"
-#include "folly/FBString.h"
-#include "folly/FileUtil.h"
-#include "folly/GLog.h"
-#include "folly/Range.h"
-#include "folly/String.h"
-#include "folly/init/Init.h"
-#include "folly/system/MemoryMapping.h"
 #include "ps/base/Postoffice.h"
 
-#include <folly/MPMCQueue.h>
+#include <fstream>
 #include <string>
+#include <vector>
+
+inline bool ReadBinaryFile(const std::string& filename,
+                           std::vector<char>* file_contents) {
+  std::ifstream file(filename, std::ios::binary);
+  if (!file.is_open()) {
+    return false;
+  }
+  file.seekg(0, std::ios::end);
+  const std::streamsize size = file.tellg();
+  if (size < 0) {
+    return false;
+  }
+  file.seekg(0, std::ios::beg);
+  file_contents->resize(static_cast<std::size_t>(size));
+  if (size == 0) {
+    return true;
+  }
+  file.read(file_contents->data(), size);
+  return static_cast<std::streamsize>(file.gcount()) == size;
+}
 
 class PetCursor {
 public:
@@ -94,7 +107,7 @@ public:
         // }
         auto filename = thread_files[fid];
         std::vector<char> file_contents;
-        folly::readFile(filename.c_str(), file_contents);
+        CHECK(ReadBinaryFile(filename, &file_contents));
         RECSTORE_LOG_EVERY_MS(INFO, 1000)
             << "Thread " << tid << " loading datasets "
             << fid * 100 / thread_files.size() << " %";

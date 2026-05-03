@@ -156,7 +156,7 @@ private:
 
     char* data;
     if (GetConfig().use_dram) {
-      // filename_ = folly::sformat("/dev/shm/big_file{}", GetConfig().numa_id);
+      // filename_ = base::SFormat("/dev/shm/big_file{}", GetConfig().numa_id);
       fd_ = 0;
       LOG(WARNING) << "use dram mmap for PMMmapRegisterCenter";
       data       = reinterpret_cast<char*>(mmap(

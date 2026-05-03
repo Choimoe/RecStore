@@ -1,8 +1,6 @@
 #include "ps/brpc/dist_brpc_ps_client.h"
 
 #include <algorithm>
-#include <folly/executors/CPUThreadPoolExecutor.h>
-#include <folly/init/Init.h>
 #include <future>
 #include <random>
 
@@ -216,7 +214,7 @@ void TestLargeBatch() {
 }
 
 int main(int argc, char** argv) {
-  folly::Init(&argc, &argv);
+  base::Init(&argc, &argv);
   xmh::Reporter::StartReportThread(2000);
 
   auto launch_options =

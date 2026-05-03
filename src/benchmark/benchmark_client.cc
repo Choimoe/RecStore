@@ -1,5 +1,3 @@
-#include <folly/init/Init.h>
-
 #include "base/factory.h"
 #include "base/timer.h"
 #include "base/zipf.h"
@@ -20,7 +18,6 @@ DECLARE_int32(value_size);
 std::atomic<bool> stop{false};
 
 int main(int argc, char* argv[]) {
-  folly::init(&argc, &argv);
   xmh::Reporter::StartReportThread();
   BenchmarkClientCommon::BenchmarkClientCommonArgs args;
   args.thread_count_     = FLAGS_thread_num;

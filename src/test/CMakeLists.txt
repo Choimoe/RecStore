@@ -1,4 +1,3 @@
-find_package(folly REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -17,24 +16,13 @@ endfunction()
 add_subdirectory(small_tests)
 add_subdirectory(server_mgr)
 
-# add_executable(test_f14_slab
-#     test_f14_slab.cpp 
-# )
-
-# target_link_libraries(test_f14_slab PUBLIC
-#     ${FOLLY_LIBRARIES}
-#     mimalloc-static
-# )
-
-# target_compile_options(test_f14_slab PUBLIC -msse -msse2 -msse3 -msse4)
-
 add_executable(test_hash_map
     test_hash_map.cpp 
 )
 
 target_compile_options(test_hash_map PUBLIC -fopenmp)
 
-target_link_libraries(test_hash_map PUBLIC -fopenmp Folly::folly)
+target_link_libraries(test_hash_map PUBLIC -fopenmp)
 
 
 add_executable(coroutine 
@@ -150,7 +138,6 @@ target_link_libraries(test_ps_client_factory PUBLIC
     grpc_ps_client
     brpc_ps_client
     local_shm_ps_client
-    Folly::folly
     gflags
     glog
     gtest
@@ -226,7 +213,6 @@ target_link_libraries(test_op_runtime_support PUBLIC
     grpc_ps_client
     brpc_ps_client
     local_shm_ps_client
-    Folly::folly
     gflags
     glog
     gtest
@@ -252,7 +238,6 @@ target_link_libraries(test_op PUBLIC
     grpc_ps_client
     brpc_ps_client
     local_shm_ps_client
-    Folly::folly
     gflags
     glog
     gtest
@@ -382,7 +367,6 @@ if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER AND
         grpc_ps_client
         brpc_ps_client
         local_shm_ps_client
-        Folly::folly
         protobuf::libprotobuf
         gRPC::grpc++
         glog::glog
@@ -397,37 +381,39 @@ else()
     )
 endif()
 
-add_executable(brpc_ps_server_unit_test
-    test_brpc_ps_server.cpp
-    ${PROJECT_SOURCE_DIR}/src/ps/brpc/brpc_ps_server.cpp
-)
-target_include_directories(brpc_ps_server_unit_test PUBLIC ${BRPC_INCLUDE_PATH})
-target_include_directories(brpc_ps_server_unit_test PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/ps/brpc
-)
-target_compile_definitions(brpc_ps_server_unit_test PRIVATE RECSTORE_NO_SERVER_MAIN)
-target_link_libraries(brpc_ps_server_unit_test PUBLIC
-    base
-    ps_base
-    ps_proto
-    ${BRPC_LIB}
-    ${CUSTOM_PROTOBUF_LIB}
-    ${SYSTEM_OPENSSL_SSL_LIB}
-    ${SYSTEM_OPENSSL_CRYPTO_LIB}
-    ZLIB::ZLIB
-    Threads::Threads
-    dl
-    stdc++fs
-    kv_engine
-    sparse_tensor
-    gflags
-    leveldb
-    TBB::tbb
-    gtest
-    gtest_main
-)
-add_test(NAME brpc_ps_server_unit_test COMMAND brpc_ps_server_unit_test)
-set_tests_properties(brpc_ps_server_unit_test PROPERTIES LABELS "ps_unit")
+if(brpc_FOUND)
+    add_executable(brpc_ps_server_unit_test
+        test_brpc_ps_server.cpp
+        ${PROJECT_SOURCE_DIR}/src/ps/brpc/brpc_ps_server.cpp
+    )
+    target_include_directories(brpc_ps_server_unit_test PUBLIC ${BRPC_INCLUDE_PATH})
+    target_include_directories(brpc_ps_server_unit_test PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/ps/brpc
+    )
+    target_compile_definitions(brpc_ps_server_unit_test PRIVATE RECSTORE_NO_SERVER_MAIN)
+    target_link_libraries(brpc_ps_server_unit_test PUBLIC
+        base
+        ps_base
+        ps_proto
+        ${BRPC_LIB}
+        ${CUSTOM_PROTOBUF_LIB}
+        ${SYSTEM_OPENSSL_SSL_LIB}
+        ${SYSTEM_OPENSSL_CRYPTO_LIB}
+        ZLIB::ZLIB
+        Threads::Threads
+        dl
+        stdc++fs
+        kv_engine
+        sparse_tensor
+        gflags
+        leveldb
+        TBB::tbb
+        gtest
+        gtest_main
+    )
+    add_test(NAME brpc_ps_server_unit_test COMMAND brpc_ps_server_unit_test)
+    set_tests_properties(brpc_ps_server_unit_test PROPERTIES LABELS "ps_unit")
+endif()
 
 add_executable(test_rdma_protocol test_rdma_protocol.cpp)
 target_link_libraries(test_rdma_protocol PUBLIC
