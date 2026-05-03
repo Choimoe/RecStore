@@ -3,6 +3,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 std::unordered_map<int64_t, int64_t> hashTable;
 std::mutex hashTableMu;
