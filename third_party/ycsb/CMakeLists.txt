@@ -24,7 +24,9 @@ endif()
 option(BIND_ROCKSDB "build with rocksdb" OFF)
 option(BIND_LMDB "build with lmdb" OFF)
 option(BIND_LEVELDB "build with leveldb" OFF)
+option(BIND_SQLITE "build with sqlite" OFF)
 option(BIND_WIREDTIGER "build with wiredtiger" OFF)
+option(BIND_RECSTORE "build with RecStore kvdb/cceh bindings" ON)
 
 option(WITH_ZLIB "linking YCSB with zlib; needed by HdrHISTOGRAM, DO NOT TURN OFF" ON)
 option(WITH_LZ4 "linking YCSB with lz4" OFF)
@@ -35,6 +37,11 @@ option(WITH_BZ2 "linking YCSB with bzip2" OFF)
 file(GLOB_RECURSE YCSB_CORE_SRC "core/*.cc")
 
 include(FindThreads)
+
+if (NOT TARGET fmt::fmt)
+    set(FMT_DEBUG_POSTFIX "" CACHE STRING "Debug library postfix." FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../fmt" "${CMAKE_BINARY_DIR}/fmt")
+endif()
 
 add_executable(ycsb_basic ${YCSB_CORE_SRC})
 target_include_directories(ycsb_basic PRIVATE ${PROJECT_SOURCE_DIR})
@@ -72,6 +79,32 @@ if (BIND_ROCKSDB)
     message(STATUS "Found RocksDB library")
     if(NOT MSVC)
         target_link_libraries(ycsb PRIVATE dl)
+    endif()
+
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_QUIET ON)
+    set(_YCSB_PREVIOUS_REQUIRED_INCLUDES "${CMAKE_REQUIRED_INCLUDES}")
+    if(ROCKSDB_INCLUDE_DIR)
+        set(CMAKE_REQUIRED_INCLUDES "${ROCKSDB_INCLUDE_DIR}")
+    endif()
+    check_cxx_source_compiles("
+        #include <memory>
+        #include <string>
+        #include <rocksdb/env.h>
+        #include <rocksdb/status.h>
+        #include <rocksdb/utilities/options_util.h>
+        int main() {
+          rocksdb::Env* env = nullptr;
+          std::shared_ptr<rocksdb::Env> guard;
+          rocksdb::Status s = rocksdb::Env::CreateFromUri(
+              rocksdb::ConfigOptions(), std::string(), std::string(), &env, &guard);
+          return s.ok() ? 0 : 0;
+        }
+    " YCSB_HAVE_ROCKSDB_ENV_CREATE_FROM_URI)
+    set(CMAKE_REQUIRED_INCLUDES "${_YCSB_PREVIOUS_REQUIRED_INCLUDES}")
+    unset(_YCSB_PREVIOUS_REQUIRED_INCLUDES)
+    if(YCSB_HAVE_ROCKSDB_ENV_CREATE_FROM_URI)
+        target_compile_definitions(ycsb PRIVATE YCSB_HAVE_ROCKSDB_ENV_CREATE_FROM_URI=1)
     endif()
 else()
     message(STATUS "BIND_ROCKSDB - OFF")
@@ -116,6 +149,25 @@ if (BIND_LEVELDB)
 else()
     message(STATUS "BIND_LEVELDB - OFF")
 endif ()
+
+if (BIND_SQLITE)
+    message(STATUS "BIND_SQLITE - ON")
+    file(GLOB_RECURSE YCSB_SQLITE_SRC "sqlite/*.cc")
+    target_sources(ycsb PRIVATE ${YCSB_SQLITE_SRC})
+    find_package(SQLite3)
+    if(SQLite3_FOUND)
+        target_link_libraries(ycsb PRIVATE SQLite::SQLite3)
+    else()
+        message(STATUS "Try to find sqlite3 library using find_library")
+        find_library(SQLITE3_LIB sqlite3 REQUIRED)
+        find_path(SQLITE3_INCLUDE_DIR "sqlite3.h" REQUIRED)
+        target_link_libraries(ycsb PRIVATE ${SQLITE3_LIB})
+        target_include_directories(ycsb PRIVATE ${SQLITE3_INCLUDE_DIR})
+    endif()
+    message(STATUS "Found sqlite3 library")
+else()
+    message(STATUS "BIND_SQLITE - OFF")
+endif()
 
 if (BIND_WIREDTIGER)
     message(STATUS "BIND_WIREDTIGER - ON")
@@ -218,29 +270,28 @@ target_link_libraries(ycsb PRIVATE hdr_histogram_static)
 #target_link_options(ycsb PRIVATE -fsanitize=address)
 find_package(TBB REQUIRED)
 target_link_libraries(ycsb PRIVATE TBB::tbb)
-# 让 "core/db.h" 可见
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-# ① 把所有 DB 注册源 + 你的 kv_db.cc 直接编进可执行
-file(GLOB YCSB_DB_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/db/*.cc")
-target_sources(ycsb PRIVATE ${YCSB_DB_SRCS})
+if (BIND_RECSTORE)
+  file(GLOB YCSB_DB_SRCS "${CMAKE_CURRENT_SOURCE_DIR}/db/*.cc")
+  target_sources(ycsb PRIVATE ${YCSB_DB_SRCS})
 
-# ② 让可执行能看到 RecStore 的头
-target_include_directories(ycsb PRIVATE
-  ${CMAKE_SOURCE_DIR}
-  ${CMAKE_SOURCE_DIR}/src
-)
+  target_include_directories(ycsb PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/src
+  )
 
-# ③ 链接 RecStore 依赖与系统库（按需增减）
-target_link_libraries(ycsb PRIVATE
-  kv_engine
-  base
-  ps_common
-  pthread
-  OpenMP::OpenMP_CXX
-  jemalloc
-  # glog gflags  # 若你的工程实际需要
-)
+  target_link_libraries(ycsb PRIVATE
+    kv_engine
+    base
+    ps_common
+    pthread
+    OpenMP::OpenMP_CXX
+    jemalloc
+  )
+else()
+  message(STATUS "BIND_RECSTORE - OFF")
+endif()
 
 # ④ gperftools 存在就连；否则用本地 stub
 find_library(GPERF_PROFILER_LIB profiler)

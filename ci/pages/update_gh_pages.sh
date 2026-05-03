@@ -3,13 +3,14 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash ci/pages/update_gh_pages.sh --source <dir> --mode <docs|coverage> [options]
+Usage: bash ci/pages/update_gh_pages.sh --source <dir> --mode <docs|coverage|ycsb> [options]
 
 Update the gh-pages branch without clobbering independently published content.
 
 Modes:
-  docs      Replace the documentation site while preserving /coverage.
+  docs      Replace the documentation site while preserving /coverage and /ycsb.
   coverage  Replace only /coverage while preserving the documentation site.
+  ycsb      Replace only /ycsb while preserving the documentation site and /coverage.
 
 Options:
   --branch <name>       Pages branch to update (default: gh-pages)
@@ -70,8 +71,8 @@ if [[ -z "${SOURCE_DIR}" || -z "${MODE}" ]]; then
   exit 2
 fi
 
-if [[ "${MODE}" != "docs" && "${MODE}" != "coverage" ]]; then
-  echo "--mode must be either docs or coverage" >&2
+if [[ "${MODE}" != "docs" && "${MODE}" != "coverage" && "${MODE}" != "ycsb" ]]; then
+  echo "--mode must be docs, coverage, or ycsb" >&2
   exit 2
 fi
 
@@ -83,8 +84,10 @@ fi
 if [[ -z "${MESSAGE}" ]]; then
   if [[ "${MODE}" == "docs" ]]; then
     MESSAGE="docs: deploy documentation"
-  else
+  elif [[ "${MODE}" == "coverage" ]]; then
     MESSAGE="ci: deploy coverage reports"
+  else
+    MESSAGE="ci: deploy ycsb reports"
   fi
 fi
 
@@ -106,6 +109,7 @@ if [[ "${MODE}" == "docs" ]]; then
   find "${WORKTREE}" -mindepth 1 -maxdepth 1 \
     ! -name '.git' \
     ! -name 'coverage' \
+    ! -name 'ycsb' \
     -exec rm -rf {} +
 
   shopt -s dotglob nullglob
@@ -113,12 +117,20 @@ if [[ "${MODE}" == "docs" ]]; then
     cp -a "${path}" "${WORKTREE%/}/"
   done
   shopt -u dotglob nullglob
-else
+elif [[ "${MODE}" == "coverage" ]]; then
   rm -rf "${WORKTREE%/}/coverage"
   mkdir -p "${WORKTREE%/}/coverage"
   shopt -s dotglob nullglob
   for path in "${SOURCE_DIR%/}"/*; do
     cp -a "${path}" "${WORKTREE%/}/coverage/"
+  done
+  shopt -u dotglob nullglob
+else
+  rm -rf "${WORKTREE%/}/ycsb"
+  mkdir -p "${WORKTREE%/}/ycsb"
+  shopt -s dotglob nullglob
+  for path in "${SOURCE_DIR%/}"/*; do
+    cp -a "${path}" "${WORKTREE%/}/ycsb/"
   done
   shopt -u dotglob nullglob
 fi

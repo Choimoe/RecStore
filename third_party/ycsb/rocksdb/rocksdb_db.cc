@@ -13,10 +13,12 @@
 #include "utils/utils.h"
 
 #include <rocksdb/cache.h>
+#include <rocksdb/env.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/merge_operator.h>
 #include <rocksdb/status.h>
 #include <rocksdb/utilities/options_util.h>
+#include <rocksdb/version.h>
 #include <rocksdb/write_batch.h>
 
 namespace {
@@ -242,12 +244,16 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
   std::string fs_uri = props.GetProperty(PROP_FS_URI, PROP_FS_URI_DEFAULT);
   rocksdb::Env* env =  rocksdb::Env::Default();;
   if (!env_uri.empty() || !fs_uri.empty()) {
+#if defined(YCSB_HAVE_ROCKSDB_ENV_CREATE_FROM_URI)
     rocksdb::Status s = rocksdb::Env::CreateFromUri(rocksdb::ConfigOptions(),
                                                     env_uri, fs_uri, &env, &env_guard);
     if (!s.ok()) {
       throw utils::Exception(std::string("RocksDB CreateFromUri: ") + s.ToString());
     }
     opt->env = env;
+#else
+    throw utils::Exception("RocksDB env_uri/fs_uri requires RocksDB with Env::CreateFromUri");
+#endif
   }
 
   const std::string options_file = props.GetProperty(PROP_OPTIONS_FILE, PROP_OPTIONS_FILE_DEFAULT);

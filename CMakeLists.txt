@@ -2,6 +2,14 @@ cmake_minimum_required(VERSION 3.10)
 
 option(ENABLE_CUDA "Build with CUDA support" ON)
 option(USE_BRPC_CPU_PROFILER "Enable bRPC builtin CPU profiler" OFF)
+option(RECSTORE_BUILD_BENCHMARKS "Build RecStore benchmark binaries" ON)
+option(RECSTORE_BUILD_TESTS "Build RecStore tests" ON)
+option(RECSTORE_BUILD_FRAMEWORK "Build RecStore framework bindings" ON)
+option(RECSTORE_BUILD_UVM_EXECUTABLES "Build RecStore UVM executables" ON)
+option(RECSTORE_BUILD_GRPC_PS "Build gRPC parameter server targets" ON)
+option(RECSTORE_BUILD_BRPC_PS "Build bRPC parameter server targets" ON)
+option(RECSTORE_BUILD_RDMA_PS "Build RDMA parameter server targets" ON)
+option(RECSTORE_BUILD_LOCAL_SHM_PS "Build local shared-memory parameter server targets" ON)
 
 if(ENABLE_CUDA AND NOT DEFINED CMAKE_CUDA_COMPILER)
   set(_recstore_nvcc_candidates
