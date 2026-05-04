@@ -2201,7 +2201,7 @@
 <li><code>basic</code>：YCSB 自带内存 DB，只用于 smoke 测试，默认启用。</li>
 <li><code>rocksdb</code>、<code>leveldb</code>、<code>lmdb</code>、<code>sqlite</code>、<code>wiredtiger</code>：需要 <code>-DBIND_XXX=ON</code>（使用大写，如 <code>-DBIND_ROCKSDB=ON</code>），并且本地要有对应开发库。</li>
 </ul>
-<p><code>ycsb</code> 二进制从 <code>third_party/ycsb/core/ycsbc.cc</code> 进入。DB 名称由各绑定文件里的 <code>DBFactory::RegisterDB(...)</code> 注册。</p>
+<p><code>ycsb</code> 作为 benchmark 工具放在 <code>tools/ycsb</code>，二进制入口是 <code>tools/ycsb/core/ycsbc.cc</code>。DB 名称由各绑定文件里的 <code>DBFactory::RegisterDB(...)</code> 注册。</p>
 <details class="note">
 <summary>外部存储安装</summary>
 <table>
@@ -2330,8 +2330,8 @@
 <summary>单 engine 运行</summary>
 <p>脚本最终也是调用 <code>./build/bin/ycsb</code>。需要手工调试时可以直接跑：</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>./build/bin/ycsb<span class="w"> </span>-load<span class="w"> </span>-run<span class="w"> </span>-db<span class="w"> </span>kvdb<span class="w"> </span>-threads<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span>-P<span class="w"> </span>third_party/ycsb/workloads/workloada<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span>-P<span class="w"> </span>third_party/ycsb/db/kv_db.properties<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span>-P<span class="w"> </span>tools/ycsb/workloads/workloada<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span>-P<span class="w"> </span>tools/ycsb/db/kv_db.properties<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">  </span>-p<span class="w"> </span>hybridkv.path<span class="o">=</span>/tmp/ycsb-kvdb<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">  </span>-p<span class="w"> </span><span class="nv">recordcount</span><span class="o">=</span><span class="m">10000</span><span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="w">  </span>-p<span class="w"> </span><span class="nv">operationcount</span><span class="o">=</span><span class="m">10000</span><span class="w"> </span><span class="se">\</span>
@@ -2339,8 +2339,8 @@
 </code></pre></div>
 <p><code>cceh</code>：</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>./build/bin/ycsb<span class="w"> </span>-load<span class="w"> </span>-run<span class="w"> </span>-db<span class="w"> </span>cceh<span class="w"> </span>-threads<span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>-P<span class="w"> </span>third_party/ycsb/workloads/workloada<span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span>-P<span class="w"> </span>third_party/ycsb/db/cceh.properties<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>-P<span class="w"> </span>tools/ycsb/workloads/workloada<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span>-P<span class="w"> </span>tools/ycsb/db/cceh.properties<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span>-p<span class="w"> </span>cceh.path<span class="o">=</span>/tmp/ycsb-cceh<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">  </span>-p<span class="w"> </span><span class="nv">recordcount</span><span class="o">=</span><span class="m">10000</span><span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">  </span>-p<span class="w"> </span><span class="nv">operationcount</span><span class="o">=</span><span class="m">10000</span><span class="w"> </span><span class="se">\</span>
