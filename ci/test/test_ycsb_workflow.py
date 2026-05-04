@@ -21,6 +21,16 @@ class YcsbWorkflowTest(unittest.TestCase):
         self.assertIn("--workloads workloadc", workflow)
         self.assertIn("--append-summary", workflow)
 
+    def test_ycsb_workflow_runs_embedding_lane_before_publish(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("--engines kvdb_embedding cceh_embedding rocksdb_embedding leveldb_embedding sqlite_embedding", workflow)
+        self.assertIn("kvdb_embedding:hybridkv.shmcapacity=${YCSB_HYBRIDKV_SHM_CAPACITY}", workflow)
+        self.assertIn("kvdb_embedding:hybridkv.ssdcapacity=${YCSB_HYBRIDKV_SSD_CAPACITY}", workflow)
+        self.assertIn("--engine-ycsb-bin \"rocksdb_embedding:/workspace/build_ycsb_external/bin/ycsb\"", workflow)
+        self.assertIn("--engine-ycsb-bin \"leveldb_embedding:/workspace/build_ycsb_external/bin/ycsb\"", workflow)
+        self.assertIn("--engine-ycsb-bin \"sqlite_embedding:/workspace/build_ycsb_external/bin/ycsb\"", workflow)
+
     def test_ycsb_workflow_overrides_hybridkv_capacity_for_ci(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
 

@@ -164,6 +164,56 @@ class RunYcsbCompareTest(unittest.TestCase):
             self.assertIn("-p ycsb.batch=true", cceh_log)
             self.assertIn("-p ycsb.batch_size=4", cceh_log)
 
+    def test_embedding_engines_enable_embedding_lane_properties(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ycsb_bin = root / "build" / "bin" / "ycsb"
+            ycsb_bin.parent.mkdir(parents=True)
+            ycsb_bin.write_text("#!/bin/sh\nprintf 'Run operations(ops): 1\\n'\n", encoding="utf-8")
+            ycsb_bin.chmod(0o755)
+
+            completed = run_compare(
+                root / "out",
+                ycsb_bin,
+                engines=["kvdb_embedding", "cceh_embedding"],
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            kvdb_log = (root / "out" / "logs" / "workloada_kvdb_embedding_r0.log").read_text(
+                encoding="utf-8"
+            )
+            cceh_log = (root / "out" / "logs" / "workloada_cceh_embedding_r0.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("-p hybridkv.mode=embedding", kvdb_log)
+            self.assertIn("-p cceh.mode=embedding", cceh_log)
+            self.assertIn("-p fieldcount=1", kvdb_log)
+            self.assertIn("-p fieldlength=128", cceh_log)
+
+    def test_external_embedding_engines_use_blob_shape_properties(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ycsb_bin = root / "build" / "bin" / "ycsb"
+            ycsb_bin.parent.mkdir(parents=True)
+            ycsb_bin.write_text("#!/bin/sh\nprintf 'Run operations(ops): 1\\n'\n", encoding="utf-8")
+            ycsb_bin.chmod(0o755)
+
+            completed = run_compare(
+                root / "out",
+                ycsb_bin,
+                engines=["rocksdb_embedding", "leveldb_embedding", "sqlite_embedding"],
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            for engine in ("rocksdb_embedding", "leveldb_embedding", "sqlite_embedding"):
+                log = (root / "out" / "logs" / f"workloada_{engine}_r0.log").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn("-p fieldcount=1", log)
+                self.assertIn("-p fieldlength=128", log)
+                self.assertIn("-p readallfields=true", log)
+                self.assertIn("-p writeallfields=true", log)
+
     def test_append_summary_preserves_existing_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

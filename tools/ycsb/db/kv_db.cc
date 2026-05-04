@@ -114,13 +114,14 @@ constexpr const char *PROP_DB_PATH        = "hybridkv.path";
 constexpr const char *PROP_SHM_CAP        = "hybridkv.shmcapacity";
 constexpr const char *PROP_SSD_CAP        = "hybridkv.ssdcapacity";
 constexpr const char *PROP_FORCE_TID_ZERO = "hybridkv.force_tid_zero";
-constexpr const char *PROP_MODE           = "hybridkv.mode";           // perf | compat
+constexpr const char *PROP_MODE           = "hybridkv.mode";           // perf | compat | embedding
 constexpr const char *PROP_SYN_BYTES      = "hybridkv.synthetic_bytes"; // >0 in perf
 constexpr const char *PROP_READ_RETURN    = "hybridkv.read_return";    // none | blob | parse
 constexpr const char *DEF_THREADCOUNT    =  "16";
 constexpr const char *DEF_DB_PATH = "tools/ycsb/data-store";
 constexpr const char *DEF_SHM_CAP = "268435456";     // 256MB default
 constexpr const char *DEF_SSD_CAP = "0";
+constexpr const char *EMBEDDING_FIELD_NAME = "embedding";
 } // anonymous namespace
 
 class HybridKVDB : public DB {
@@ -155,7 +156,7 @@ class HybridKVDB : public DB {
   Status Delete(const std::string &table, const std::string &key) override;
 
  private:
-  enum class Mode { kPerf, kCompat };
+  enum class Mode { kPerf, kCompat, kEmbedding };
 
   static std::mutex            mu_;
   static std::atomic<uint32_t> ref_cnt_;
@@ -170,6 +171,11 @@ class HybridKVDB : public DB {
   thread_local static std::string tl_blob_;
   thread_local static std::string tl_syn_buf_;
   thread_local static std::vector<uint64_t> tl_batch_keys_;
+
+  static void SerializeEmbedding(const std::vector<DB::Field> &values,
+                                 std::string &out);
+  static void ReturnEmbedding(std::vector<Field> &result,
+                              const std::string &blob);
 };
 
 // static members
@@ -183,6 +189,21 @@ thread_local std::string HybridKVDB::tl_ser_buf_;
 thread_local std::string HybridKVDB::tl_blob_;
 thread_local std::string HybridKVDB::tl_syn_buf_;
 thread_local std::vector<uint64_t> HybridKVDB::tl_batch_keys_;
+
+void HybridKVDB::SerializeEmbedding(const std::vector<DB::Field> &values,
+                                    std::string &out) {
+  size_t total = 0;
+  for (const auto &field : values) total += field.value.size();
+  out.clear();
+  out.reserve(total);
+  for (const auto &field : values) out.append(field.value);
+}
+
+void HybridKVDB::ReturnEmbedding(std::vector<Field> &result,
+                                 const std::string &blob) {
+  result.clear();
+  result.push_back({EMBEDDING_FIELD_NAME, blob});
+}
 
 void HybridKVDB::Init() {
   std::lock_guard<std::mutex> lk(mu_);
@@ -204,7 +225,13 @@ void HybridKVDB::Init() {
   g_force_tid_zero.store(ftz, std::memory_order_relaxed);
 
   const std::string m = props.GetProperty(PROP_MODE, "perf");
-  mode_ = (m == "compat" ? Mode::kCompat : Mode::kPerf);
+  if (m == "compat") {
+    mode_ = Mode::kCompat;
+  } else if (m == "embedding") {
+    mode_ = Mode::kEmbedding;
+  } else {
+    mode_ = Mode::kPerf;
+  }
 
   syn_bytes_ = 0;
   try { syn_bytes_ = (uint32_t) std::stoul(props.GetProperty(PROP_SYN_BYTES, "0")); } catch (...) { syn_bytes_ = 0; }
@@ -235,6 +262,13 @@ DB::Status HybridKVDB::Read(const std::string &, const std::string &key,
                             const std::vector<std::string> *fields,
                             std::vector<Field> &result) {
   if (!engine_) return kError;
+
+  if (mode_ == Mode::kEmbedding) {
+    engine_->Get(ToKey(key), tl_blob_, ThreadTid());
+    if (tl_blob_.empty()) return kNotFound;
+    ReturnEmbedding(result, tl_blob_);
+    return kOK;
+  }
 
   if (read_policy_ == 0) {
     // none — do not materialize; stress value layer only
@@ -282,6 +316,25 @@ DB::Status HybridKVDB::BatchRead(const std::string &,
     result.clear();
     return kOK;
   }
+  if (mode_ == Mode::kEmbedding) {
+    tl_batch_keys_.clear();
+    tl_batch_keys_.reserve(keys.size());
+    for (const auto &key : keys) tl_batch_keys_.push_back(ToKey(key));
+    std::vector<base::ConstArray<float>> values;
+    engine_->BatchGet(base::ConstArray<uint64_t>(tl_batch_keys_), &values, ThreadTid());
+    if (values.size() != keys.size()) return kError;
+    result.clear();
+    result.reserve(values.size());
+    for (const auto &value : values) {
+      if (value.Size() == 0) return kNotFound;
+      result.emplace_back();
+      result.back().push_back(
+          {EMBEDDING_FIELD_NAME,
+           std::string(reinterpret_cast<const char *>(value.Data()),
+                       value.Size() * sizeof(float))});
+    }
+    return kOK;
+  }
   if (read_policy_ != 0) {
     return DB::BatchRead("", keys, fields, result);
   }
@@ -298,6 +351,12 @@ DB::Status HybridKVDB::Insert(const std::string &, const std::string &key,
   if (!engine_) return kError;
   const uint64_t k = ToKey(key);
   const unsigned tid = ThreadTid();
+
+  if (mode_ == Mode::kEmbedding) {
+    SerializeEmbedding(values, tl_ser_buf_);
+    engine_->Put(k, std::string_view(tl_ser_buf_.data(), tl_ser_buf_.size()), tid);
+    return kOK;
+  }
 
   if (mode_ == Mode::kPerf) {
     if (syn_bytes_) {
@@ -331,6 +390,12 @@ DB::Status HybridKVDB::Update(const std::string &, const std::string &key,
   if (!engine_) return kError;
   const uint64_t k = ToKey(key);
   const unsigned tid = ThreadTid();
+
+  if (mode_ == Mode::kEmbedding) {
+    SerializeEmbedding(values, tl_ser_buf_);
+    engine_->Put(k, std::string_view(tl_ser_buf_.data(), tl_ser_buf_.size()), tid);
+    return kOK;
+  }
 
   if (mode_ == Mode::kPerf) {
     // In perf mode, treat Update == Insert (overwrite)

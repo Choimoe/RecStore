@@ -236,6 +236,21 @@ jobs:
               --engine-prop "kvdb_batch:hybridkv.ssdcapacity=${YCSB_HYBRIDKV_SSD_CAPACITY}" \
               --output-dir "${OUTPUT_DIR}" \
               --append-summary
+            python3 tools/benchmarks/run_ycsb_compare.py \
+              --build-dir build_ycsb_recstore \
+              --engines kvdb_embedding cceh_embedding rocksdb_embedding leveldb_embedding sqlite_embedding \
+              --workloads workloada workloadc workload-update \
+              --record-count "${YCSB_RECORD_COUNT}" \
+              --operation-count "${YCSB_OPERATION_COUNT}" \
+              --threads 1 \
+              --repeat 1 \
+              --engine-prop "kvdb_embedding:hybridkv.shmcapacity=${YCSB_HYBRIDKV_SHM_CAPACITY}" \
+              --engine-prop "kvdb_embedding:hybridkv.ssdcapacity=${YCSB_HYBRIDKV_SSD_CAPACITY}" \
+              --engine-ycsb-bin "rocksdb_embedding:/workspace/build_ycsb_external/bin/ycsb" \
+              --engine-ycsb-bin "leveldb_embedding:/workspace/build_ycsb_external/bin/ycsb" \
+              --engine-ycsb-bin "sqlite_embedding:/workspace/build_ycsb_external/bin/ycsb" \
+              --output-dir "${OUTPUT_DIR}" \
+              --append-summary
             echo "Container disk usage after YCSB run:"
             df -h / /workspace /tmp
             echo "YCSB output size after run:"

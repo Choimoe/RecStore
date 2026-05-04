@@ -4,6 +4,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #if defined(_MSC_VER)
 #  include "direct.h"
@@ -27,9 +28,11 @@ using ycsbc::DB;
 namespace ycsbc {
 
 static std::atomic<unsigned> g_next_tid{0};
+static std::atomic<unsigned> g_tid_limit{0};
 static inline unsigned ThreadTid() {
   thread_local unsigned t = g_next_tid.fetch_add(1, std::memory_order_relaxed);
-  return t;
+  unsigned lim = g_tid_limit.load(std::memory_order_relaxed);
+  return lim ? (t % lim) : t;
 }
 
 // FNV-1a 64
@@ -55,6 +58,8 @@ static inline uint64_t ToKey(const std::string& k) {
   return fnv1a64(k);
 }
 
+constexpr const char* EMBEDDING_FIELD_NAME = "embedding";
+
 class CCEHDB : public DB {
 public:
   CCEHDB() = default;
@@ -78,12 +83,23 @@ public:
         "tools/ycsb/data-store");
     size_t capacity = std::stoull(p.GetProperty("cceh.capacity", "16777216"));
     value_size_     = std::stoull(p.GetProperty("cceh.value_size", "1000"));
+    const std::string mode = p.GetProperty("cceh.mode", "compat");
+    embedding_mode_ = (mode == "embedding");
+    unsigned thread_count = 1;
+    try {
+      thread_count = std::max(
+          1u, (unsigned)std::stoul(p.GetProperty("cceh.threadcount", "1")));
+    } catch (...) {
+      thread_count = 1;
+    }
+    g_tid_limit.store(thread_count, std::memory_order_relaxed);
 
     if (mkdir(path.c_str(), 0775) && errno != EEXIST) {
       throw utils::Exception(std::string("mkdir failed: ") + strerror(errno));
     }
 
     BaseKVConfig cfg;
+    cfg.num_threads_              = thread_count;
     cfg.json_config_["path"]       = path;
     cfg.json_config_["capacity"]   = capacity;
     cfg.json_config_["value_size"] = value_size_;
@@ -102,6 +118,8 @@ public:
     if (--ref_cnt_ == 0) {
       delete engine_;
       engine_ = nullptr;
+      g_next_tid.store(0, std::memory_order_relaxed);
+      g_tid_limit.store(0, std::memory_order_relaxed);
     }
   }
 
@@ -115,6 +133,10 @@ public:
     engine_->Get(ToKey(key), blob, ThreadTid());
     if (blob.empty())
       return kNotFound;
+    if (embedding_mode_) {
+      ReturnEmbedding(result, blob);
+      return kOK;
+    }
     if (fields) {
       DeserializeRowFilter(&result, blob.data(), blob.size(), *fields);
     } else {
@@ -137,6 +159,21 @@ public:
       numeric_keys.push_back(ToKey(key));
     std::vector<base::ConstArray<float>> values;
     engine_->BatchGet(base::ConstArray<uint64_t>(numeric_keys), &values, ThreadTid());
+    if (embedding_mode_) {
+      if (values.size() != keys.size())
+        return kError;
+      result.clear();
+      result.reserve(values.size());
+      for (const auto& value : values) {
+        if (value.Size() == 0)
+          return kNotFound;
+        result.emplace_back();
+        result.back().push_back(
+            {EMBEDDING_FIELD_NAME,
+             std::string(reinterpret_cast<const char*>(value.Data()),
+                         value.Size() * sizeof(float))});
+      }
+    }
     return values.size() == keys.size() ? kOK : kError;
   }
 
@@ -153,6 +190,13 @@ public:
                 std::vector<Field>& values) override {
     if (!engine_)
       return kError;
+    if (embedding_mode_) {
+      std::string out;
+      SerializeEmbedding(values, out);
+      engine_->Put(
+          ToKey(key), std::string_view(out.data(), out.size()), ThreadTid());
+      return kOK;
+    }
     std::string blob;
     engine_->Get(ToKey(key), blob, ThreadTid());
     if (blob.empty())
@@ -183,7 +227,10 @@ public:
     if (!engine_)
       return kError;
     std::string out;
-    SerializeRow(values, &out);
+    if (embedding_mode_)
+      SerializeEmbedding(values, out);
+    else
+      SerializeRow(values, &out);
     engine_->Put(
         ToKey(key), std::string_view(out.data(), out.size()), ThreadTid());
     return kOK;
@@ -205,7 +252,10 @@ public:
     for (size_t i = 0; i < keys.size(); ++i) {
       numeric_keys.push_back(ToKey(keys[i]));
       serialized.emplace_back();
-      SerializeRow(values[i], &serialized.back());
+      if (embedding_mode_)
+        SerializeEmbedding(values[i], serialized.back());
+      else
+        SerializeRow(values[i], &serialized.back());
       size_t rem = serialized.back().size() % sizeof(float);
       if (rem != 0) {
         serialized.back().resize(serialized.back().size() + sizeof(float) - rem, '\0');
@@ -226,6 +276,23 @@ public:
   }
 
 private:
+  static void SerializeEmbedding(
+      const std::vector<Field>& values, std::string& out) {
+    size_t total = 0;
+    for (const auto& field : values)
+      total += field.value.size();
+    out.clear();
+    out.reserve(total);
+    for (const auto& field : values)
+      out.append(field.value);
+  }
+
+  static void ReturnEmbedding(std::vector<Field>& result,
+                              const std::string& blob) {
+    result.clear();
+    result.push_back({EMBEDDING_FIELD_NAME, blob});
+  }
+
   static void SerializeRow(const std::vector<Field>& values, std::string* out) {
     // Build body: [len name][len value]...
     std::string body;
@@ -323,6 +390,7 @@ private:
   static inline KVEngineCCEH* engine_ = nullptr;
   static inline size_t field_cnt_     = 0;
   static inline size_t value_size_    = 0;
+  static inline bool embedding_mode_  = false;
   static inline int ref_cnt_          = 0;
   static inline std::mutex mu_;
 };
