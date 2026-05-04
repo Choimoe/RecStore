@@ -35,9 +35,9 @@ extern "C" {
 #include <vector>
 
 // ==== RecStore / HybridKV headers ====
-#include "../../../src/storage/kv_engine/engine_hybridkv.h"
-#include "../../../src/storage/kv_engine/base_kv.h"
-#include "../../../src/memory/shm_file.h"   // PMMmapRegisterCenter
+#include "../../src/storage/kv_engine/engine_hybridkv.h"
+#include "../../src/storage/kv_engine/base_kv.h"
+#include "../../src/memory/shm_file.h"   // PMMmapRegisterCenter
 
 namespace ycsbc {
 
@@ -118,7 +118,7 @@ constexpr const char *PROP_MODE           = "hybridkv.mode";           // perf |
 constexpr const char *PROP_SYN_BYTES      = "hybridkv.synthetic_bytes"; // >0 in perf
 constexpr const char *PROP_READ_RETURN    = "hybridkv.read_return";    // none | blob | parse
 constexpr const char *DEF_THREADCOUNT    =  "16";
-constexpr const char *DEF_DB_PATH = "third_party/ycsb/data-store";
+constexpr const char *DEF_DB_PATH = "tools/ycsb/data-store";
 constexpr const char *DEF_SHM_CAP = "268435456";     // 256MB default
 constexpr const char *DEF_SSD_CAP = "0";
 } // anonymous namespace

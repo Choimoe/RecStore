@@ -39,6 +39,16 @@ class YcsbWorkflowTest(unittest.TestCase):
         self.assertIn('YCSB_HYBRIDKV_SHM_CAPACITY: "268435456"', workflow)
         self.assertIn('YCSB_HYBRIDKV_SSD_CAPACITY: "1073741824"', workflow)
 
+    def test_ycsb_workflow_uses_separate_external_store_binary(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("-B build_ycsb_recstore", workflow)
+        self.assertIn("-B build_ycsb_external", workflow)
+        self.assertIn("-DBIND_RECSTORE=OFF", workflow)
+        self.assertIn("--engine-ycsb-bin \"rocksdb:/workspace/build_ycsb_external/bin/ycsb\"", workflow)
+        self.assertIn("--engine-ycsb-bin \"leveldb:/workspace/build_ycsb_external/bin/ycsb\"", workflow)
+        self.assertIn("--engine-ycsb-bin \"sqlite:/workspace/build_ycsb_external/bin/ycsb\"", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

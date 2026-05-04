@@ -60,7 +60,7 @@ fi
 echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
 
 # 4. Prepare Data & Log Directories
-export YCSB_DATA_DIR="${PROJECT_ROOT}/third_party/ycsb/data-store"
+export YCSB_DATA_DIR="${PROJECT_ROOT}/tools/ycsb/data-store"
 export YCSB_LOG_DIR="${PROJECT_ROOT}/dbtestlog"
 
 mkdir -p "$YCSB_DATA_DIR"
@@ -70,7 +70,7 @@ echo "YCSB_DATA_DIR: ${YCSB_DATA_DIR}"
 echo "YCSB_LOG_DIR:  ${YCSB_LOG_DIR}"
 
 # 5. Common Configuration Paths (Relative to Project Root when running from Root)
-export YCSB_WORKLOAD_DIR="third_party/ycsb/workloads"
-export YCSB_PROP_DIR="third_party/ycsb/db"
+export YCSB_WORKLOAD_DIR="tools/ycsb/workloads"
+export YCSB_PROP_DIR="tools/ycsb/db"
 
 echo "Environment Initialized."

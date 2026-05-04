@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -14,7 +15,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-YCSB_ROOT = REPO_ROOT / "third_party" / "ycsb"
+YCSB_ROOT = REPO_ROOT / "tools" / "ycsb"
 
 
 @dataclass(frozen=True)
@@ -118,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workloads",
         nargs="+",
         default=["workloada"],
-        help="YCSB workload filenames under third_party/ycsb/workloads, or explicit paths.",
+        help="YCSB workload filenames under tools/ycsb/workloads, or explicit paths.",
     )
     parser.add_argument("--record-count", type=int, default=1000)
     parser.add_argument("--operation-count", type=int, default=1000)
@@ -128,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/recstore_ycsb_compare"))
     parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
     parser.add_argument("--ycsb-bin", type=Path, default=None)
+    parser.add_argument(
+        "--engine-ycsb-bin",
+        action="append",
+        default=[],
+        metavar="ENGINE:PATH",
+        help="Use a different YCSB binary for one engine. Can be repeated.",
+    )
     parser.add_argument("--build", action="store_true", help="Build the ycsb target first.")
     parser.add_argument(
         "--phase",
@@ -188,6 +196,20 @@ def parse_engine_props(values: list[str]) -> dict[str, list[str]]:
     return by_engine
 
 
+def parse_engine_ycsb_bins(values: list[str]) -> dict[str, Path]:
+    by_engine: dict[str, Path] = {}
+    for value in values:
+        if ":" not in value:
+            raise ValueError(f"--engine-ycsb-bin must be ENGINE:PATH, got {value!r}")
+        engine, path = value.split(":", 1)
+        if engine not in ENGINE_SPECS:
+            raise ValueError(f"unknown engine in --engine-ycsb-bin: {engine}")
+        if not path:
+            raise ValueError(f"--engine-ycsb-bin path is empty for engine {engine}")
+        by_engine[engine] = Path(path)
+    return by_engine
+
+
 def parse_metrics(output: str) -> dict[str, float | int | str]:
     metrics: dict[str, float | int | str] = {}
     for line in output.splitlines():
@@ -217,7 +239,9 @@ def run_cmd(cmd: list[str], cwd: Path, log_path: Path, dry_run: bool) -> tuple[i
         print(printable)
         return 0, "", ""
     start = time.monotonic()
-    proc = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+    env = os.environ.copy()
+    env.setdefault("CPUPROFILE_FREQUENCY", "0")
+    proc = subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True)
     elapsed = time.monotonic() - start
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
@@ -299,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
     summary_jsonl = output_dir / "summary.jsonl"
     ycsb_bin = args.ycsb_bin or args.build_dir / "bin" / "ycsb"
     engine_props = parse_engine_props(args.engine_prop)
+    engine_ycsb_bins = parse_engine_ycsb_bins(args.engine_ycsb_bin)
 
     if args.build and not args.dry_run:
         subprocess.run(
@@ -308,6 +333,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if not args.dry_run and not ycsb_bin.exists():
         raise FileNotFoundError(f"ycsb binary not found: {ycsb_bin}")
+    if not args.dry_run:
+        for engine, engine_bin in engine_ycsb_bins.items():
+            if not engine_bin.exists():
+                raise FileNotFoundError(f"ycsb binary not found for engine {engine}: {engine_bin}")
 
     workloads = [workload_path(value) for value in args.workloads]
     rows: list[dict[str, object]] = []
@@ -327,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
                     shutil.rmtree(data_path)
                 data_path.mkdir(parents=True, exist_ok=True)
                 cmd = build_command(
-                    ycsb_bin=ycsb_bin,
+                    ycsb_bin=engine_ycsb_bins.get(engine, ycsb_bin),
                     spec=spec,
                     workload=workload,
                     data_path=data_path,

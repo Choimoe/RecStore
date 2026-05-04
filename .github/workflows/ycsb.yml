@@ -147,8 +147,8 @@ jobs:
           docker exec "${TEST_CONTAINER}" bash -lc '
             set -euo pipefail
             cd /workspace
-            rm -rf build_ycsb
-            cmake -S . -B build_ycsb \
+            rm -rf build_ycsb_recstore build_ycsb_external
+            cmake -S . -B build_ycsb_recstore \
               -DENABLE_CUDA=OFF \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
@@ -160,6 +160,26 @@ jobs:
               -DRECSTORE_BUILD_BRPC_PS=OFF \
               -DRECSTORE_BUILD_RDMA_PS=OFF \
               -DRECSTORE_BUILD_LOCAL_SHM_PS=OFF \
+              -DBIND_RECSTORE=ON \
+              -DBIND_ROCKSDB=OFF \
+              -DBIND_LEVELDB=OFF \
+              -DBIND_SQLITE=OFF \
+              -DBIND_LMDB=OFF \
+              -DBIND_WIREDTIGER=OFF
+            cmake --build build_ycsb_recstore --target ycsb -j2
+            cmake -S . -B build_ycsb_external \
+              -DENABLE_CUDA=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              -DRECSTORE_BUILD_BENCHMARKS=OFF \
+              -DRECSTORE_BUILD_TESTS=OFF \
+              -DRECSTORE_BUILD_FRAMEWORK=OFF \
+              -DRECSTORE_BUILD_UVM_EXECUTABLES=OFF \
+              -DRECSTORE_BUILD_GRPC_PS=OFF \
+              -DRECSTORE_BUILD_BRPC_PS=OFF \
+              -DRECSTORE_BUILD_RDMA_PS=OFF \
+              -DRECSTORE_BUILD_LOCAL_SHM_PS=OFF \
+              -DBIND_RECSTORE=OFF \
               -DBIND_ROCKSDB=ON \
               -DBIND_LEVELDB=ON \
               -DBIND_SQLITE=ON \
@@ -169,11 +189,11 @@ jobs:
               -DWITH_SNAPPY=OFF \
               -DWITH_LZ4=OFF \
               -DWITH_ZSTD=OFF
-            cmake --build build_ycsb --target ycsb -j2
+            cmake --build build_ycsb_external --target ycsb -j2
             echo "Container disk usage after YCSB build:"
             df -h / /workspace /tmp
             echo "YCSB build output size:"
-            du -sh /workspace/build_ycsb 2>/dev/null || true
+            du -sh /workspace/build_ycsb_recstore /workspace/build_ycsb_external 2>/dev/null || true
           '
 
       - name: Run YCSB scenario matrix
@@ -190,7 +210,7 @@ jobs:
             cd /workspace
             rm -rf "${OUTPUT_DIR}"
             python3 tools/benchmarks/run_ycsb_compare.py \
-              --build-dir build_ycsb \
+              --build-dir build_ycsb_recstore \
               --engines kvdb cceh basic rocksdb leveldb sqlite \
               --workloads workloada workloadc workload-update \
               --record-count "${YCSB_RECORD_COUNT}" \
@@ -199,9 +219,12 @@ jobs:
               --repeat 1 \
               --engine-prop "kvdb:hybridkv.shmcapacity=${YCSB_HYBRIDKV_SHM_CAPACITY}" \
               --engine-prop "kvdb:hybridkv.ssdcapacity=${YCSB_HYBRIDKV_SSD_CAPACITY}" \
+              --engine-ycsb-bin "rocksdb:/workspace/build_ycsb_external/bin/ycsb" \
+              --engine-ycsb-bin "leveldb:/workspace/build_ycsb_external/bin/ycsb" \
+              --engine-ycsb-bin "sqlite:/workspace/build_ycsb_external/bin/ycsb" \
               --output-dir "${OUTPUT_DIR}"
             python3 tools/benchmarks/run_ycsb_compare.py \
-              --build-dir build_ycsb \
+              --build-dir build_ycsb_recstore \
               --engines kvdb_batch cceh_batch \
               --workloads workloadc \
               --record-count "${YCSB_RECORD_COUNT}" \
@@ -217,7 +240,7 @@ jobs:
             df -h / /workspace /tmp
             echo "YCSB output size after run:"
             du -sh "${OUTPUT_DIR}" "${OUTPUT_DIR}/logs" "${OUTPUT_DIR}/data" 2>/dev/null || true
-            rm -rf "${OUTPUT_DIR}/data" /workspace/build_ycsb /workspace/third_party
+            rm -rf "${OUTPUT_DIR}/data" /workspace/build_ycsb_recstore /workspace/build_ycsb_external /workspace/third_party
             echo "Container disk usage after YCSB cleanup:"
             df -h / /workspace /tmp
           '

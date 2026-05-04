@@ -1,9 +1,0 @@
-修改位置：RecStore/CMakeLists.txt
-set(YCSB_SRC_DIR ${CMAKE_SOURCE_DIR}/third_party/ycsb)
-set(YCSB_BIN_DIR ${CMAKE_BINARY_DIR}/third_party/ycsb-build)
-if (EXISTS "${YCSB_SRC_DIR}/CMakeLists.txt")
-  add_subdirectory(${YCSB_SRC_DIR} ${YCSB_BIN_DIR})
-endif()
-
-运行命令示例：
-./build/bin/ycsb -load -run -db cceh -P ./third_party/ycsb/workloads/workloada -P ./third_party/ycsb/db/cceh.properties -s >./dbtestlog/cceh_test_workloada.log 2>&1

@@ -106,6 +106,7 @@ int main(const int argc, const char *argv[]) {
   const int num_threads = stoi(props.GetProperty("threadcount", "1"));
   const bool batch_mode = (props.GetProperty("ycsb.batch", "false") == "true");
   const int batch_size = std::max(1, stoi(props.GetProperty("ycsb.batch_size", "128")));
+  const bool enable_profile = (props.GetProperty("ycsb.profile", "false") == "true");
 
   ycsbc::Measurements *measurements = ycsbc::CreateMeasurements(&props);
   if (measurements == nullptr) {
@@ -131,7 +132,9 @@ int main(const int argc, const char *argv[]) {
   const int status_interval = std::stoi(props.GetProperty("status.interval", "10"));
 
   // load phase
-  ProfilerStart("./load.prof");
+  if (enable_profile) {
+    ProfilerStart("./load.prof");
+  }
   if (do_load) {
     const int total_ops = stoi(props[ycsbc::CoreWorkload::RECORD_COUNT_PROPERTY]);
 
@@ -176,11 +179,15 @@ int main(const int argc, const char *argv[]) {
     std::cout << "Load operations(ops): " << sum << std::endl;
     std::cout << "Load throughput(ops/sec): " << sum / runtime << std::endl;
   }
-  ProfilerStop();
+  if (enable_profile) {
+    ProfilerStop();
+  }
   measurements->Reset();
   std::this_thread::sleep_for(std::chrono::seconds(stoi(props.GetProperty("sleepafterload", "0"))));
 
-  ProfilerStart("./transaction.prof");
+  if (enable_profile) {
+    ProfilerStart("./transaction.prof");
+  }
   // transaction phase
   if (do_transaction) {
     // initial ops per second, unlimited if <= 0
@@ -243,7 +250,9 @@ int main(const int argc, const char *argv[]) {
     std::cout << "Run operations(ops): " << sum << std::endl;
     std::cout << "Run throughput(ops/sec): " << sum / runtime << std::endl;
   }
-  ProfilerStop();
+  if (enable_profile) {
+    ProfilerStop();
+  }
   for (int i = 0; i < num_threads; i++) {
     delete dbs[i];
   }

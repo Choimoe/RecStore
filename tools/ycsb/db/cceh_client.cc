@@ -17,10 +17,10 @@
 #include "utils/utils.h"
 
 // RecStore headers
-#include "../../../src/storage/kv_engine/base_kv.h"
-#include "../../../src/base/factory.h"
-#include "../../../src/memory/shm_file.h"
-#include "../../../src/storage/kv_engine/engine_cceh.h"
+#include "../../src/storage/kv_engine/base_kv.h"
+#include "../../src/base/factory.h"
+#include "../../src/memory/shm_file.h"
+#include "../../src/storage/kv_engine/engine_cceh.h"
 
 using ycsbc::DB;
 
@@ -75,7 +75,7 @@ public:
 
     std::string path = p.GetProperty(
         "cceh.path",
-        "/home/xieminhui/tgj/RecStore/third_party/YCSB-cpp/data-store");
+        "tools/ycsb/data-store");
     size_t capacity = std::stoull(p.GetProperty("cceh.capacity", "16777216"));
     value_size_     = std::stoull(p.GetProperty("cceh.value_size", "1000"));
 

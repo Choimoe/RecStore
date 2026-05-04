@@ -10,7 +10,7 @@
 - `basic`：YCSB 自带内存 DB，只用于 smoke 测试，默认启用。
 - `rocksdb`、`leveldb`、`lmdb`、`sqlite`、`wiredtiger`：需要 `-DBIND_XXX=ON`（使用大写，如 `-DBIND_ROCKSDB=ON`），并且本地要有对应开发库。
 
-`ycsb` 二进制从 `third_party/ycsb/core/ycsbc.cc` 进入。DB 名称由各绑定文件里的 `DBFactory::RegisterDB(...)` 注册。
+`ycsb` 作为 benchmark 工具放在 `tools/ycsb`，二进制入口是 `tools/ycsb/core/ycsbc.cc`。DB 名称由各绑定文件里的 `DBFactory::RegisterDB(...)` 注册。
 
 ??? note "外部存储安装"
 
@@ -137,8 +137,8 @@ python3 tools/benchmarks/run_ycsb_compare.py \
 
     ```bash
     ./build/bin/ycsb -load -run -db kvdb -threads 16 \
-      -P third_party/ycsb/workloads/workloada \
-      -P third_party/ycsb/db/kv_db.properties \
+      -P tools/ycsb/workloads/workloada \
+      -P tools/ycsb/db/kv_db.properties \
       -p hybridkv.path=/tmp/ycsb-kvdb \
       -p recordcount=10000 \
       -p operationcount=10000 \
@@ -149,8 +149,8 @@ python3 tools/benchmarks/run_ycsb_compare.py \
 
     ```bash
     ./build/bin/ycsb -load -run -db cceh -threads 16 \
-      -P third_party/ycsb/workloads/workloada \
-      -P third_party/ycsb/db/cceh.properties \
+      -P tools/ycsb/workloads/workloada \
+      -P tools/ycsb/db/cceh.properties \
       -p cceh.path=/tmp/ycsb-cceh \
       -p recordcount=10000 \
       -p operationcount=10000 \

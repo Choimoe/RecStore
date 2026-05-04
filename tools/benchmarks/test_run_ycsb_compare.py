@@ -11,7 +11,14 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "tools" / "benchmarks" / "run_ycsb_compare.py"
 
 
-def run_compare(output_dir: Path, ycsb_bin: Path, *, keep_data: bool = False) -> subprocess.CompletedProcess[str]:
+def run_compare(
+    output_dir: Path,
+    ycsb_bin: Path,
+    *,
+    keep_data: bool = False,
+    engines: list[str] | None = None,
+    extra_args: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     cmd = [
         sys.executable,
         str(SCRIPT),
@@ -20,7 +27,7 @@ def run_compare(output_dir: Path, ycsb_bin: Path, *, keep_data: bool = False) ->
         "--ycsb-bin",
         str(ycsb_bin),
         "--engines",
-        "basic",
+        *(engines or ["basic"]),
         "--workloads",
         "workloada",
         "--record-count",
@@ -30,6 +37,8 @@ def run_compare(output_dir: Path, ycsb_bin: Path, *, keep_data: bool = False) ->
         "--output-dir",
         str(output_dir),
     ]
+    if extra_args:
+        cmd.extend(extra_args)
     if keep_data:
         cmd.append("--keep-data")
     return subprocess.run(
@@ -171,6 +180,44 @@ class RunYcsbCompareTest(unittest.TestCase):
             summary = (root / "out" / "summary.csv").read_text(encoding="utf-8")
             self.assertIn("workloada,basic,basic,0,1,1,1,load-run,0", summary)
             self.assertIn("workloadc,kvdb_batch,kvdb,0,1,1,1,load-run,0", summary)
+
+    def test_runner_disables_gperftools_sampling_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ycsb_bin = root / "build" / "bin" / "ycsb"
+            ycsb_bin.parent.mkdir(parents=True)
+            ycsb_bin.write_text(
+                "#!/bin/sh\n"
+                "test \"${CPUPROFILE_FREQUENCY:-}\" = 0 || exit 23\n"
+                "printf 'Run operations(ops): 1\\n'\n",
+                encoding="utf-8",
+            )
+            ycsb_bin.chmod(0o755)
+
+            completed = run_compare(root / "out", ycsb_bin, engines=["rocksdb"])
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    def test_engine_specific_ycsb_binary_overrides_default_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            default_bin = root / "default" / "bin" / "ycsb"
+            rocksdb_bin = root / "rocksdb" / "bin" / "ycsb"
+            default_bin.parent.mkdir(parents=True)
+            rocksdb_bin.parent.mkdir(parents=True)
+            default_bin.write_text("#!/bin/sh\nexit 31\n", encoding="utf-8")
+            rocksdb_bin.write_text("#!/bin/sh\nprintf 'Run operations(ops): 1\\n'\n", encoding="utf-8")
+            default_bin.chmod(0o755)
+            rocksdb_bin.chmod(0o755)
+
+            completed = run_compare(
+                root / "out",
+                default_bin,
+                engines=["rocksdb"],
+                extra_args=[f"--engine-ycsb-bin=rocksdb:{rocksdb_bin}"],
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
 
 
 if __name__ == "__main__":
