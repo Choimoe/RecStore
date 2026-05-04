@@ -123,6 +123,23 @@ public:
     return kOK;
   }
 
+  Status BatchRead(const std::string&,
+                   const std::vector<std::string>& keys,
+                   const std::vector<std::string>* fields,
+                   std::vector<std::vector<Field>>& result) override {
+    if (!engine_)
+      return kError;
+    if (fields != nullptr)
+      return DB::BatchRead("", keys, fields, result);
+    std::vector<uint64_t> numeric_keys;
+    numeric_keys.reserve(keys.size());
+    for (const auto& key : keys)
+      numeric_keys.push_back(ToKey(key));
+    std::vector<base::ConstArray<float>> values;
+    engine_->BatchGet(base::ConstArray<uint64_t>(numeric_keys), &values, ThreadTid());
+    return values.size() == keys.size() ? kOK : kError;
+  }
+
   Status Scan(const std::string&,
               const std::string&,
               int,
@@ -169,6 +186,35 @@ public:
     SerializeRow(values, &out);
     engine_->Put(
         ToKey(key), std::string_view(out.data(), out.size()), ThreadTid());
+    return kOK;
+  }
+
+  Status BatchInsert(const std::string&,
+                     const std::vector<std::string>& keys,
+                     std::vector<std::vector<Field>>& values) override {
+    if (!engine_)
+      return kError;
+    if (keys.size() != values.size())
+      return kError;
+    std::vector<uint64_t> numeric_keys;
+    numeric_keys.reserve(keys.size());
+    std::vector<std::string> serialized;
+    serialized.reserve(keys.size());
+    std::vector<base::ConstArray<float>> batch_values;
+    batch_values.reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+      numeric_keys.push_back(ToKey(keys[i]));
+      serialized.emplace_back();
+      SerializeRow(values[i], &serialized.back());
+      size_t rem = serialized.back().size() % sizeof(float);
+      if (rem != 0) {
+        serialized.back().resize(serialized.back().size() + sizeof(float) - rem, '\0');
+      }
+      batch_values.emplace_back(
+          reinterpret_cast<const float*>(serialized.back().data()),
+          serialized.back().size() / sizeof(float));
+    }
+    engine_->BatchPut(base::ConstArray<uint64_t>(numeric_keys), &batch_values, ThreadTid());
     return kOK;
   }
 

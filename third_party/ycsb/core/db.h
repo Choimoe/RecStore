@@ -53,6 +53,21 @@ class DB {
   virtual Status Read(const std::string &table, const std::string &key,
                    const std::vector<std::string> *fields,
                    std::vector<Field> &result) = 0;
+  virtual Status BatchRead(const std::string &table,
+                   const std::vector<std::string> &keys,
+                   const std::vector<std::string> *fields,
+                   std::vector<std::vector<Field>> &result) {
+    result.clear();
+    result.reserve(keys.size());
+    for (const auto &key : keys) {
+      result.emplace_back();
+      Status status = Read(table, key, fields, result.back());
+      if (status != kOK) {
+        return status;
+      }
+    }
+    return kOK;
+  }
   ///
   /// Performs a range scan for a set of records in the database.
   /// Field/value pairs from the result are stored in a vector.
@@ -91,6 +106,20 @@ class DB {
   ///
   virtual Status Insert(const std::string &table, const std::string &key,
                      std::vector<Field> &values) = 0;
+  virtual Status BatchInsert(const std::string &table,
+                     const std::vector<std::string> &keys,
+                     std::vector<std::vector<Field>> &values) {
+    if (keys.size() != values.size()) {
+      return kError;
+    }
+    for (size_t i = 0; i < keys.size(); ++i) {
+      Status status = Insert(table, keys[i], values[i]);
+      if (status != kOK) {
+        return status;
+      }
+    }
+    return kOK;
+  }
   ///
   /// Deletes a record from the database.
   ///

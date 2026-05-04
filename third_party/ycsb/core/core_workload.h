@@ -175,7 +175,9 @@ class CoreWorkload {
   virtual void Init(const utils::Properties &p);
 
   virtual bool DoInsert(DB &db);
+  virtual int DoInsertBatch(DB &db, int max_ops);
   virtual bool DoTransaction(DB &db);
+  virtual int DoTransactionBatch(DB &db, int max_ops);
 
   bool read_all_fields() const { return read_all_fields_; }
   bool write_all_fields() const { return write_all_fields_; }
@@ -210,6 +212,7 @@ class CoreWorkload {
   DB::Status TransactionScan(DB &db);
   DB::Status TransactionUpdate(DB &db);
   DB::Status TransactionInsert(DB &db);
+  DB::Status TransactionReadBatch(DB &db, int max_ops, int *done_ops);
 
   std::string table_name_;
   int field_count_;

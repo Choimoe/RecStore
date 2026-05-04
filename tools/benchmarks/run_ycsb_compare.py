@@ -39,12 +39,32 @@ ENGINE_SPECS: dict[str, EngineSpec] = {
             "hybridkv.read_return=none",
         ),
     ),
+    "kvdb_batch": EngineSpec(
+        name="kvdb_batch",
+        db="kvdb",
+        property_files=(YCSB_ROOT / "db" / "kv_db.properties",),
+        path_property="hybridkv.path",
+        thread_property="hybridkv.threadcount",
+        default_props=(
+            "hybridkv.mode=perf",
+            "hybridkv.read_return=none",
+            "ycsb.batch=true",
+        ),
+    ),
     "cceh": EngineSpec(
         name="cceh",
         db="cceh",
         property_files=(YCSB_ROOT / "db" / "cceh.properties",),
         path_property="cceh.path",
         thread_property="cceh.threadcount",
+    ),
+    "cceh_batch": EngineSpec(
+        name="cceh_batch",
+        db="cceh",
+        property_files=(YCSB_ROOT / "db" / "cceh.properties",),
+        path_property="cceh.path",
+        thread_property="cceh.threadcount",
+        default_props=("ycsb.batch=true",),
     ),
     "basic": EngineSpec(name="basic", db="basic", default_props=("basic.silent=true",)),
     "rocksdb": EngineSpec(
@@ -103,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--record-count", type=int, default=1000)
     parser.add_argument("--operation-count", type=int, default=1000)
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/recstore_ycsb_compare"))
     parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
@@ -133,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-data",
         action="store_true",
         help="Keep per-run engine data directories after each case. Logs and summaries are always kept.",
+    )
+    parser.add_argument(
+        "--append-summary",
+        action="store_true",
+        help="Append rows to existing summary.csv and summary.jsonl instead of replacing them.",
     )
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -230,6 +256,7 @@ def build_command(
     record_count: int,
     operation_count: int,
     threads: int,
+    batch_size: int,
     measurement_type: str,
     common_props: list[str],
     engine_props: list[str],
@@ -249,6 +276,8 @@ def build_command(
         f"measurementtype={measurement_type}",
     ]
     props.extend(spec.default_props)
+    if "ycsb.batch=true" in spec.default_props:
+        props.append(f"ycsb.batch_size={batch_size}")
     if spec.path_property is not None:
         path_value = data_path / "ycsb.sqlite3" if spec.name == "sqlite" else data_path
         props.append(f"{spec.path_property}={path_value}")
@@ -288,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
         workload_name = workload.name
         for engine in args.engines:
             spec = ENGINE_SPECS[engine]
+            if "ycsb.batch=true" in spec.default_props and workload_name != "workloadc":
+                raise ValueError("batch YCSB engines currently support workloadc only")
             for repeat_idx in range(args.repeat):
                 run_id = f"{workload_name}_{engine}_r{repeat_idx}"
                 data_path = run_root / run_id
@@ -304,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
                     record_count=args.record_count,
                     operation_count=args.operation_count,
                     threads=args.threads,
+                    batch_size=args.batch_size,
                     measurement_type=args.measurement_type,
                     common_props=args.extra_prop,
                     engine_props=engine_props.get(engine, []),
@@ -356,11 +388,14 @@ def main(argv: list[str] | None = None) -> int:
             "log_path",
             "error_tail",
         ]
-        with summary_csv.open("w", encoding="utf-8", newline="") as f:
+        csv_mode = "a" if args.append_summary and summary_csv.exists() else "w"
+        with summary_csv.open(csv_mode, encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
+            if csv_mode == "w":
+                writer.writeheader()
             writer.writerows(rows)
-        with summary_jsonl.open("w", encoding="utf-8") as f:
+        jsonl_mode = "a" if args.append_summary and summary_jsonl.exists() else "w"
+        with summary_jsonl.open(jsonl_mode, encoding="utf-8") as f:
             for row in rows:
                 f.write(json.dumps(row, sort_keys=True) + "\n")
 

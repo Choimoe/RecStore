@@ -9,6 +9,7 @@
 #ifndef YCSB_C_CLIENT_H_
 #define YCSB_C_CLIENT_H_
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 
@@ -40,6 +41,42 @@ inline int ClientThread(ycsbc::DB *db, ycsbc::CoreWorkload *wl, const int num_op
         wl->DoTransaction(*db);
       }
       ops++;
+    }
+
+    if (cleanup_db) {
+      db->Cleanup();
+    }
+
+    latch->CountDown();
+    return ops;
+  } catch (const utils::Exception &e) {
+    std::cerr << "Caught exception: " << e.what() << std::endl;
+    exit(1);
+  }
+}
+
+inline int ClientThreadBatch(ycsbc::DB *db, ycsbc::CoreWorkload *wl, const int num_ops, bool is_loading,
+                             bool init_db, bool cleanup_db, int batch_size,
+                             utils::CountDownLatch *latch, utils::RateLimiter *rlim) {
+
+  try {
+    if (init_db) {
+      db->Init();
+    }
+
+    int ops = 0;
+    while (ops < num_ops) {
+      int this_batch = std::min(batch_size, num_ops - ops);
+      if (rlim) {
+        rlim->Consume(this_batch);
+      }
+
+      int done = is_loading ? wl->DoInsertBatch(*db, this_batch)
+                            : wl->DoTransactionBatch(*db, this_batch);
+      if (done <= 0) {
+        break;
+      }
+      ops += done;
     }
 
     if (cleanup_db) {

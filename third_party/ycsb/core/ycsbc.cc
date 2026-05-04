@@ -15,6 +15,7 @@
 #include <thread>
 #include <future>
 #include <chrono>
+#include <algorithm>
 #include <iomanip>
 
 #include "client.h"
@@ -103,6 +104,8 @@ int main(const int argc, const char *argv[]) {
   }
 
   const int num_threads = stoi(props.GetProperty("threadcount", "1"));
+  const bool batch_mode = (props.GetProperty("ycsb.batch", "false") == "true");
+  const int batch_size = std::max(1, stoi(props.GetProperty("ycsb.batch_size", "128")));
 
   ycsbc::Measurements *measurements = ycsbc::CreateMeasurements(&props);
   if (measurements == nullptr) {
@@ -148,8 +151,13 @@ int main(const int argc, const char *argv[]) {
         thread_ops++;
       }
 
-      client_threads.emplace_back(std::async(std::launch::async, ycsbc::ClientThread, dbs[i], &wl,
-                                             thread_ops, true, true, !do_transaction, &latch, nullptr));
+      if (batch_mode) {
+        client_threads.emplace_back(std::async(std::launch::async, ycsbc::ClientThreadBatch, dbs[i], &wl,
+                                               thread_ops, true, true, !do_transaction, batch_size, &latch, nullptr));
+      } else {
+        client_threads.emplace_back(std::async(std::launch::async, ycsbc::ClientThread, dbs[i], &wl,
+                                               thread_ops, true, true, !do_transaction, &latch, nullptr));
+      }
     }
     assert((int)client_threads.size() == num_threads);
 
@@ -204,8 +212,13 @@ int main(const int argc, const char *argv[]) {
         rlim = new ycsbc::utils::RateLimiter(per_thread_ops, per_thread_ops);
       }
       rate_limiters.push_back(rlim);
-      client_threads.emplace_back(std::async(std::launch::async, ycsbc::ClientThread, dbs[i], &wl,
-                                             thread_ops, false, !do_load, true, &latch, rlim));
+      if (batch_mode) {
+        client_threads.emplace_back(std::async(std::launch::async, ycsbc::ClientThreadBatch, dbs[i], &wl,
+                                               thread_ops, false, !do_load, true, batch_size, &latch, rlim));
+      } else {
+        client_threads.emplace_back(std::async(std::launch::async, ycsbc::ClientThread, dbs[i], &wl,
+                                               thread_ops, false, !do_load, true, &latch, rlim));
+      }
     }
 
     std::future<void> rlim_future;

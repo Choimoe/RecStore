@@ -42,6 +42,25 @@ class DBWrapper : public DB {
     }
     return s;
   }
+  Status BatchRead(const std::string &table, const std::vector<std::string> &keys,
+                   const std::vector<std::string> *fields,
+                   std::vector<std::vector<Field>> &result) {
+    timer_.Start();
+    Status s = db_->BatchRead(table, keys, fields, result);
+    uint64_t elapsed = timer_.End();
+    if (keys.empty()) {
+      return s;
+    }
+    uint64_t per_key_elapsed = elapsed / keys.size();
+    for (size_t i = 0; i < keys.size(); ++i) {
+      if (s == kOK) {
+        measurements_->Report(READ, per_key_elapsed);
+      } else {
+        measurements_->Report(READ_FAILED, per_key_elapsed);
+      }
+    }
+    return s;
+  }
   Status Scan(const std::string &table, const std::string &key, int record_count,
               const std::vector<std::string> *fields, std::vector<std::vector<Field>> &result) {
     timer_.Start();
@@ -73,6 +92,24 @@ class DBWrapper : public DB {
       measurements_->Report(INSERT, elapsed);
     } else {
       measurements_->Report(INSERT_FAILED, elapsed);
+    }
+    return s;
+  }
+  Status BatchInsert(const std::string &table, const std::vector<std::string> &keys,
+                     std::vector<std::vector<Field>> &values) {
+    timer_.Start();
+    Status s = db_->BatchInsert(table, keys, values);
+    uint64_t elapsed = timer_.End();
+    if (keys.empty()) {
+      return s;
+    }
+    uint64_t per_key_elapsed = elapsed / keys.size();
+    for (size_t i = 0; i < keys.size(); ++i) {
+      if (s == kOK) {
+        measurements_->Report(INSERT, per_key_elapsed);
+      } else {
+        measurements_->Report(INSERT_FAILED, per_key_elapsed);
+      }
     }
     return s;
   }

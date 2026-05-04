@@ -263,6 +263,22 @@ bool CoreWorkload::DoInsert(DB &db) {
   return db.Insert(table_name_, key, fields) == DB::kOK;
 }
 
+int CoreWorkload::DoInsertBatch(DB &db, int max_ops) {
+  if (max_ops <= 0) {
+    return 0;
+  }
+  std::vector<std::string> keys;
+  std::vector<std::vector<DB::Field>> values;
+  keys.reserve(max_ops);
+  values.reserve(max_ops);
+  for (int i = 0; i < max_ops; ++i) {
+    keys.push_back(BuildKeyName(insert_key_sequence_->Next()));
+    values.emplace_back();
+    BuildValues(values.back());
+  }
+  return db.BatchInsert(table_name_, keys, values) == DB::kOK ? max_ops : 0;
+}
+
 bool CoreWorkload::DoTransaction(DB &db) {
   DB::Status status;
   switch (op_chooser_.Next()) {
@@ -287,6 +303,15 @@ bool CoreWorkload::DoTransaction(DB &db) {
   return (status == DB::kOK);
 }
 
+int CoreWorkload::DoTransactionBatch(DB &db, int max_ops) {
+  if (max_ops <= 0) {
+    return 0;
+  }
+  int done_ops = 0;
+  DB::Status status = TransactionReadBatch(db, max_ops, &done_ops);
+  return status == DB::kOK ? done_ops : 0;
+}
+
 DB::Status CoreWorkload::TransactionRead(DB &db) {
   uint64_t key_num = NextTransactionKeyNum();
   const std::string key = BuildKeyName(key_num);
@@ -298,6 +323,28 @@ DB::Status CoreWorkload::TransactionRead(DB &db) {
   } else {
     return db.Read(table_name_, key, NULL, result);
   }
+}
+
+DB::Status CoreWorkload::TransactionReadBatch(DB &db, int max_ops, int *done_ops) {
+  std::vector<std::string> keys;
+  keys.reserve(max_ops);
+  for (int i = 0; i < max_ops; ++i) {
+    uint64_t key_num = NextTransactionKeyNum();
+    keys.push_back(BuildKeyName(key_num));
+  }
+  std::vector<std::vector<DB::Field>> result;
+  DB::Status status;
+  if (!read_all_fields()) {
+    std::vector<std::string> fields;
+    fields.push_back(NextFieldName());
+    status = db.BatchRead(table_name_, keys, &fields, result);
+  } else {
+    status = db.BatchRead(table_name_, keys, NULL, result);
+  }
+  if (status == DB::kOK && done_ops) {
+    *done_ops = static_cast<int>(keys.size());
+  }
+  return status;
 }
 
 DB::Status CoreWorkload::TransactionReadModifyWrite(DB &db) {

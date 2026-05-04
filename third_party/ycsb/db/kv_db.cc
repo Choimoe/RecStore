@@ -134,6 +134,10 @@ class HybridKVDB : public DB {
   Status Read(const std::string &table, const std::string &key,
               const std::vector<std::string> *fields,
               std::vector<Field> &result) override;
+  Status BatchRead(const std::string &table,
+                   const std::vector<std::string> &keys,
+                   const std::vector<std::string> *fields,
+                   std::vector<std::vector<Field>> &result) override;
 
   Status Scan(const std::string &table, const std::string &key, int len,
               const std::vector<std::string> *fields,
@@ -144,6 +148,9 @@ class HybridKVDB : public DB {
 
   Status Insert(const std::string &table, const std::string &key,
                 std::vector<Field> &values) override;
+  Status BatchInsert(const std::string &table,
+                     const std::vector<std::string> &keys,
+                     std::vector<std::vector<Field>> &values) override;
 
   Status Delete(const std::string &table, const std::string &key) override;
 
@@ -162,6 +169,7 @@ class HybridKVDB : public DB {
   thread_local static std::string tl_ser_buf_;
   thread_local static std::string tl_blob_;
   thread_local static std::string tl_syn_buf_;
+  thread_local static std::vector<uint64_t> tl_batch_keys_;
 };
 
 // static members
@@ -174,6 +182,7 @@ uint32_t              HybridKVDB::read_policy_= 0; // none
 thread_local std::string HybridKVDB::tl_ser_buf_;
 thread_local std::string HybridKVDB::tl_blob_;
 thread_local std::string HybridKVDB::tl_syn_buf_;
+thread_local std::vector<uint64_t> HybridKVDB::tl_batch_keys_;
 
 void HybridKVDB::Init() {
   std::lock_guard<std::mutex> lk(mu_);
@@ -264,6 +273,26 @@ DB::Status HybridKVDB::Scan(const std::string &, const std::string & /*key*/, in
   return kNotFound; // engine isn't ordered
 }
 
+DB::Status HybridKVDB::BatchRead(const std::string &,
+                                 const std::vector<std::string> &keys,
+                                 const std::vector<std::string> *fields,
+                                 std::vector<std::vector<Field>> &result) {
+  if (!engine_) return kError;
+  if (keys.empty()) {
+    result.clear();
+    return kOK;
+  }
+  if (read_policy_ != 0) {
+    return DB::BatchRead("", keys, fields, result);
+  }
+  tl_batch_keys_.clear();
+  tl_batch_keys_.reserve(keys.size());
+  for (const auto &key : keys) tl_batch_keys_.push_back(ToKey(key));
+  std::vector<base::ConstArray<float>> values;
+  engine_->BatchGet(base::ConstArray<uint64_t>(tl_batch_keys_), &values, ThreadTid());
+  return values.size() == keys.size() ? kOK : kError;
+}
+
 DB::Status HybridKVDB::Insert(const std::string &, const std::string &key,
                               std::vector<Field> &values) {
   if (!engine_) return kError;
@@ -320,6 +349,12 @@ DB::Status HybridKVDB::Update(const std::string &, const std::string &key,
   SerializeRow(cur, tl_ser_buf_);
   engine_->Put(k, std::string_view(tl_ser_buf_.data(), tl_ser_buf_.size()), tid);
   return kOK;
+}
+
+DB::Status HybridKVDB::BatchInsert(const std::string &,
+                                   const std::vector<std::string> &keys,
+                                   std::vector<std::vector<Field>> &values) {
+  return DB::BatchInsert("", keys, values);
 }
 
 DB::Status HybridKVDB::Delete(const std::string &, const std::string &key) {
