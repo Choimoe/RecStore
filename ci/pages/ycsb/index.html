@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RecStore YCSB CI Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header>
+    <div class="header-row">
+      <div>
+        <h1>RecStore YCSB CI Dashboard</h1>
+      </div>
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Toggle color theme">Dark</button>
+    </div>
+  </header>
+  <main>
+    <section class="cards" id="summary-cards"></section>
+    <div class="meta-line muted" id="run-meta"></div>
+    <section>
+      <h2>Workload Views</h2>
+      <div id="workload-views" class="status muted">Loading YCSB history...</div>
+    </section>
+  </main>
+</body>
+</html>
