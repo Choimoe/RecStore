@@ -103,6 +103,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name "${TEST_CONTAINER}" --network host \
+            --security-opt seccomp=unconfined \
             -v "${GITHUB_WORKSPACE}:/workspace" \
             "${TEST_IMAGE}" \
             bash -lc 'tail -f /dev/null'
