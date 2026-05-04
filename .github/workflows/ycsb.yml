@@ -33,8 +33,10 @@ jobs:
       IMAGE_REPO: ghcr.io/${{ github.repository }}/recstore-devel
       TEST_CONTAINER: recstore-ycsb-${{ github.run_id }}-${{ github.run_attempt }}
       OUTPUT_DIR: /tmp/recstore_ycsb_ci
-      YCSB_RECORD_COUNT: "10000"
-      YCSB_OPERATION_COUNT: "10000"
+      YCSB_RECORD_COUNT: "100000"
+      YCSB_OPERATION_COUNT: "100000"
+      YCSB_HYBRIDKV_SHM_CAPACITY: "268435456"
+      YCSB_HYBRIDKV_SSD_CAPACITY: "1073741824"
       PUBLISH_YCSB: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'master') }}
     steps:
       - name: Checkout
@@ -174,13 +176,15 @@ jobs:
             du -sh /workspace/build_ycsb 2>/dev/null || true
           '
 
-      - name: Run small YCSB matrix
+      - name: Run YCSB scenario matrix
         run: |
           set -euo pipefail
           docker exec \
             -e OUTPUT_DIR="${OUTPUT_DIR}" \
             -e YCSB_RECORD_COUNT="${YCSB_RECORD_COUNT}" \
             -e YCSB_OPERATION_COUNT="${YCSB_OPERATION_COUNT}" \
+            -e YCSB_HYBRIDKV_SHM_CAPACITY="${YCSB_HYBRIDKV_SHM_CAPACITY}" \
+            -e YCSB_HYBRIDKV_SSD_CAPACITY="${YCSB_HYBRIDKV_SSD_CAPACITY}" \
             "${TEST_CONTAINER}" bash -lc '
             set -euo pipefail
             cd /workspace
@@ -193,7 +197,22 @@ jobs:
               --operation-count "${YCSB_OPERATION_COUNT}" \
               --threads 1 \
               --repeat 1 \
+              --engine-prop "kvdb:hybridkv.shmcapacity=${YCSB_HYBRIDKV_SHM_CAPACITY}" \
+              --engine-prop "kvdb:hybridkv.ssdcapacity=${YCSB_HYBRIDKV_SSD_CAPACITY}" \
               --output-dir "${OUTPUT_DIR}"
+            python3 tools/benchmarks/run_ycsb_compare.py \
+              --build-dir build_ycsb \
+              --engines kvdb_batch cceh_batch \
+              --workloads workloadc \
+              --record-count "${YCSB_RECORD_COUNT}" \
+              --operation-count "${YCSB_OPERATION_COUNT}" \
+              --batch-size 128 \
+              --threads 1 \
+              --repeat 1 \
+              --engine-prop "kvdb_batch:hybridkv.shmcapacity=${YCSB_HYBRIDKV_SHM_CAPACITY}" \
+              --engine-prop "kvdb_batch:hybridkv.ssdcapacity=${YCSB_HYBRIDKV_SSD_CAPACITY}" \
+              --output-dir "${OUTPUT_DIR}" \
+              --append-summary
             echo "Container disk usage after YCSB run:"
             df -h / /workspace /tmp
             echo "YCSB output size after run:"
