@@ -164,6 +164,25 @@ class RunYcsbCompareTest(unittest.TestCase):
             self.assertIn("-p ycsb.batch=true", cceh_log)
             self.assertIn("-p ycsb.batch_size=4", cceh_log)
 
+    def test_kvdb_uses_correct_ycsb_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ycsb_bin = root / "build" / "bin" / "ycsb"
+            ycsb_bin.parent.mkdir(parents=True)
+            ycsb_bin.write_text("#!/bin/sh\nprintf 'Run operations(ops): 1\\n'\n", encoding="utf-8")
+            ycsb_bin.chmod(0o755)
+
+            completed = run_compare(root / "out", ycsb_bin, engines=["kvdb"])
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            log = (root / "out" / "logs" / "workloada_kvdb_r0.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("-p hybridkv.mode=compat", log)
+            self.assertIn("-p hybridkv.read_return=parse", log)
+            self.assertNotIn("-p hybridkv.mode=perf", log)
+            self.assertNotIn("-p hybridkv.read_return=none", log)
+
     def test_embedding_engines_enable_embedding_lane_properties(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -36,8 +36,8 @@ ENGINE_SPECS: dict[str, EngineSpec] = {
         path_property="hybridkv.path",
         thread_property="hybridkv.threadcount",
         default_props=(
-            "hybridkv.mode=perf",
-            "hybridkv.read_return=none",
+            "hybridkv.mode=compat",
+            "hybridkv.read_return=parse",
         ),
     ),
     "kvdb_batch": EngineSpec(
@@ -47,8 +47,8 @@ ENGINE_SPECS: dict[str, EngineSpec] = {
         path_property="hybridkv.path",
         thread_property="hybridkv.threadcount",
         default_props=(
-            "hybridkv.mode=perf",
-            "hybridkv.read_return=none",
+            "hybridkv.mode=compat",
+            "hybridkv.read_return=parse",
             "ycsb.batch=true",
         ),
     ),
