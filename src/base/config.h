@@ -18,9 +18,9 @@ inline bool ConfigFileExists(const std::filesystem::path& path) {
   return std::filesystem::is_regular_file(path, ec);
 }
 
-inline std::optional<std::filesystem::path> FindRecStoreConfigPath(
-    const std::filesystem::path& default_path,
-    std::filesystem::path start_dir) {
+inline std::optional<std::filesystem::path>
+FindRecStoreConfigPath(const std::filesystem::path& default_path,
+                       std::filesystem::path start_dir) {
   if (ConfigFileExists(default_path)) {
     return default_path;
   }
@@ -49,9 +49,9 @@ inline std::optional<std::filesystem::path> FindRecStoreConfigPath(
   return std::nullopt;
 }
 
-inline std::filesystem::path ResolveRecStoreConfigPath(
-    const std::filesystem::path& default_path,
-    const std::filesystem::path& start_dir) {
+inline std::filesystem::path
+ResolveRecStoreConfigPath(const std::filesystem::path& default_path,
+                          const std::filesystem::path& start_dir) {
   auto config_path = FindRecStoreConfigPath(default_path, start_dir);
   if (!config_path.has_value()) {
     throw std::runtime_error(
@@ -64,13 +64,13 @@ inline std::filesystem::path ResolveRecStoreConfigPath(
 } // namespace detail
 
 inline std::optional<std::filesystem::path> FindRecStoreConfigPath() {
-  return detail::FindRecStoreConfigPath(kDefaultRecStoreConfigPath,
-                                        std::filesystem::current_path());
+  return detail::FindRecStoreConfigPath(
+      kDefaultRecStoreConfigPath, std::filesystem::current_path());
 }
 
 inline std::filesystem::path ResolveRecStoreConfigPath() {
-  return detail::ResolveRecStoreConfigPath(kDefaultRecStoreConfigPath,
-                                           std::filesystem::current_path());
+  return detail::ResolveRecStoreConfigPath(
+      kDefaultRecStoreConfigPath, std::filesystem::current_path());
 }
 
 } // namespace base
