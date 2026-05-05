@@ -38,11 +38,11 @@ private:
 };
 
 std::filesystem::path MakeTempRoot() {
-  auto root = std::filesystem::temp_directory_path() /
-              std::filesystem::path("recstore_config_test_" +
-                                    std::to_string(::getpid()) + "_" +
-                                    std::to_string(::testing::UnitTest::GetInstance()
-                                                       ->random_seed()));
+  auto root =
+      std::filesystem::temp_directory_path() /
+      std::filesystem::path(
+          "recstore_config_test_" + std::to_string(::getpid()) + "_" +
+          std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
   return root;
 }
 
@@ -84,8 +84,8 @@ TEST(ConfigPathTest, SearchesFromCurrentDirectoryUpward) {
 
   {
     ScopedCurrentPath cwd(nested_path);
-    auto found = detail::FindRecStoreConfigPath(missing_default,
-                                                std::filesystem::current_path());
+    auto found = detail::FindRecStoreConfigPath(
+        missing_default, std::filesystem::current_path());
 
     ASSERT_TRUE(found.has_value());
     EXPECT_EQ(std::filesystem::weakly_canonical(*found),
