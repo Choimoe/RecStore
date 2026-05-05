@@ -9,6 +9,7 @@
 
 #include <glog/logging.h>
 
+#include "base/config.h"
 #include "framework/common/ps_client_config_adapter.h"
 #include "ps/client_factory.h"
 #include "ps/rdma/rdma_ps_client_adapter.h"
@@ -59,38 +60,21 @@ json GetGlobalConfig() {
               << std::endl;
 
     std::filesystem::path config_path;
-    bool config_found = false;
 
     if (const char* env_config = std::getenv("RECSTORE_CONFIG");
         env_config != nullptr && env_config[0] != '\0') {
       config_path = env_config;
       if (std::filesystem::exists(config_path)) {
-        config_found = true;
         std::cerr << "[Config] Using config file from RECSTORE_CONFIG: "
                   << config_path.string() << std::endl;
       } else {
         throw std::runtime_error("RECSTORE_CONFIG points to a missing file: " +
                                  config_path.string());
       }
-    }
-
-    if (!config_found) {
-      for (auto p = current_path; p.has_parent_path(); p = p.parent_path()) {
-        if (std::filesystem::exists(p / "recstore_config.json")) {
-          config_path  = p / "recstore_config.json";
-          config_found = true;
-          std::cerr << "[Config] Found config file at: " << config_path.string()
-                    << std::endl;
-          break;
-        }
-      }
-    }
-
-    if (!config_found) {
-      throw std::runtime_error(
-          "Could not find 'recstore_config.json' in current or any parent "
-          "directory starting from: " +
-          current_path.string());
+    } else {
+      config_path = base::ResolveRecStoreConfigPath();
+      std::cerr << "[Config] Found config file at: " << config_path.string()
+                << std::endl;
     }
 
     std::ifstream test_file(config_path);

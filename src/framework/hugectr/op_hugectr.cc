@@ -2,6 +2,7 @@
 
 #include "framework/hugectr/hierkv_backend.h"
 #include "framework/op.h"
+#include "base/config.h"
 #include "base/tensor.h"
 
 #include <cuda_runtime_api.h>
@@ -157,21 +158,8 @@ public:
   }
 };
 
-std::filesystem::path FindRecStoreConfigPath() {
-  auto current_path = std::filesystem::current_path();
-  for (auto p = current_path; p.has_parent_path(); p = p.parent_path()) {
-    const auto candidate = p / "recstore_config.json";
-    if (std::filesystem::exists(candidate)) {
-      return candidate;
-    }
-  }
-  throw std::runtime_error(
-      "Could not find 'recstore_config.json' in current or any parent "
-      "directory.");
-}
-
 json LoadHugeCTRConfig() {
-  return ParseFile2Json(FindRecStoreConfigPath().string());
+  return ParseFile2Json(base::ResolveRecStoreConfigPath().string());
 }
 
 std::unique_ptr<HugeCTRBackend> CreateHugeCTRBackend(const json& config) {

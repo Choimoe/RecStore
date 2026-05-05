@@ -1,4 +1,5 @@
 #include "report_client.h"
+#include "base/config.h"
 #include "base/timer.h"
 #include <glog/logging.h>
 #include <curl/curl.h>
@@ -28,24 +29,17 @@ thread_local uint64_t g_trace_id = 0;
 static std::string GetApiUrl() {
   std::string default_url = "http://127.0.0.1:8081/report";
   try {
-    std::filesystem::path current_path = std::filesystem::current_path();
-    while (true) {
-      std::filesystem::path config_file = current_path / "recstore_config.json";
-      if (std::filesystem::exists(config_file)) {
-        std::ifstream ifs(config_file);
-        if (ifs.is_open()) {
-          nlohmann::json j;
-          ifs >> j;
-          if (j.contains("report_API")) {
-            return j["report_API"];
-          }
-        }
-        break;
+    const auto config_file = base::FindRecStoreConfigPath();
+    if (!config_file.has_value()) {
+      return default_url;
+    }
+    std::ifstream ifs(*config_file);
+    if (ifs.is_open()) {
+      nlohmann::json j;
+      ifs >> j;
+      if (j.contains("report_API")) {
+        return j["report_API"];
       }
-      if (current_path == current_path.parent_path()) {
-        break;
-      }
-      current_path = current_path.parent_path();
     }
   } catch (const std::exception& e) {
     LOG(WARNING) << "Error reading recstore_config.json: " << e.what();

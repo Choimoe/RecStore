@@ -102,6 +102,15 @@ target_link_libraries(test_io_uring_test_utils PUBLIC
 )
 add_test(NAME test_io_uring_test_utils COMMAND test_io_uring_test_utils)
 
+add_executable(test_config test_config.cpp)
+target_link_libraries(test_config PUBLIC
+    base
+    gtest
+    gtest_main
+    pthread
+)
+add_test(NAME test_config COMMAND test_config)
+
 add_executable(test_kvengine test_kvengine.cpp)
 target_link_libraries(test_kvengine PUBLIC
     extendible_hash

@@ -21,6 +21,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "base/config.h"
 #include "base/json.h"
 
 namespace recstore::test {
@@ -378,21 +379,7 @@ std::optional<std::filesystem::path> PSServerLauncher::FindConfigFile() {
     }
   }
 
-  std::filesystem::path current = std::filesystem::current_path();
-  while (!current.empty()) {
-    std::filesystem::path candidate = current / "recstore_config.json";
-    if (std::filesystem::exists(candidate)) {
-      return candidate;
-    }
-
-    std::filesystem::path parent = current.parent_path();
-    if (parent == current) {
-      break;
-    }
-    current = parent;
-  }
-
-  return std::nullopt;
+  return base::FindRecStoreConfigPath();
 }
 
 std::filesystem::path PSServerLauncher::FindPsServerBinary() {
