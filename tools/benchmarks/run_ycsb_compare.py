@@ -401,7 +401,7 @@ def build_command(
     if "ycsb.batch=true" in spec.default_props:
         props.append(f"ycsb.batch_size={batch_size}")
     if spec.path_property is not None:
-        path_value = data_path / "ycsb.sqlite3" if spec.name == "sqlite" else data_path
+        path_value = data_path / "ycsb.sqlite3" if spec.db == "sqlite" else data_path
         props.append(f"{spec.path_property}={path_value}")
     if spec.thread_property is not None:
         props.append(f"{spec.thread_property}={threads}")

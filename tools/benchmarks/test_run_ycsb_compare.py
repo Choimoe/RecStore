@@ -214,6 +214,30 @@ class RunYcsbCompareTest(unittest.TestCase):
                 self.assertIn("-p readallfields=true", log)
                 self.assertIn("-p writeallfields=true", log)
 
+    def test_sqlite_embedding_uses_database_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ycsb_bin = root / "build" / "bin" / "ycsb"
+            ycsb_bin.parent.mkdir(parents=True)
+            ycsb_bin.write_text("#!/bin/sh\nprintf 'Run operations(ops): 1\\n'\n", encoding="utf-8")
+            ycsb_bin.chmod(0o755)
+
+            completed = run_compare(
+                root / "out",
+                ycsb_bin,
+                engines=["sqlite_embedding"],
+                keep_data=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+            log = (root / "out" / "logs" / "workloada_sqlite_embedding_r0.log").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                f"-p sqlite.dbpath={root / 'out' / 'data' / 'workloada_sqlite_embedding_r0' / 'ycsb.sqlite3'}",
+                log,
+            )
+
     def test_append_summary_preserves_existing_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
