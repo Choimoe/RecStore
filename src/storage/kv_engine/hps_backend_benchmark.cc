@@ -17,8 +17,9 @@
 #include "base/log.h"
 #include "storage/kv_engine/hps_recstore_backend.h"
 #include "third_party/HugeCTR/HugeCTR/include/hps/hash_map_backend.hpp"
+#include "third_party/HugeCTR/HugeCTR/include/hps/rocksdb_backend.hpp"
 
-DEFINE_string(backend, "hps_hash_map", "hps_hash_map|recstore");
+DEFINE_string(backend, "hps_hash_map", "hps_hash_map|hps_rocksdb|recstore");
 DEFINE_string(path, "", "RecStore data path");
 DEFINE_string(index_type, "DRAM_EXTENDIBLE_HASH", "RecStore index.type");
 DEFINE_string(value_store_type, "DRAM_VALUE_STORE", "RecStore value.type");
@@ -132,6 +133,13 @@ std::unique_ptr<HpsBackend> CreateBackend() {
     params.overflow_margin = std::numeric_limits<size_t>::max();
     return std::make_unique<HugeCTR::HashMapBackend<long long>>(params);
   }
+  if (FLAGS_backend == "hps_rocksdb") {
+    HugeCTR::RocksDBBackendParams params;
+    params.path           = FLAGS_path;
+    params.max_batch_size = static_cast<size_t>(FLAGS_batch_size);
+    params.num_threads    = static_cast<size_t>(std::max(1, FLAGS_thread_num));
+    return std::make_unique<HugeCTR::RocksDBBackend<long long>>(params);
+  }
   if (FLAGS_backend == "recstore") {
     recstore::storage::HpsRecStoreBackendParams params;
     params.path             = FLAGS_path;
@@ -205,6 +213,22 @@ PhaseStats LoadRecords(HpsBackend* backend, int load_threads) {
     total.key_ops += each.key_ops;
   }
   return total;
+}
+
+void PrepareBackendForLoad(HpsBackend* backend) {
+  if (FLAGS_backend != "hps_rocksdb") {
+    return;
+  }
+
+  const long long key = 1;
+  std::vector<char> value =
+      MakeValues(1, static_cast<size_t>(FLAGS_value_size), 0);
+  backend->insert(FLAGS_table_name,
+                  1,
+                  &key,
+                  value.data(),
+                  static_cast<uint32_t>(FLAGS_value_size),
+                  static_cast<size_t>(FLAGS_value_size));
 }
 
 PhaseStats RunTransactions(HpsBackend* backend) {
@@ -327,13 +351,15 @@ int main(int argc, char** argv) {
   CHECK_GT(FLAGS_batch_size, 0);
   CHECK_GT(FLAGS_thread_num, 0);
   CHECK_GT(FLAGS_running_seconds, 0);
-  if (FLAGS_backend == "recstore") {
-    CHECK(!FLAGS_path.empty()) << "--path is required for recstore backend";
+  if (FLAGS_backend == "recstore" || FLAGS_backend == "hps_rocksdb") {
+    CHECK(!FLAGS_path.empty()) << "--path is required for " << FLAGS_backend
+                               << " backend";
   }
 
   const int load_threads =
       FLAGS_load_thread_num > 0 ? FLAGS_load_thread_num : FLAGS_thread_num;
   auto backend = CreateBackend();
+  PrepareBackendForLoad(backend.get());
 
   const auto load_begin = std::chrono::steady_clock::now();
   const PhaseStats load = LoadRecords(backend.get(), load_threads);
