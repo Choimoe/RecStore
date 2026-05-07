@@ -189,19 +189,42 @@ set(Torch_DIR "${PROJECT_SOURCE_DIR}/third_party/libtorch/libtorch/share/cmake/T
 
 
 
-set(folly_DIR "${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/lib/cmake/folly")
-set(FOLLY_ROOT_DIR "${folly_DIR}")
+set(RECSTORE_FOLLY_INSTALL_DIR
+    "${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/lib/cmake/folly")
+set(RECSTORE_FOLLY_BUILD_DIR "${PROJECT_SOURCE_DIR}/third_party/folly/_build")
+if(EXISTS "${RECSTORE_FOLLY_INSTALL_DIR}/folly-config.cmake")
+  set(folly_DIR "${RECSTORE_FOLLY_INSTALL_DIR}")
+  set(FOLLY_ROOT_DIR "${folly_DIR}")
+else()
+  set(folly_DIR "${RECSTORE_FOLLY_INSTALL_DIR}")
+  set(FOLLY_ROOT_DIR "${folly_DIR}")
+endif()
 
 set(FMT_DEBUG_POSTFIX "" CACHE STRING "Debug library postfix." FORCE)
 add_subdirectory(third_party/fmt)
-find_package(folly REQUIRED)
-if(TARGET Folly::folly)
-  set_target_properties(Folly::folly PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
+if(EXISTS "${RECSTORE_FOLLY_INSTALL_DIR}/folly-config.cmake")
+  find_package(folly REQUIRED)
+  if(TARGET Folly::folly)
+    set_target_properties(Folly::folly PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
+  endif()
+else()
+  add_library(Folly::folly INTERFACE IMPORTED)
+  target_include_directories(Folly::folly INTERFACE
+    ${PROJECT_SOURCE_DIR}/third_party/folly
+    ${PROJECT_SOURCE_DIR}/third_party/folly/_build
+  )
 endif()
 find_package(gflags REQUIRED)
 
-include_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include)
-link_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/lib)
+if(EXISTS "${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include")
+  include_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include)
+  link_directories(${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/lib)
+else()
+  include_directories(
+    ${PROJECT_SOURCE_DIR}/third_party/folly
+    ${PROJECT_SOURCE_DIR}/third_party/folly/_build
+  )
+endif()
 
 set(glog_DIR "${PROJECT_SOURCE_DIR}/third_party/glog/glog-install-fPIC/usr/local/lib/cmake/glog")
 find_package(glog CONFIG REQUIRED)
@@ -235,9 +258,16 @@ include_directories(
 include_directories(
   ${PROJECT_SOURCE_DIR}
 )
-include_directories(
-  ${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include
-)
+if(EXISTS "${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include")
+  include_directories(
+    ${PROJECT_SOURCE_DIR}/third_party/folly/folly-install-fPIC/usr/local/include
+  )
+else()
+  include_directories(
+    ${PROJECT_SOURCE_DIR}/third_party/folly
+    ${PROJECT_SOURCE_DIR}/third_party/folly/_build
+  )
+endif()
 
 
 set(ONEAPI_ROOT /opt/intel/oneapi)
