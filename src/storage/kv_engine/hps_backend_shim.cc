@@ -4,9 +4,10 @@
 
 namespace HugeCTR {
 
-std::string HierParameterServerBase::make_tag_name(const std::string& model_name,
-                                                   const std::string& embedding_table_name,
-                                                   const bool /*check_arguments*/) {
+std::string HierParameterServerBase::make_tag_name(
+    const std::string& model_name,
+    const std::string& embedding_table_name,
+    const bool /*check_arguments*/) {
   std::ostringstream os;
   os << PS_EMBEDDING_TABLE_TAG_PREFIX << '.';
   os << model_name << '.';
@@ -16,4 +17,4 @@ std::string HierParameterServerBase::make_tag_name(const std::string& model_name
 
 HierParameterServerBase::~HierParameterServerBase() = default;
 
-}  // namespace HugeCTR
+} // namespace HugeCTR

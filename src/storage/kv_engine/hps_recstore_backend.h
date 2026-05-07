@@ -35,11 +35,9 @@ struct HpsRecStoreBackendParams : public HugeCTR::VolatileBackendParams {
 
 template <typename Key>
 class HpsRecStoreBackend final
-    : public HugeCTR::
-          VolatileBackend<Key, HpsRecStoreBackendParams> {
+    : public HugeCTR::VolatileBackend<Key, HpsRecStoreBackendParams> {
 public:
-  using Base =
-      HugeCTR::VolatileBackend<Key, HpsRecStoreBackendParams>;
+  using Base = HugeCTR::VolatileBackend<Key, HpsRecStoreBackendParams>;
 
   explicit HpsRecStoreBackend(const HpsRecStoreBackendParams& params)
       : Base(params) {
@@ -112,8 +110,8 @@ public:
     std::vector<base::ConstArray<float>> row_views;
     row_views.reserve(num_pairs);
     for (size_t i = 0; i < num_pairs; ++i) {
-      u64_keys[i] = static_cast<uint64_t>(keys[i]);
-      const char* src = values + i * value_stride;
+      u64_keys[i]         = static_cast<uint64_t>(keys[i]);
+      const char* src     = values + i * value_stride;
       const size_t floats = (value_size + sizeof(float) - 1) / sizeof(float);
       rows[i].assign(floats, 0.0f);
       std::memcpy(rows[i].data(), src, value_size);
@@ -150,7 +148,8 @@ public:
             std::min(value_stride, rows[i].Size() * sizeof(float));
         std::memcpy(values + i * value_stride, rows[i].Data(), bytes);
         if (bytes < value_stride) {
-          std::memset(values + i * value_stride + bytes, 0, value_stride - bytes);
+          std::memset(
+              values + i * value_stride + bytes, 0, value_stride - bytes);
         }
         ++hits;
       } else {
@@ -160,26 +159,28 @@ public:
     return hits;
   }
 
-  size_t fetch(const std::string& table_name,
-               size_t num_indices,
-               const size_t* indices,
-               const Key* keys,
-               char* values,
-               size_t value_stride,
-               const HugeCTR::DatabaseMissCallback& on_miss,
-               const std::chrono::nanoseconds& time_budget) override {
+  size_t
+  fetch(const std::string& table_name,
+        size_t num_indices,
+        const size_t* indices,
+        const Key* keys,
+        char* values,
+        size_t value_stride,
+        const HugeCTR::DatabaseMissCallback& on_miss,
+        const std::chrono::nanoseconds& time_budget) override {
     (void)time_budget;
     size_t hits = 0;
     for (size_t i = 0; i < num_indices; ++i) {
       const size_t index = indices[i];
       const Key key      = keys[index];
-      hits += fetch(table_name,
-                    1,
-                    &key,
-                    values + index * value_stride,
-                    value_stride,
-                    [&](size_t) { on_miss(index); },
-                    std::chrono::nanoseconds::zero());
+      hits += fetch(
+          table_name,
+          1,
+          &key,
+          values + index * value_stride,
+          value_stride,
+          [&](size_t) { on_miss(index); },
+          std::chrono::nanoseconds::zero());
     }
     return hits;
   }

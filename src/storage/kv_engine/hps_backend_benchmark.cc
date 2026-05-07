@@ -134,12 +134,12 @@ std::unique_ptr<HpsBackend> CreateBackend() {
   }
   if (FLAGS_backend == "recstore") {
     recstore::storage::HpsRecStoreBackendParams params;
-    params.path             = FLAGS_path;
-    params.capacity         = static_cast<uint64_t>(FLAGS_record_count);
-    params.value_size       = static_cast<uint32_t>(FLAGS_value_size);
-    params.max_batch_size   = static_cast<size_t>(FLAGS_batch_size);
-    params.num_partitions   = static_cast<size_t>(std::max(1, FLAGS_thread_num));
-    params.index_type       = FLAGS_index_type;
+    params.path           = FLAGS_path;
+    params.capacity       = static_cast<uint64_t>(FLAGS_record_count);
+    params.value_size     = static_cast<uint32_t>(FLAGS_value_size);
+    params.max_batch_size = static_cast<size_t>(FLAGS_batch_size);
+    params.num_partitions = static_cast<size_t>(std::max(1, FLAGS_thread_num));
+    params.index_type     = FLAGS_index_type;
     params.value_store_type = FLAGS_value_store_type;
     params.dram_allocator   = FLAGS_dram_allocator;
     params.dram_capacity_bytes =
@@ -174,22 +174,24 @@ PhaseStats LoadRecords(HpsBackend* backend, int load_threads) {
       base::auto_bind_core();
       std::vector<long long> keys;
       keys.reserve(static_cast<size_t>(FLAGS_batch_size));
-      std::vector<char> values =
-          MakeValues(static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
+      std::vector<char> values = MakeValues(
+          static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
       const uint64_t begin = static_cast<uint64_t>(tid) * per_thread + 1;
-      const uint64_t end = std::min(record_count + 1, begin + per_thread);
+      const uint64_t end   = std::min(record_count + 1, begin + per_thread);
       PhaseStats local;
       for (uint64_t key = begin; key < end;) {
         keys.clear();
-        while (key < end && keys.size() < static_cast<size_t>(FLAGS_batch_size)) {
+        while (key < end &&
+               keys.size() < static_cast<size_t>(FLAGS_batch_size)) {
           keys.push_back(static_cast<long long>(key++));
         }
-        backend->insert(FLAGS_table_name,
-                        keys.size(),
-                        keys.data(),
-                        values.data(),
-                        static_cast<uint32_t>(FLAGS_value_size),
-                        static_cast<size_t>(FLAGS_value_size));
+        backend->insert(
+            FLAGS_table_name,
+            keys.size(),
+            keys.data(),
+            values.data(),
+            static_cast<uint32_t>(FLAGS_value_size),
+            static_cast<size_t>(FLAGS_value_size));
         ++local.batches;
         local.key_ops += keys.size();
       }
@@ -223,13 +225,14 @@ PhaseStats RunTransactions(HpsBackend* backend) {
   for (int tid = 0; tid < FLAGS_thread_num; ++tid) {
     threads.emplace_back([&, tid]() {
       base::auto_bind_core();
-      KeyGenerator key_gen(FLAGS_distribution,
-                           static_cast<uint64_t>(FLAGS_record_count),
-                           FLAGS_zipfian_alpha,
-                           0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(tid));
+      KeyGenerator key_gen(
+          FLAGS_distribution,
+          static_cast<uint64_t>(FLAGS_record_count),
+          FLAGS_zipfian_alpha,
+          0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(tid));
       std::vector<long long> keys(static_cast<size_t>(FLAGS_batch_size));
-      std::vector<char> values =
-          MakeValues(static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
+      std::vector<char> values = MakeValues(
+          static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
       std::vector<char> out(static_cast<size_t>(FLAGS_batch_size) *
                             static_cast<size_t>(FLAGS_value_size));
       PhaseStats local;
@@ -241,24 +244,27 @@ PhaseStats RunTransactions(HpsBackend* backend) {
         }
         const bool do_fetch =
             fetch_only ||
-            (mixed && static_cast<int>(key_gen.NextUint(100)) < FLAGS_read_ratio);
+            (mixed &&
+             static_cast<int>(key_gen.NextUint(100)) < FLAGS_read_ratio);
         if (do_fetch) {
           size_t misses = 0;
-          backend->fetch(FLAGS_table_name,
-                         keys.size(),
-                         keys.data(),
-                         out.data(),
-                         static_cast<size_t>(FLAGS_value_size),
-                         [&](size_t) { ++misses; },
-                         std::chrono::nanoseconds::zero());
+          backend->fetch(
+              FLAGS_table_name,
+              keys.size(),
+              keys.data(),
+              out.data(),
+              static_cast<size_t>(FLAGS_value_size),
+              [&](size_t) { ++misses; },
+              std::chrono::nanoseconds::zero());
           local.misses += misses;
         } else {
-          backend->insert(FLAGS_table_name,
-                          keys.size(),
-                          keys.data(),
-                          values.data(),
-                          static_cast<uint32_t>(FLAGS_value_size),
-                          static_cast<size_t>(FLAGS_value_size));
+          backend->insert(
+              FLAGS_table_name,
+              keys.size(),
+              keys.data(),
+              values.data(),
+              static_cast<uint32_t>(FLAGS_value_size),
+              static_cast<size_t>(FLAGS_value_size));
         }
         ++local.batches;
         local.key_ops += keys.size();

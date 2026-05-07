@@ -11,16 +11,16 @@
 
 namespace {
 
-recstore::storage::HpsRecStoreBackendParams MakeParams(
-    const std::string& path) {
+recstore::storage::HpsRecStoreBackendParams
+MakeParams(const std::string& path) {
   recstore::storage::HpsRecStoreBackendParams params;
-  params.path              = path;
-  params.capacity          = 16;
-  params.value_size        = sizeof(float) * 2;
-  params.num_threads       = 1;
-  params.index_type        = "DRAM_EXTENDIBLE_HASH";
-  params.value_store_type  = "DRAM_VALUE_STORE";
-  params.dram_allocator    = "PERSIST_LOOP_SLAB";
+  params.path                = path;
+  params.capacity            = 16;
+  params.value_size          = sizeof(float) * 2;
+  params.num_threads         = 1;
+  params.index_type          = "DRAM_EXTENDIBLE_HASH";
+  params.value_store_type    = "DRAM_VALUE_STORE";
+  params.dram_allocator      = "PERSIST_LOOP_SLAB";
   params.dram_capacity_bytes = 4096;
   return params;
 }
