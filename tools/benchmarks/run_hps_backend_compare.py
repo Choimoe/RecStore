@@ -21,6 +21,7 @@ class BackendSpec:
 
 BACKEND_ALIASES: dict[str, BackendSpec] = {
     "hps_hash_map": BackendSpec("hps_hash_map", "", ""),
+    "hps_rocksdb": BackendSpec("hps_rocksdb", "", ""),
     "dram_eh_dram": BackendSpec("recstore", "DRAM_EXTENDIBLE_HASH", "DRAM_VALUE_STORE"),
     "dram_map_dram": BackendSpec("recstore", "DRAM_UNORDERED_MAP", "DRAM_VALUE_STORE"),
     "dram_pet_dram": BackendSpec("recstore", "DRAM_PET_HASH", "DRAM_VALUE_STORE"),
@@ -61,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--backends",
         nargs="+",
-        default=["hps_hash_map", "dram_eh_dram", "dram_map_dram", "dram_pet_dram"],
+        default=["hps_hash_map", "hps_rocksdb", "dram_eh_dram", "dram_map_dram", "dram_pet_dram"],
     )
     parser.add_argument("--mode", choices=["fetch", "insert", "mixed"], default="fetch")
     parser.add_argument("--read-ratio", type=int, default=100)
