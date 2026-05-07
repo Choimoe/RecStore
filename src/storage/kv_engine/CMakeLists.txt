@@ -36,5 +36,25 @@ add_executable(benchmark_kv_engine benchmark_kv_engine.cc)
 target_link_libraries(benchmark_kv_engine PUBLIC pthread base kv_engine ps_common)
 target_link_libraries(benchmark_kv_engine PUBLIC OpenMP::OpenMP_CXX)
 
+add_executable(hps_backend_benchmark
+  hps_backend_benchmark.cc
+  hps_backend_shim.cc
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/thread_pool.cpp
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/database_backend.cpp
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/hash_map_backend.cpp
+)
+target_include_directories(hps_backend_benchmark PRIVATE
+  ${PROJECT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/parallel-hashmap
+  ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include
+  ${CUDA_TOOLKIT_INCLUDE}
+)
+target_link_libraries(hps_backend_benchmark PUBLIC pthread base kv_engine ps_common TBB::tbb)
+target_link_libraries(hps_backend_benchmark PUBLIC OpenMP::OpenMP_CXX)
+
 add_executable(bench benchmark_zipf.cc)
 target_link_libraries(bench PUBLIC pthread base kv_engine)

@@ -1,4 +1,6 @@
-find_package(folly REQUIRED)
+if(NOT TARGET Folly::folly)
+    find_package(folly REQUIRED)
+endif()
 find_package(ZLIB REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -127,6 +129,33 @@ target_link_libraries(test_kvengine PUBLIC
     TBB::tbb
 )
 add_test(NAME test_kvengine COMMAND test_kvengine)
+
+add_executable(test_hps_recstore_backend
+    test_hps_recstore_backend.cpp
+    ${PROJECT_SOURCE_DIR}/src/storage/kv_engine/hps_backend_shim.cc
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/database_backend.cpp
+)
+target_include_directories(test_hps_recstore_backend PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/parallel-hashmap
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include
+    ${CUDA_TOOLKIT_INCLUDE}
+)
+target_link_libraries(test_hps_recstore_backend PUBLIC
+    base
+    base_memory
+    ps_common
+    kv_engine
+    gtest
+    gtest_main
+    pthread
+    TBB::tbb
+)
+add_test(NAME test_hps_recstore_backend COMMAND test_hps_recstore_backend)
 
 add_executable(test_index test_index.cpp)
 target_link_libraries(test_index PUBLIC
