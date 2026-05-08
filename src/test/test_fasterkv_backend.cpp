@@ -1,4 +1,4 @@
-#include "storage/external/fasterps/fasterkv_backend.h"
+#include "storage/external/fasterkv/fasterkv_backend.h"
 
 #include <string>
 #include <vector>
@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 
 TEST(FasterKVBackendTest, InsertThenFetchReturnsFixedWidthValuesAndMisses) {
-  recstore::storage::fasterps::FasterKVBackend backend(128, 4);
+  recstore::storage::fasterkv::FasterKVBackend backend(128, 4);
 
   const long long keys[] = {11, 22, 33};
   const std::vector<char> values = {
@@ -41,7 +41,7 @@ TEST(FasterKVBackendTest, InsertThenFetchReturnsFixedWidthValuesAndMisses) {
 }
 
 TEST(FasterKVBackendTest, InsertCanOverwriteExistingFixedWidthValue) {
-  recstore::storage::fasterps::FasterKVBackend backend(128, 4);
+  recstore::storage::fasterkv::FasterKVBackend backend(128, 4);
 
   const long long key = 7;
   const char old_value[] = {'o', 'l', 'd', '0'};

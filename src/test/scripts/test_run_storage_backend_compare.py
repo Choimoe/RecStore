@@ -101,6 +101,8 @@ class TestRunStorageBackendCompare(unittest.TestCase):
         self.assertIn("--thread_num=32", cmd)
         self.assertIn("--load_thread_num=1", cmd)
         self.assertIn("--hps_rocksdb_thread_num=1", cmd)
+        self.assertIn("--ssd_io_backend=IOURING", cmd)
+        self.assertIn("--ssd_queue_depth=512", cmd)
 
     def test_merge_rows_preserves_common_fields(self):
         merged = merge_rows(

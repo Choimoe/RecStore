@@ -5,7 +5,7 @@
 #include <functional>
 #include <memory>
 
-namespace recstore::storage::fasterps {
+namespace recstore::storage::fasterkv {
 
 class FasterKVBackend {
 public:
@@ -29,4 +29,4 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-} // namespace recstore::storage::fasterps
+} // namespace recstore::storage::fasterkv

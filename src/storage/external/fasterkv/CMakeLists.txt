@@ -19,21 +19,21 @@ if(EXISTS "${RECSTORE_FASTER_DIR}/src/CMakeLists.txt" AND NOT TARGET faster)
 endif()
 
 if(TARGET faster)
-  add_library(fasterps_backend STATIC
+  add_library(fasterkv_backend STATIC
     fasterkv_backend.cc
   )
-  target_include_directories(fasterps_backend PUBLIC
+  target_include_directories(fasterkv_backend PUBLIC
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/src
     ${RECSTORE_FASTER_DIR}/src
   )
-  target_link_libraries(fasterps_backend PUBLIC
+  target_link_libraries(fasterkv_backend PUBLIC
     faster
     TBB::tbb
     pthread
   )
 else()
   message(STATUS
-    "Skipping fasterps_backend: third_party/faster/cc is unavailable."
+    "Skipping fasterkv_backend: third_party/faster/cc is unavailable."
   )
 endif()

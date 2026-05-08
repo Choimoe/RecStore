@@ -11,5 +11,5 @@ add_subdirectory(hybrid)
 
 # 保持最后
 add_subdirectory(kv_engine)
-add_subdirectory(external/fasterps)
+add_subdirectory(external/fasterkv)
 add_subdirectory(external/hps)

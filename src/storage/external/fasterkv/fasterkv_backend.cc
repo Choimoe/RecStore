@@ -1,4 +1,4 @@
-#include "storage/external/fasterps/fasterkv_backend.h"
+#include "storage/external/fasterkv/fasterkv_backend.h"
 
 #include <algorithm>
 #include <atomic>
@@ -14,7 +14,7 @@
 #include "core/status.h"
 #include "device/null_disk.h"
 
-namespace recstore::storage::fasterps {
+namespace recstore::storage::fasterkv {
 namespace {
 
 using FASTER::core::CallbackContext;
@@ -446,4 +446,4 @@ void FasterKVBackend::Fetch(size_t num_keys,
   impl_->Fetch(num_keys, keys, values, on_miss);
 }
 
-} // namespace recstore::storage::fasterps
+} // namespace recstore::storage::fasterkv

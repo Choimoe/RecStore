@@ -16,9 +16,9 @@
 #include "base/bind_core.h"
 #include "base/init.h"
 #include "base/log.h"
-#include "storage/external/fasterps/fasterkv_backend.h"
-#include "storage/external/hps/hps_recstore_backend.h"
-#include "storage/external/hps/raw_rocksdb_backend.h"
+#include "storage/external/fasterkv/fasterkv_backend.h"
+#include "storage/external/hps/hps_recstore.h"
+#include "storage/external/hps/raw_rocksdb.h"
 #include "third_party/HugeCTR/HugeCTR/include/hps/hash_map_backend.hpp"
 #include "third_party/HugeCTR/HugeCTR/include/hps/rocksdb_backend.hpp"
 
@@ -31,6 +31,10 @@ DEFINE_string(index_type, "DRAM_EXTENDIBLE_HASH", "RecStore index.type");
 DEFINE_string(value_store_type, "DRAM_VALUE_STORE", "RecStore value.type");
 DEFINE_string(dram_allocator, "PERSIST_LOOP_SLAB", "RecStore DRAM allocator");
 DEFINE_int64(dram_capacity_bytes, 0, "override RecStore DRAM capacity bytes");
+DEFINE_string(ssd_io_backend, "IOURING", "RecStore SSD IO backend");
+DEFINE_string(ssd_value_file, "", "RecStore SSD value file");
+DEFINE_int32(ssd_queue_depth, 512, "RecStore SSD IO queue depth");
+DEFINE_int64(ssd_capacity_bytes, 0, "override RecStore SSD capacity bytes");
 DEFINE_int64(record_count, 1000000, "record count");
 DEFINE_int32(value_size, 512, "value size bytes");
 DEFINE_int32(batch_size, 1024, "keys per HPS fetch/insert call");
@@ -160,6 +164,8 @@ public:
   explicit HpsBenchmarkBackend(std::unique_ptr<HpsBackend> backend)
       : backend_(std::move(backend)) {}
 
+  HpsBackend* raw() { return backend_.get(); }
+
   void Insert(const std::string& table_name,
               size_t num_keys,
               const long long* keys,
@@ -175,13 +181,14 @@ public:
              char* values,
              size_t value_size,
              const std::function<void(size_t)>& on_miss) override {
-    backend_->fetch(table_name,
-                    num_keys,
-                    keys,
-                    values,
-                    value_size,
-                    on_miss,
-                    std::chrono::nanoseconds::zero());
+    backend_->fetch(
+        table_name,
+        num_keys,
+        keys,
+        values,
+        value_size,
+        on_miss,
+        std::chrono::nanoseconds::zero());
   }
 
 private:
@@ -252,12 +259,14 @@ public:
   }
 
 private:
-  recstore::storage::fasterps::FasterKVBackend backend_;
+  recstore::storage::fasterkv::FasterKVBackend backend_;
 };
 
 const std::string& EffectiveTableName() {
   static const std::string kRocksDbDefaultTable = "default";
-  return FLAGS_backend == "hps_rocksdb" ? kRocksDbDefaultTable : FLAGS_table_name;
+  return FLAGS_backend == "hps_rocksdb"
+           ? kRocksDbDefaultTable
+           : FLAGS_table_name;
 }
 
 std::unique_ptr<HpsBackend> CreateBackend() {
@@ -273,25 +282,33 @@ std::unique_ptr<HpsBackend> CreateBackend() {
     params.path           = FLAGS_path;
     params.max_batch_size = static_cast<size_t>(FLAGS_batch_size);
     const int rocksdb_threads =
-        FLAGS_hps_rocksdb_thread_num > 0 ? FLAGS_hps_rocksdb_thread_num
-                                         : FLAGS_thread_num;
+        FLAGS_hps_rocksdb_thread_num > 0
+            ? FLAGS_hps_rocksdb_thread_num
+            : FLAGS_thread_num;
     params.num_threads = static_cast<size_t>(std::max(1, rocksdb_threads));
     return std::make_unique<HugeCTR::RocksDBBackend<long long>>(params);
   }
   if (FLAGS_backend == "recstore") {
     recstore::storage::HpsRecStoreBackendParams params;
-    params.path             = FLAGS_path;
-    params.capacity         = static_cast<uint64_t>(FLAGS_record_count);
-    params.value_size       = static_cast<uint32_t>(FLAGS_value_size);
-    params.max_batch_size   = static_cast<size_t>(FLAGS_batch_size);
-    params.num_partitions   = static_cast<size_t>(std::max(1, FLAGS_thread_num));
-    params.index_type       = FLAGS_index_type;
+    params.path           = FLAGS_path;
+    params.capacity       = static_cast<uint64_t>(FLAGS_record_count);
+    params.value_size     = static_cast<uint32_t>(FLAGS_value_size);
+    params.max_batch_size = static_cast<size_t>(FLAGS_batch_size);
+    params.num_partitions = static_cast<size_t>(std::max(1, FLAGS_thread_num));
+    params.index_type     = FLAGS_index_type;
     params.value_store_type = FLAGS_value_store_type;
     params.dram_allocator   = FLAGS_dram_allocator;
     params.dram_capacity_bytes =
         FLAGS_dram_capacity_bytes > 0
             ? static_cast<uint64_t>(FLAGS_dram_capacity_bytes)
             : 0;
+    params.ssd_capacity_bytes =
+        FLAGS_ssd_capacity_bytes > 0
+            ? static_cast<uint64_t>(FLAGS_ssd_capacity_bytes)
+            : 0;
+    params.ssd_io_backend  = FLAGS_ssd_io_backend;
+    params.ssd_value_file  = FLAGS_ssd_value_file;
+    params.ssd_queue_depth = FLAGS_ssd_queue_depth;
     params.num_threads = FLAGS_thread_num;
     return std::make_unique<recstore::storage::HpsRecStoreBackend<long long>>(
         params);
@@ -335,22 +352,24 @@ PhaseStats LoadRecords(BenchmarkBackend* backend, int load_threads) {
       base::auto_bind_core();
       std::vector<long long> keys;
       keys.reserve(static_cast<size_t>(FLAGS_batch_size));
-      std::vector<char> values =
-          MakeValues(static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
+      std::vector<char> values = MakeValues(
+          static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
       const uint64_t begin = static_cast<uint64_t>(tid) * per_thread + 1;
-      const uint64_t end = std::min(record_count + 1, begin + per_thread);
+      const uint64_t end   = std::min(record_count + 1, begin + per_thread);
       PhaseStats local;
       for (uint64_t key = begin; key < end;) {
         keys.clear();
-        while (key < end && keys.size() < static_cast<size_t>(FLAGS_batch_size)) {
+        while (key < end &&
+               keys.size() < static_cast<size_t>(FLAGS_batch_size)) {
           keys.push_back(static_cast<long long>(key++));
         }
-        backend->Insert(EffectiveTableName(),
-                        keys.size(),
-                        keys.data(),
-                        values.data(),
-                        static_cast<uint32_t>(FLAGS_value_size),
-                        static_cast<size_t>(FLAGS_value_size));
+        backend->Insert(
+            EffectiveTableName(),
+            keys.size(),
+            keys.data(),
+            values.data(),
+            static_cast<uint32_t>(FLAGS_value_size),
+            static_cast<size_t>(FLAGS_value_size));
         ++local.batches;
         local.key_ops += keys.size();
       }
@@ -378,18 +397,19 @@ void PrepareBackendForLoad(BenchmarkBackend* backend) {
   const long long key = 1;
   std::vector<char> value =
       MakeValues(1, static_cast<size_t>(FLAGS_value_size), 0);
-  backend->Insert(EffectiveTableName(),
-                  1,
-                  &key,
-                  value.data(),
-                  static_cast<uint32_t>(FLAGS_value_size),
-                  static_cast<size_t>(FLAGS_value_size));
+  backend->Insert(
+      EffectiveTableName(),
+      1,
+      &key,
+      value.data(),
+      static_cast<uint32_t>(FLAGS_value_size),
+      static_cast<size_t>(FLAGS_value_size));
 }
 
 PhaseStats RunTransactions(BenchmarkBackend* backend) {
-  const bool fetch_only  = FLAGS_mode == "fetch";
-  const bool insert_only = FLAGS_mode == "insert";
-  const bool mixed       = FLAGS_mode == "mixed";
+  const bool fetch_only   = FLAGS_mode == "fetch";
+  const bool insert_only  = FLAGS_mode == "insert";
+  const bool mixed        = FLAGS_mode == "mixed";
   const bool fetch_insert = FLAGS_mode == "fetch_insert";
   if (!fetch_only && !insert_only && !mixed && !fetch_insert) {
     throw std::invalid_argument("mode must be fetch|insert|mixed|fetch_insert");
@@ -403,13 +423,14 @@ PhaseStats RunTransactions(BenchmarkBackend* backend) {
   for (int tid = 0; tid < FLAGS_thread_num; ++tid) {
     threads.emplace_back([&, tid]() {
       base::auto_bind_core();
-      KeyGenerator key_gen(FLAGS_distribution,
-                           static_cast<uint64_t>(FLAGS_record_count),
-                           FLAGS_zipfian_alpha,
-                           0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(tid));
+      KeyGenerator key_gen(
+          FLAGS_distribution,
+          static_cast<uint64_t>(FLAGS_record_count),
+          FLAGS_zipfian_alpha,
+          0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(tid));
       std::vector<long long> keys(static_cast<size_t>(FLAGS_batch_size));
-      std::vector<char> values =
-          MakeValues(static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
+      std::vector<char> values = MakeValues(
+          static_cast<size_t>(FLAGS_batch_size), FLAGS_value_size, tid);
       std::vector<char> out(static_cast<size_t>(FLAGS_batch_size) *
                             static_cast<size_t>(FLAGS_value_size));
       PhaseStats local;
@@ -421,24 +442,27 @@ PhaseStats RunTransactions(BenchmarkBackend* backend) {
         }
         const bool do_fetch =
             fetch_only || fetch_insert ||
-            (mixed && static_cast<int>(key_gen.NextUint(100)) < FLAGS_read_ratio);
+            (mixed &&
+             static_cast<int>(key_gen.NextUint(100)) < FLAGS_read_ratio);
         if (do_fetch) {
           size_t misses = 0;
-          backend->Fetch(EffectiveTableName(),
-                        keys.size(),
-                        keys.data(),
-                        out.data(),
-                        static_cast<size_t>(FLAGS_value_size),
-                        [&](size_t) { ++misses; });
+          backend->Fetch(
+              EffectiveTableName(),
+              keys.size(),
+              keys.data(),
+              out.data(),
+              static_cast<size_t>(FLAGS_value_size),
+              [&](size_t) { ++misses; });
           local.misses += misses;
         }
         if (insert_only || fetch_insert || (mixed && !do_fetch)) {
-          backend->Insert(EffectiveTableName(),
-                          keys.size(),
-                          keys.data(),
-                          values.data(),
-                          static_cast<uint32_t>(FLAGS_value_size),
-                          static_cast<size_t>(FLAGS_value_size));
+          backend->Insert(
+              EffectiveTableName(),
+              keys.size(),
+              keys.data(),
+              values.data(),
+              static_cast<uint32_t>(FLAGS_value_size),
+              static_cast<size_t>(FLAGS_value_size));
         }
         ++local.batches;
         local.key_ops += keys.size();
@@ -475,7 +499,7 @@ void PrintResult(const char* phase, const PhaseStats& stats, double seconds) {
   const double key_ops_sec =
       seconds > 0.0 ? static_cast<double>(stats.key_ops) / seconds : 0.0;
   std::printf(
-      "HPS_BACKEND_RESULT phase=%s backend=%s index_type=%s "
+      "BACKEND_BENCHMARK_RESULT phase=%s backend=%s index_type=%s "
       "value_store_type=%s mode=%s distribution=%s zipfian_alpha=%.6f "
       "threads=%d batch_size=%d records=%ld runtime_s=%.6f batches=%lu "
       "key_ops=%lu misses=%lu throughput_batches_sec=%.6f "
@@ -509,8 +533,8 @@ int main(int argc, char** argv) {
   CHECK_GT(FLAGS_running_seconds, 0);
   if (FLAGS_backend == "recstore" || FLAGS_backend == "hps_rocksdb" ||
       FLAGS_backend == "raw_rocksdb" || FLAGS_backend == "raw_rocksdb_memenv") {
-    CHECK(!FLAGS_path.empty()) << "--path is required for " << FLAGS_backend
-                               << " backend";
+    CHECK(!FLAGS_path.empty())
+        << "--path is required for " << FLAGS_backend << " backend";
   }
 
   const int load_threads =

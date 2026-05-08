@@ -1,4 +1,4 @@
-#include "storage/external/hps/raw_rocksdb_backend.h"
+#include "storage/external/hps/raw_rocksdb.h"
 
 #include <filesystem>
 #include <string>

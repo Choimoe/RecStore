@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-BENCHMARK_BIN = ROOT / "build/bin/hps_backend_benchmark"
+BENCHMARK_BIN = ROOT / "build/bin/backend_benchmark"
 
 
 @dataclass(frozen=True)
@@ -24,8 +24,11 @@ BACKEND_ALIASES: dict[str, BackendSpec] = {
     "hps_hash_map": BackendSpec("hps_hash_map", "", ""),
     "hps_rocksdb": BackendSpec("hps_rocksdb", "", ""),
     "dram_eh_dram": BackendSpec("recstore", "DRAM_EXTENDIBLE_HASH", "DRAM_VALUE_STORE"),
+    "dram_eh_ssd": BackendSpec("recstore", "DRAM_EXTENDIBLE_HASH", "SSD_VALUE_STORE"),
+    "dram_eh_tiered": BackendSpec("recstore", "DRAM_EXTENDIBLE_HASH", "TIERED_VALUE_STORE"),
     "dram_map_dram": BackendSpec("recstore", "DRAM_UNORDERED_MAP", "DRAM_VALUE_STORE"),
     "dram_pet_dram": BackendSpec("recstore", "DRAM_PET_HASH", "DRAM_VALUE_STORE"),
+    "dram_pet_ssd": BackendSpec("recstore", "DRAM_PET_HASH", "SSD_VALUE_STORE"),
 }
 
 SUMMARY_FIELDS = [
@@ -98,6 +101,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--dram-allocator", default="PERSIST_LOOP_SLAB")
     parser.add_argument("--dram-capacity-bytes", type=int, default=0)
+    parser.add_argument("--ssd-io-backend", default="IOURING")
+    parser.add_argument("--ssd-queue-depth", type=int, default=512)
+    parser.add_argument("--ssd-capacity-bytes", type=int, default=0)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--keep-data", action="store_true")
     parser.add_argument("--extra-arg", action="append", default=[])
@@ -113,7 +119,7 @@ def ensure_build(build_jobs: int) -> None:
             "--build",
             "build",
             "--target",
-            "hps_backend_benchmark",
+            "backend_benchmark",
             "--",
             f"-j{build_jobs}",
         ],
@@ -134,6 +140,9 @@ def command_for(alias: str, spec: BackendSpec, data_path: Path, args: argparse.N
     load_threads = args.load_threads
     if alias == "hps_rocksdb" and load_threads == 0:
         load_threads = args.hps_rocksdb_load_threads
+    ssd_io_backend = getattr(args, "ssd_io_backend", "IOURING")
+    ssd_queue_depth = getattr(args, "ssd_queue_depth", 512)
+    ssd_capacity_bytes = getattr(args, "ssd_capacity_bytes", 0)
     cmd = [
         str(BENCHMARK_BIN),
         gflag("backend", spec.backend),
@@ -149,6 +158,8 @@ def command_for(alias: str, spec: BackendSpec, data_path: Path, args: argparse.N
         gflag("distribution", args.distribution),
         gflag("zipfian_alpha", args.zipfian_alpha),
         gflag("dram_allocator", args.dram_allocator),
+        gflag("ssd_io_backend", ssd_io_backend),
+        gflag("ssd_queue_depth", ssd_queue_depth),
     ]
     if spec.index_type:
         cmd.append(gflag("index_type", spec.index_type))
@@ -158,6 +169,8 @@ def command_for(alias: str, spec: BackendSpec, data_path: Path, args: argparse.N
         cmd.append(gflag("hps_rocksdb_thread_num", args.hps_rocksdb_db_threads))
     if args.dram_capacity_bytes:
         cmd.append(gflag("dram_capacity_bytes", args.dram_capacity_bytes))
+    if ssd_capacity_bytes:
+        cmd.append(gflag("ssd_capacity_bytes", ssd_capacity_bytes))
     cmd.extend(args.extra_arg)
     return cmd
 
@@ -174,7 +187,7 @@ def parse_result_line(line: str) -> dict[str, str]:
 def extract_results(output: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for line in output.splitlines():
-        if line.startswith("HPS_BACKEND_RESULT "):
+        if line.startswith("BACKEND_BENCHMARK_RESULT "):
             rows.append(parse_result_line(line))
     return rows
 

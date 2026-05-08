@@ -133,7 +133,7 @@ add_test(NAME test_kvengine COMMAND test_kvengine)
 if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     add_executable(test_hps_recstore_backend
         test_hps_recstore_backend.cpp
-        ${PROJECT_SOURCE_DIR}/src/storage/external/hps/hps_backend_shim.cc
+        ${PROJECT_SOURCE_DIR}/src/storage/external/hps/hps_shim.cc
         ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
         ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/database_backend.cpp
     )
@@ -166,7 +166,7 @@ endif()
 if(TARGET rocksdb-shared)
     add_executable(test_raw_rocksdb_backend
         test_raw_rocksdb_backend.cpp
-        ${PROJECT_SOURCE_DIR}/src/storage/external/hps/raw_rocksdb_backend.cc
+        ${PROJECT_SOURCE_DIR}/src/storage/external/hps/raw_rocksdb.cc
     )
     target_include_directories(test_raw_rocksdb_backend PRIVATE
         ${PROJECT_SOURCE_DIR}
@@ -184,7 +184,7 @@ else()
     message(STATUS "Skipping test_raw_rocksdb_backend: rocksdb-shared target is unavailable.")
 endif()
 
-if(TARGET fasterps_backend)
+if(TARGET fasterkv_backend)
     add_executable(test_fasterkv_backend
         test_fasterkv_backend.cpp
     )
@@ -193,7 +193,7 @@ if(TARGET fasterps_backend)
         ${PROJECT_SOURCE_DIR}/src
     )
     target_link_libraries(test_fasterkv_backend PUBLIC
-        fasterps_backend
+        fasterkv_backend
         gtest
         gtest_main
         pthread
@@ -201,7 +201,7 @@ if(TARGET fasterps_backend)
     add_test(NAME test_fasterkv_backend COMMAND test_fasterkv_backend)
 else()
     message(STATUS
-        "Skipping test_fasterkv_backend: fasterps_backend target is unavailable."
+        "Skipping test_fasterkv_backend: fasterkv_backend target is unavailable."
     )
 endif()
 

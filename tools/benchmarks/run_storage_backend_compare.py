@@ -91,6 +91,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--dram-allocator", default="PERSIST_LOOP_SLAB")
     parser.add_argument("--dram-capacity-bytes", type=int, default=0)
+    parser.add_argument("--ssd-io-backend", default="IOURING")
+    parser.add_argument("--ssd-queue-depth", type=int, default=512)
+    parser.add_argument("--ssd-capacity-bytes", type=int, default=0)
     parser.add_argument("--hierkv-binary", type=Path, default=HIERKV_BIN)
     parser.add_argument(
         "--hierkv-max-hbm-for-vectors",
@@ -106,7 +109,7 @@ def parse_args() -> argparse.Namespace:
 
 def ensure_build() -> None:
     subprocess.run(
-        ["cmake", "--build", "build", "--target", "hps_backend_benchmark", "-j"],
+        ["cmake", "--build", "build", "--target", "backend_benchmark", "-j"],
         cwd=ROOT,
         check=True,
     )

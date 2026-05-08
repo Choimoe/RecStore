@@ -7,6 +7,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -30,6 +31,10 @@ struct HpsRecStoreBackendParams : public HugeCTR::VolatileBackendParams {
   uint64_t capacity{0};
   uint32_t value_size{0};
   uint64_t dram_capacity_bytes{0};
+  uint64_t ssd_capacity_bytes{0};
+  std::string ssd_io_backend{"IOURING"};
+  std::string ssd_value_file;
+  int ssd_queue_depth{512};
   int num_threads{1};
 };
 
@@ -55,16 +60,44 @@ public:
         params.dram_capacity_bytes > 0
             ? params.dram_capacity_bytes
             : std::max<uint64_t>(1, params.capacity) * value_size * 6 / 5;
+    const uint64_t ssd_slot_size = SsdSlotSize(value_size);
+    const uint64_t ssd_capacity =
+        params.ssd_capacity_bytes > 0
+            ? params.ssd_capacity_bytes
+            : std::max<uint64_t>(1, params.capacity) * ssd_slot_size * 6 / 5;
+    const std::string ssd_value_file =
+        params.ssd_value_file.empty() ? params.path + "_value.db"
+                                      : params.ssd_value_file;
     cfg.json_config_ = {
         {"path", params.path},
         {"capacity", params.capacity},
         {"index", {{"type", params.index_type}}},
         {"value",
          {{"type", params.value_store_type},
-          {"default_value_size_hint", value_size},
-          {"dram_allocator",
-           {{"type", params.dram_allocator},
-            {"capacity_bytes", dram_capacity}}}}}};
+          {"default_value_size_hint", value_size}}}};
+
+    auto& value_config = cfg.json_config_["value"];
+    if (params.value_store_type == "DRAM_VALUE_STORE" ||
+        params.value_store_type == "TIERED_VALUE_STORE") {
+      value_config["dram_allocator"] = {
+          {"type", params.dram_allocator}, {"capacity_bytes", dram_capacity}};
+    }
+    if (params.value_store_type == "SSD_VALUE_STORE" ||
+        params.value_store_type == "TIERED_VALUE_STORE") {
+      value_config["ssd_allocator"] = {
+          {"type", "SSD_BUDDY"},
+          {"capacity_bytes", ssd_capacity},
+          {"min_block_size", 128},
+          {"max_block_size", 4096},
+          {"io",
+           {{"type", params.ssd_io_backend},
+            {"file_path", ssd_value_file},
+            {"queue_depth", params.ssd_queue_depth},
+            {"base_offset_bytes", 4096}}}};
+    }
+    if (params.value_store_type == "TIERED_VALUE_STORE") {
+      value_config["tiering"] = {{"cache_policy", "LRU"}};
+    }
 
     auto resolved = base::ResolveEngine(cfg);
     kv_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
@@ -226,6 +259,19 @@ public:
 #endif
 
 private:
+  static uint64_t SsdSlotSize(uint64_t value_size) {
+    const uint64_t needed = value_size + 8;
+    uint64_t slot         = 128;
+    while (slot < needed && slot < 4096) {
+      slot <<= 1;
+    }
+    if (slot < needed) {
+      throw std::invalid_argument(
+          "HpsRecStoreBackend SSD value_size exceeds max SSD block size");
+    }
+    return slot;
+  }
+
   std::unique_ptr<BaseKV> kv_;
   mutable std::mutex table_sizes_mu_;
   std::unordered_map<std::string, size_t> table_sizes_;
