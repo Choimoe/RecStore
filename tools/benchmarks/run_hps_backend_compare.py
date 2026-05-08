@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import shutil
 import subprocess
@@ -59,6 +60,7 @@ def parse_args() -> argparse.Namespace:
         description="Compare HugeCTR HPS native DB backend with RecStore BaseKV backends."
     )
     parser.add_argument("--build", action="store_true")
+    parser.add_argument("--build-jobs", type=int, default=os.cpu_count() or 1)
     parser.add_argument(
         "--backends",
         nargs="+",
@@ -83,9 +85,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def ensure_build() -> None:
+def ensure_build(build_jobs: int) -> None:
+    if build_jobs <= 0:
+        raise ValueError("--build-jobs must be greater than zero")
     subprocess.run(
-        ["cmake", "--build", "build", "--target", "hps_backend_benchmark", "-j"],
+        [
+            "cmake",
+            "--build",
+            "build",
+            "--target",
+            "hps_backend_benchmark",
+            "--",
+            f"-j{build_jobs}",
+        ],
         cwd=ROOT,
         check=True,
     )
@@ -220,7 +232,7 @@ def write_summary(path: Path, rows: list[dict[str, object]]) -> None:
 def main() -> int:
     args = parse_args()
     if args.build:
-        ensure_build()
+        ensure_build(args.build_jobs)
     if not BENCHMARK_BIN.exists():
         raise FileNotFoundError(f"{BENCHMARK_BIN} does not exist")
     rows: list[dict[str, object]] = []
