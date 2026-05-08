@@ -163,6 +163,27 @@ else()
     )
 endif()
 
+if(TARGET rocksdb-shared)
+    add_executable(test_raw_rocksdb_backend
+        test_raw_rocksdb_backend.cpp
+        ${PROJECT_SOURCE_DIR}/src/storage/external/hps/raw_rocksdb_backend.cc
+    )
+    target_include_directories(test_raw_rocksdb_backend PRIVATE
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include
+    )
+    target_link_libraries(test_raw_rocksdb_backend PUBLIC
+        rocksdb-shared
+        gtest
+        gtest_main
+        pthread
+    )
+    add_test(NAME test_raw_rocksdb_backend COMMAND test_raw_rocksdb_backend)
+else()
+    message(STATUS "Skipping test_raw_rocksdb_backend: rocksdb-shared target is unavailable.")
+endif()
+
 add_executable(test_index test_index.cpp)
 target_link_libraries(test_index PUBLIC
     extendible_hash 

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -16,10 +17,14 @@
 #include "base/init.h"
 #include "base/log.h"
 #include "storage/external/hps/hps_recstore_backend.h"
+#include "storage/external/hps/raw_rocksdb_backend.h"
 #include "third_party/HugeCTR/HugeCTR/include/hps/hash_map_backend.hpp"
 #include "third_party/HugeCTR/HugeCTR/include/hps/rocksdb_backend.hpp"
 
-DEFINE_string(backend, "hps_hash_map", "hps_hash_map|hps_rocksdb|recstore");
+DEFINE_string(backend,
+              "hps_hash_map",
+              "hps_hash_map|hps_rocksdb|raw_rocksdb|raw_rocksdb_memenv|"
+              "recstore");
 DEFINE_string(path, "", "RecStore data path");
 DEFINE_string(index_type, "DRAM_EXTENDIBLE_HASH", "RecStore index.type");
 DEFINE_string(value_store_type, "DRAM_VALUE_STORE", "RecStore value.type");
@@ -128,6 +133,94 @@ private:
 
 using HpsBackend = HugeCTR::DatabaseBackendBase<long long>;
 
+class BenchmarkBackend {
+public:
+  virtual ~BenchmarkBackend() = default;
+
+  virtual void
+  Insert(const std::string& table_name,
+         size_t num_keys,
+         const long long* keys,
+         const char* values,
+         uint32_t value_size,
+         size_t stride) = 0;
+
+  virtual void
+  Fetch(const std::string& table_name,
+        size_t num_keys,
+        const long long* keys,
+        char* values,
+        size_t value_size,
+        const std::function<void(size_t)>& on_miss) = 0;
+};
+
+class HpsBenchmarkBackend : public BenchmarkBackend {
+public:
+  explicit HpsBenchmarkBackend(std::unique_ptr<HpsBackend> backend)
+      : backend_(std::move(backend)) {}
+
+  void Insert(const std::string& table_name,
+              size_t num_keys,
+              const long long* keys,
+              const char* values,
+              uint32_t value_size,
+              size_t stride) override {
+    backend_->insert(table_name, num_keys, keys, values, value_size, stride);
+  }
+
+  void Fetch(const std::string& table_name,
+             size_t num_keys,
+             const long long* keys,
+             char* values,
+             size_t value_size,
+             const std::function<void(size_t)>& on_miss) override {
+    backend_->fetch(table_name,
+                    num_keys,
+                    keys,
+                    values,
+                    value_size,
+                    on_miss,
+                    std::chrono::nanoseconds::zero());
+  }
+
+private:
+  std::unique_ptr<HpsBackend> backend_;
+};
+
+class RawRocksDBBenchmarkBackend : public BenchmarkBackend {
+public:
+  RawRocksDBBenchmarkBackend(
+      const std::string& path, size_t value_size, bool use_mem_env)
+      : backend_(path, value_size, use_mem_env) {}
+
+  void Insert(const std::string& table_name,
+              size_t num_keys,
+              const long long* keys,
+              const char* values,
+              uint32_t value_size,
+              size_t stride) override {
+    (void)table_name;
+    if (value_size != stride) {
+      throw std::invalid_argument("raw_rocksdb requires value_size == stride");
+    }
+    backend_.Insert(num_keys, keys, values);
+  }
+
+  void Fetch(const std::string& table_name,
+             size_t num_keys,
+             const long long* keys,
+             char* values,
+             size_t value_size,
+             const std::function<void(size_t)>& on_miss) override {
+    (void)table_name;
+    (void)value_size;
+    backend_.Fetch(num_keys, keys, values, on_miss);
+  }
+
+private:
+  recstore::storage::RawRocksDBBackend backend_;
+};
+
 const std::string& EffectiveTableName() {
   static const std::string kRocksDbDefaultTable = "default";
   return FLAGS_backend == "hps_rocksdb" ? kRocksDbDefaultTable : FLAGS_table_name;
@@ -172,6 +265,16 @@ std::unique_ptr<HpsBackend> CreateBackend() {
   throw std::invalid_argument("unsupported backend: " + FLAGS_backend);
 }
 
+std::unique_ptr<BenchmarkBackend> CreateBenchmarkBackend() {
+  if (FLAGS_backend == "raw_rocksdb" || FLAGS_backend == "raw_rocksdb_memenv") {
+    return std::make_unique<RawRocksDBBenchmarkBackend>(
+        FLAGS_path,
+        static_cast<size_t>(FLAGS_value_size),
+        FLAGS_backend == "raw_rocksdb_memenv");
+  }
+  return std::make_unique<HpsBenchmarkBackend>(CreateBackend());
+}
+
 std::vector<char> MakeValues(size_t rows, size_t value_size, int seed) {
   std::vector<char> values(rows * value_size);
   for (size_t i = 0; i < values.size(); ++i) {
@@ -180,7 +283,7 @@ std::vector<char> MakeValues(size_t rows, size_t value_size, int seed) {
   return values;
 }
 
-PhaseStats LoadRecords(HpsBackend* backend, int load_threads) {
+PhaseStats LoadRecords(BenchmarkBackend* backend, int load_threads) {
   std::vector<std::thread> threads;
   std::vector<PhaseStats> stats(load_threads);
   const uint64_t record_count = static_cast<uint64_t>(FLAGS_record_count);
@@ -203,7 +306,7 @@ PhaseStats LoadRecords(HpsBackend* backend, int load_threads) {
         while (key < end && keys.size() < static_cast<size_t>(FLAGS_batch_size)) {
           keys.push_back(static_cast<long long>(key++));
         }
-        backend->insert(EffectiveTableName(),
+        backend->Insert(EffectiveTableName(),
                         keys.size(),
                         keys.data(),
                         values.data(),
@@ -226,7 +329,7 @@ PhaseStats LoadRecords(HpsBackend* backend, int load_threads) {
   return total;
 }
 
-void PrepareBackendForLoad(HpsBackend* backend) {
+void PrepareBackendForLoad(BenchmarkBackend* backend) {
   if (FLAGS_backend != "hps_rocksdb") {
     return;
   }
@@ -236,7 +339,7 @@ void PrepareBackendForLoad(HpsBackend* backend) {
   const long long key = 1;
   std::vector<char> value =
       MakeValues(1, static_cast<size_t>(FLAGS_value_size), 0);
-  backend->insert(EffectiveTableName(),
+  backend->Insert(EffectiveTableName(),
                   1,
                   &key,
                   value.data(),
@@ -244,7 +347,7 @@ void PrepareBackendForLoad(HpsBackend* backend) {
                   static_cast<size_t>(FLAGS_value_size));
 }
 
-PhaseStats RunTransactions(HpsBackend* backend) {
+PhaseStats RunTransactions(BenchmarkBackend* backend) {
   const bool fetch_only  = FLAGS_mode == "fetch";
   const bool insert_only = FLAGS_mode == "insert";
   const bool mixed       = FLAGS_mode == "mixed";
@@ -282,17 +385,16 @@ PhaseStats RunTransactions(HpsBackend* backend) {
             (mixed && static_cast<int>(key_gen.NextUint(100)) < FLAGS_read_ratio);
         if (do_fetch) {
           size_t misses = 0;
-          backend->fetch(EffectiveTableName(),
-                         keys.size(),
-                         keys.data(),
-                         out.data(),
-                         static_cast<size_t>(FLAGS_value_size),
-                         [&](size_t) { ++misses; },
-                         std::chrono::nanoseconds::zero());
+          backend->Fetch(EffectiveTableName(),
+                        keys.size(),
+                        keys.data(),
+                        out.data(),
+                        static_cast<size_t>(FLAGS_value_size),
+                        [&](size_t) { ++misses; });
           local.misses += misses;
         }
         if (insert_only || fetch_insert || (mixed && !do_fetch)) {
-          backend->insert(EffectiveTableName(),
+          backend->Insert(EffectiveTableName(),
                           keys.size(),
                           keys.data(),
                           values.data(),
@@ -366,14 +468,15 @@ int main(int argc, char** argv) {
   CHECK_GT(FLAGS_batch_size, 0);
   CHECK_GT(FLAGS_thread_num, 0);
   CHECK_GT(FLAGS_running_seconds, 0);
-  if (FLAGS_backend == "recstore" || FLAGS_backend == "hps_rocksdb") {
+  if (FLAGS_backend == "recstore" || FLAGS_backend == "hps_rocksdb" ||
+      FLAGS_backend == "raw_rocksdb" || FLAGS_backend == "raw_rocksdb_memenv") {
     CHECK(!FLAGS_path.empty()) << "--path is required for " << FLAGS_backend
                                << " backend";
   }
 
   const int load_threads =
       FLAGS_load_thread_num > 0 ? FLAGS_load_thread_num : FLAGS_thread_num;
-  auto backend = CreateBackend();
+  auto backend = CreateBenchmarkBackend();
   PrepareBackendForLoad(backend.get());
 
   const auto load_begin = std::chrono::steady_clock::now();

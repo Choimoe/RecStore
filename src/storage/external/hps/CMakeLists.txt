@@ -25,6 +25,7 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
   add_executable(hps_backend_benchmark
     hps_backend_benchmark.cc
     hps_backend_shim.cc
+    raw_rocksdb_backend.cc
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/thread_pool.cpp
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/database_backend.cpp
