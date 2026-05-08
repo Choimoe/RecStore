@@ -184,6 +184,27 @@ else()
     message(STATUS "Skipping test_raw_rocksdb_backend: rocksdb-shared target is unavailable.")
 endif()
 
+if(TARGET fasterps_backend)
+    add_executable(test_fasterkv_backend
+        test_fasterkv_backend.cpp
+    )
+    target_include_directories(test_fasterkv_backend PRIVATE
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_fasterkv_backend PUBLIC
+        fasterps_backend
+        gtest
+        gtest_main
+        pthread
+    )
+    add_test(NAME test_fasterkv_backend COMMAND test_fasterkv_backend)
+else()
+    message(STATUS
+        "Skipping test_fasterkv_backend: fasterps_backend target is unavailable."
+    )
+endif()
+
 add_executable(test_index test_index.cpp)
 target_link_libraries(test_index PUBLIC
     extendible_hash 

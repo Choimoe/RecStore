@@ -48,6 +48,7 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     kv_engine
     ps_common
     TBB::tbb
+    fasterps_backend
     rocksdb-shared
   )
   target_link_libraries(hps_backend_benchmark PUBLIC OpenMP::OpenMP_CXX)

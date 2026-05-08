@@ -48,3 +48,6 @@
 [submodule "third_party/gpudirect-nvme"]
 	path = third_party/gpudirect-nvme
 	url = https://github.com/ZaidQureshi/bam
+[submodule "third_party/faster"]
+	path = third_party/faster
+	url = https://github.com/microsoft/FASTER.git

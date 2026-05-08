@@ -16,6 +16,7 @@
 #include "base/bind_core.h"
 #include "base/init.h"
 #include "base/log.h"
+#include "storage/external/fasterps/fasterkv_backend.h"
 #include "storage/external/hps/hps_recstore_backend.h"
 #include "storage/external/hps/raw_rocksdb_backend.h"
 #include "third_party/HugeCTR/HugeCTR/include/hps/hash_map_backend.hpp"
@@ -24,7 +25,7 @@
 DEFINE_string(backend,
               "hps_hash_map",
               "hps_hash_map|hps_rocksdb|raw_rocksdb|raw_rocksdb_memenv|"
-              "recstore");
+              "fasterkv|recstore");
 DEFINE_string(path, "", "RecStore data path");
 DEFINE_string(index_type, "DRAM_EXTENDIBLE_HASH", "RecStore index.type");
 DEFINE_string(value_store_type, "DRAM_VALUE_STORE", "RecStore value.type");
@@ -221,6 +222,39 @@ private:
   recstore::storage::RawRocksDBBackend backend_;
 };
 
+class FasterKVBenchmarkBackend : public BenchmarkBackend {
+public:
+  FasterKVBenchmarkBackend(uint64_t capacity, size_t value_size)
+      : backend_(capacity, value_size) {}
+
+  void Insert(const std::string& table_name,
+              size_t num_keys,
+              const long long* keys,
+              const char* values,
+              uint32_t value_size,
+              size_t stride) override {
+    (void)table_name;
+    if (value_size != stride) {
+      throw std::invalid_argument("fasterkv requires value_size == stride");
+    }
+    backend_.Insert(num_keys, keys, values);
+  }
+
+  void Fetch(const std::string& table_name,
+             size_t num_keys,
+             const long long* keys,
+             char* values,
+             size_t value_size,
+             const std::function<void(size_t)>& on_miss) override {
+    (void)table_name;
+    (void)value_size;
+    backend_.Fetch(num_keys, keys, values, on_miss);
+  }
+
+private:
+  recstore::storage::fasterps::FasterKVBackend backend_;
+};
+
 const std::string& EffectiveTableName() {
   static const std::string kRocksDbDefaultTable = "default";
   return FLAGS_backend == "hps_rocksdb" ? kRocksDbDefaultTable : FLAGS_table_name;
@@ -271,6 +305,11 @@ std::unique_ptr<BenchmarkBackend> CreateBenchmarkBackend() {
         FLAGS_path,
         static_cast<size_t>(FLAGS_value_size),
         FLAGS_backend == "raw_rocksdb_memenv");
+  }
+  if (FLAGS_backend == "fasterkv") {
+    return std::make_unique<FasterKVBenchmarkBackend>(
+        static_cast<uint64_t>(FLAGS_record_count),
+        static_cast<size_t>(FLAGS_value_size));
   }
   return std::make_unique<HpsBenchmarkBackend>(CreateBackend());
 }
