@@ -225,12 +225,13 @@ void PrepareBackendForLoad(HpsBackend* backend) {
   const long long key = 1;
   std::vector<char> value =
       MakeValues(1, static_cast<size_t>(FLAGS_value_size), 0);
-  backend->insert(FLAGS_table_name,
-                  1,
-                  &key,
-                  value.data(),
-                  static_cast<uint32_t>(FLAGS_value_size),
-                  static_cast<size_t>(FLAGS_value_size));
+  backend->insert(
+      FLAGS_table_name,
+      1,
+      &key,
+      value.data(),
+      static_cast<uint32_t>(FLAGS_value_size),
+      static_cast<size_t>(FLAGS_value_size));
 }
 
 PhaseStats RunTransactions(HpsBackend* backend) {
@@ -358,8 +359,8 @@ int main(int argc, char** argv) {
   CHECK_GT(FLAGS_thread_num, 0);
   CHECK_GT(FLAGS_running_seconds, 0);
   if (FLAGS_backend == "recstore" || FLAGS_backend == "hps_rocksdb") {
-    CHECK(!FLAGS_path.empty()) << "--path is required for " << FLAGS_backend
-                               << " backend";
+    CHECK(!FLAGS_path.empty())
+        << "--path is required for " << FLAGS_backend << " backend";
   }
 
   const int load_threads =
