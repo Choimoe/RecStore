@@ -24,8 +24,9 @@ size_t ConfigValueSize(const BaseKVConfig& config) {
 
 void ValidateFloatAligned(size_t value_size, const char* operation) {
   if (value_size == 0 || value_size % sizeof(float) != 0) {
-    throw std::invalid_argument(std::string(operation) +
-                                " requires a non-zero float-aligned value_size");
+    throw std::invalid_argument(
+        std::string(operation) +
+        " requires a non-zero float-aligned value_size");
   }
 }
 
@@ -56,8 +57,7 @@ public:
     const long long hps_key = static_cast<long long>(key);
     value.assign(value_size_, '\0');
     bool missed = false;
-    backend_.Fetch(
-        1, &hps_key, value.data(), [&](size_t) { missed = true; });
+    backend_.Fetch(1, &hps_key, value.data(), [&](size_t) { missed = true; });
     if (missed) {
       value.clear();
     }
@@ -68,8 +68,7 @@ public:
     const long long hps_key = static_cast<long long>(key);
     std::string value(value_size_, '\0');
     bool missed = false;
-    backend_.Fetch(
-        1, &hps_key, value.data(), [&](size_t) { missed = true; });
+    backend_.Fetch(1, &hps_key, value.data(), [&](size_t) { missed = true; });
     return !missed;
   }
 
@@ -121,10 +120,10 @@ public:
     std::vector<long long> hps_keys = ConvertKeys(keys);
     std::vector<char> flat(static_cast<size_t>(keys.Size()) * value_size_);
     std::vector<uint8_t> misses(keys.Size(), 0);
-    backend_.Fetch(hps_keys.size(),
-                   hps_keys.data(),
-                   flat.data(),
-                   [&](size_t index) { misses[index] = 1; });
+    backend_.Fetch(
+        hps_keys.size(), hps_keys.data(), flat.data(), [&](size_t index) {
+          misses[index] = 1;
+        });
 
     const int floats_per_row = static_cast<int>(value_size_ / sizeof(float));
     for (int i = 0; i < keys.Size(); ++i) {
@@ -155,4 +154,5 @@ private:
   recstore::storage::fasterkv::FasterKVBackend backend_;
 };
 
-FACTORY_REGISTER(BaseKV, KVEngineFasterKV, KVEngineFasterKV, const BaseKVConfig&);
+FACTORY_REGISTER(
+    BaseKV, KVEngineFasterKV, KVEngineFasterKV, const BaseKVConfig&);

@@ -32,14 +32,14 @@ BaseKVConfig MakeExternalEngineConfig(const std::string& engine_type,
        {{"type", "DRAM_VALUE_STORE"},
         {"default_value_size_hint", kValueSize},
         {"dram_allocator",
-         {{"type", "PERSIST_LOOP_SLAB"}, {"capacity_bytes", 1024 * kValueSize}}}}}};
+         {{"type", "PERSIST_LOOP_SLAB"},
+          {"capacity_bytes", 1024 * kValueSize}}}}}};
   return config;
 }
 
 std::unique_ptr<BaseKV> CreateEngine(const std::string& engine_type) {
-  const std::string path =
-      "/tmp/test_external_kv_engine_" + engine_type + "_" +
-      std::to_string(static_cast<long long>(getpid()));
+  const std::string path = "/tmp/test_external_kv_engine_" + engine_type + "_" +
+                           std::to_string(static_cast<long long>(getpid()));
   std::filesystem::remove_all(path);
   std::filesystem::create_directories(path);
 
@@ -90,8 +90,7 @@ CreateEngineFromRecstoreConfigFile(const std::string& engine_type) {
   in >> loaded;
 
   BaseKVConfig config;
-  config.num_threads_ =
-      loaded.at("cache_ps").at("num_threads").get<int>();
+  config.num_threads_ = loaded.at("cache_ps").at("num_threads").get<int>();
   config.json_config_ = loaded.at("cache_ps").at("base_kv_config");
 
   base::EngineResolved resolved;

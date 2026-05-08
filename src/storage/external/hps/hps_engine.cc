@@ -47,8 +47,9 @@ std::string ConfigTableName(const BaseKVConfig& config) {
 
 void ValidateFloatAligned(size_t value_size, const char* operation) {
   if (value_size == 0 || value_size % sizeof(float) != 0) {
-    throw std::invalid_argument(std::string(operation) +
-                                " requires a non-zero float-aligned value_size");
+    throw std::invalid_argument(
+        std::string(operation) +
+        " requires a non-zero float-aligned value_size");
   }
 }
 
@@ -73,11 +74,10 @@ std::unique_ptr<HpsBackend> CreateRocksDBBackend(const BaseKVConfig& config) {
   HugeCTR::RocksDBBackendParams params;
   const std::string path = config.json_config_.at("path").get<std::string>();
   std::filesystem::create_directories(path);
-  params.path = config.json_config_.value(
-      "rocksdb_path", path + "/hps_rocksdb");
+  params.path =
+      config.json_config_.value("rocksdb_path", path + "/hps_rocksdb");
   params.max_batch_size = ConfigMaxBatchSize(config);
-  params.num_threads =
-      static_cast<size_t>(std::max(1, ConfigThreads(config)));
+  params.num_threads = static_cast<size_t>(std::max(1, ConfigThreads(config)));
   return std::make_unique<HugeCTR::RocksDBBackend<long long>>(params);
 }
 
@@ -102,13 +102,14 @@ public:
     const long long hps_key = static_cast<long long>(key);
     value.assign(value_size_, '\0');
     bool missed = false;
-    backend_->fetch(table_name_,
-                    1,
-                    &hps_key,
-                    value.data(),
-                    value_size_,
-                    [&](size_t) { missed = true; },
-                    std::chrono::nanoseconds::zero());
+    backend_->fetch(
+        table_name_,
+        1,
+        &hps_key,
+        value.data(),
+        value_size_,
+        [&](size_t) { missed = true; },
+        std::chrono::nanoseconds::zero());
     if (missed) {
       value.clear();
     }
@@ -129,12 +130,13 @@ public:
       throw std::invalid_argument("HPS BaseKV engine requires fixed-size Put");
     }
     const long long hps_key = static_cast<long long>(key);
-    backend_->insert(table_name_,
-                     1,
-                     &hps_key,
-                     value.data(),
-                     static_cast<uint32_t>(value_size_),
-                     value_size_);
+    backend_->insert(
+        table_name_,
+        1,
+        &hps_key,
+        value.data(),
+        static_cast<uint32_t>(value_size_),
+        value_size_);
   }
 
   void BatchPut(base::ConstArray<uint64_t> keys,
@@ -158,12 +160,13 @@ public:
                   value_size_);
     }
     std::vector<long long> hps_keys = ConvertKeys(keys);
-    backend_->insert(table_name_,
-                     hps_keys.size(),
-                     hps_keys.data(),
-                     flat.data(),
-                     static_cast<uint32_t>(value_size_),
-                     value_size_);
+    backend_->insert(
+        table_name_,
+        hps_keys.size(),
+        hps_keys.data(),
+        flat.data(),
+        static_cast<uint32_t>(value_size_),
+        value_size_);
   }
 
   void BatchGet(base::ConstArray<uint64_t> keys,
@@ -178,13 +181,14 @@ public:
     std::vector<long long> hps_keys = ConvertKeys(keys);
     std::vector<char> flat(static_cast<size_t>(keys.Size()) * value_size_);
     std::vector<uint8_t> misses(keys.Size(), 0);
-    backend_->fetch(table_name_,
-                    hps_keys.size(),
-                    hps_keys.data(),
-                    flat.data(),
-                    value_size_,
-                    [&](size_t index) { misses[index] = 1; },
-                    std::chrono::nanoseconds::zero());
+    backend_->fetch(
+        table_name_,
+        hps_keys.size(),
+        hps_keys.data(),
+        flat.data(),
+        value_size_,
+        [&](size_t index) { misses[index] = 1; },
+        std::chrono::nanoseconds::zero());
 
     const int floats_per_row = static_cast<int>(value_size_ / sizeof(float));
     for (int i = 0; i < keys.Size(); ++i) {
@@ -206,12 +210,13 @@ public:
       throw std::invalid_argument("HPS BaseKV BulkLoad value is null");
     }
     std::vector<long long> hps_keys = ConvertKeys(keys);
-    backend_->insert(table_name_,
-                     hps_keys.size(),
-                     hps_keys.data(),
-                     reinterpret_cast<const char*>(value),
-                     static_cast<uint32_t>(value_size_),
-                     value_size_);
+    backend_->insert(
+        table_name_,
+        hps_keys.size(),
+        hps_keys.data(),
+        reinterpret_cast<const char*>(value),
+        static_cast<uint32_t>(value_size_),
+        value_size_);
   }
 
 private:
@@ -234,5 +239,7 @@ public:
       : KVEngineHPSBase(config, CreateRocksDBBackend(config)) {}
 };
 
-FACTORY_REGISTER(BaseKV, KVEngineHPSHashMap, KVEngineHPSHashMap, const BaseKVConfig&);
-FACTORY_REGISTER(BaseKV, KVEngineHPSRocksDB, KVEngineHPSRocksDB, const BaseKVConfig&);
+FACTORY_REGISTER(
+    BaseKV, KVEngineHPSHashMap, KVEngineHPSHashMap, const BaseKVConfig&);
+FACTORY_REGISTER(
+    BaseKV, KVEngineHPSRocksDB, KVEngineHPSRocksDB, const BaseKVConfig&);

@@ -309,7 +309,7 @@ std::unique_ptr<HpsBackend> CreateBackend() {
     params.ssd_io_backend  = FLAGS_ssd_io_backend;
     params.ssd_value_file  = FLAGS_ssd_value_file;
     params.ssd_queue_depth = FLAGS_ssd_queue_depth;
-    params.num_threads = FLAGS_thread_num;
+    params.num_threads     = FLAGS_thread_num;
     return std::make_unique<recstore::storage::HpsRecStoreBackend<long long>>(
         params);
   }

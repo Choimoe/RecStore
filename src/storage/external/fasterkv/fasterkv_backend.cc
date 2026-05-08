@@ -38,8 +38,8 @@ public:
   union {
     struct {
       uint64_t gen_number : 62;
-      uint64_t locked : 1;
-      uint64_t replaced : 1;
+      uint64_t locked     : 1;
+      uint64_t replaced   : 1;
     };
     uint64_t control_;
   };
@@ -64,8 +64,7 @@ public:
     GenLock desired{expected.control_};
     desired.locked = 1;
 
-    if (control_.compare_exchange_strong(
-            expected.control_, desired.control_)) {
+    if (control_.compare_exchange_strong(expected.control_, desired.control_)) {
       return true;
     }
     if (expected.replaced) {
@@ -79,8 +78,7 @@ public:
       const uint64_t sub_delta = (uint64_t{1} << 62) - 1;
       control_.fetch_sub(sub_delta);
     } else {
-      const uint64_t add_delta =
-          (uint64_t{1} << 63) - (uint64_t{1} << 62) + 1;
+      const uint64_t add_delta = (uint64_t{1} << 63) - (uint64_t{1} << 62) + 1;
       control_.fetch_add(add_delta);
     }
   }
@@ -265,7 +263,8 @@ private:
   bool found_;
 };
 
-using FasterStore = FasterKv<UInt64Key, VariableValue, FASTER::device::NullDisk>;
+using FasterStore =
+    FasterKv<UInt64Key, VariableValue, FASTER::device::NullDisk>;
 
 uint64_t NextPowerOfTwo(uint64_t value) {
   uint64_t out = 1;
@@ -291,8 +290,8 @@ uint64_t ComputeLogSize(uint64_t capacity, size_t value_size) {
 
 void CheckStatus(Status status, const char* operation) {
   if (status != Status::Ok) {
-    throw std::runtime_error(std::string(operation) +
-                             " failed: " + StatusStr(status));
+    throw std::runtime_error(
+        std::string(operation) + " failed: " + StatusStr(status));
   }
 }
 
@@ -317,7 +316,8 @@ public:
       throw std::invalid_argument("FasterKVBackend capacity must be > 0");
     }
     if (value_size_ == 0 ||
-        value_size_ > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        value_size_ >
+            static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
       throw std::invalid_argument("FasterKVBackend value_size is invalid");
     }
   }
@@ -331,10 +331,9 @@ public:
     };
 
     for (size_t i = 0; i < num_keys; ++i) {
-      UpsertContext context{
-          static_cast<uint64_t>(keys[i]),
-          values + i * value_size_,
-          static_cast<uint32_t>(value_size_)};
+      UpsertContext context{static_cast<uint64_t>(keys[i]),
+                            values + i * value_size_,
+                            static_cast<uint32_t>(value_size_)};
       const Status status =
           store_.Upsert(context, callback, NextSerialNumber());
       if (status == Status::Pending) {
@@ -391,8 +390,7 @@ private:
       return;
     }
     if (session_.owner != nullptr) {
-      throw std::runtime_error(
-          "Thread already owns a FasterKVBackend session");
+      throw std::runtime_error("Thread already owns a FasterKVBackend session");
     }
     store_.StartSession();
     session_.owner = this;

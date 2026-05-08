@@ -48,7 +48,8 @@ inline uint64_t ValueSizeHint(const json& j) {
   if (j.contains("value_size")) {
     return j.at("value_size").get<uint64_t>();
   }
-  if (j.contains("value") && j.at("value").contains("default_value_size_hint")) {
+  if (j.contains("value") &&
+      j.at("value").contains("default_value_size_hint")) {
     return j.at("value").at("default_value_size_hint").get<uint64_t>();
   }
   return 0;
@@ -57,16 +58,15 @@ inline uint64_t ValueSizeHint(const json& j) {
 inline json MakeSsdAllocator(
     const json& j, const std::string& file_path, uint64_t capacity_bytes) {
   const int queue_depth = j.value("queue_size", j.value("queue_cnt", 512));
-  return {
-      {"type", "SSD_BUDDY"},
-      {"capacity_bytes", capacity_bytes},
-      {"min_block_size", 128},
-      {"max_block_size", 4096},
-      {"io",
-       {{"type", j.value("io_backend_type", std::string("IOURING"))},
-        {"file_path", file_path},
-        {"queue_depth", queue_depth},
-        {"base_offset_bytes", static_cast<uint64_t>(4096)}}}};
+  return {{"type", "SSD_BUDDY"},
+          {"capacity_bytes", capacity_bytes},
+          {"min_block_size", 128},
+          {"max_block_size", 4096},
+          {"io",
+           {{"type", j.value("io_backend_type", std::string("IOURING"))},
+            {"file_path", file_path},
+            {"queue_depth", queue_depth},
+            {"base_offset_bytes", static_cast<uint64_t>(4096)}}}};
 }
 
 inline void NormalizeLegacyLocalConfig(BaseKVConfig& cfg) {
@@ -112,7 +112,7 @@ inline void NormalizeLegacyLocalConfig(BaseKVConfig& cfg) {
     throw std::invalid_argument("capacity is required");
   }
 
-  const std::string path = j.at("path").get<std::string>();
+  const std::string path  = j.at("path").get<std::string>();
   const uint64_t capacity = j.at("capacity").get<uint64_t>();
   const uint64_t fallback_bytes =
       std::max<uint64_t>(1, capacity) * std::max<uint64_t>(1, value_size);
@@ -122,13 +122,13 @@ inline void NormalizeLegacyLocalConfig(BaseKVConfig& cfg) {
       j["index"] = {{"type", "DRAM_EXTENDIBLE_HASH"}};
     } else if (index_type == "SSD") {
       const int queue_depth = j.value("queue_size", j.value("queue_cnt", 512));
-      j["index"] = {
+      j["index"]            = {
           {"type", "SSD_EXTENDIBLE_HASH"},
           {"io",
-           {{"type", j.value("io_backend_type", std::string("IOURING"))},
-            {"file_path", path + "/index_pages.db"},
-            {"queue_depth", queue_depth},
-            {"base_offset_bytes", static_cast<uint64_t>(0)}}}};
+                      {{"type", j.value("io_backend_type", std::string("IOURING"))},
+                       {"file_path", path + "/index_pages.db"},
+                       {"queue_depth", queue_depth},
+                       {"base_offset_bytes", static_cast<uint64_t>(0)}}}};
     } else {
       throw std::invalid_argument("index_type must be DRAM or SSD");
     }
@@ -145,7 +145,7 @@ inline void NormalizeLegacyLocalConfig(BaseKVConfig& cfg) {
   if (value_type == "DRAM") {
     value["type"] = "DRAM_VALUE_STORE";
     if (!value.contains("dram_allocator")) {
-      const uint64_t bytes = j.value("DRAM_SIZE", fallback_bytes);
+      const uint64_t bytes    = j.value("DRAM_SIZE", fallback_bytes);
       value["dram_allocator"] = {
           {"type", j.at("allocator_type").get<std::string>()},
           {"capacity_bytes", bytes}};
@@ -158,11 +158,12 @@ inline void NormalizeLegacyLocalConfig(BaseKVConfig& cfg) {
           MakeSsdAllocator(j, path + "/value_pages.db", bytes);
     }
   } else if (value_type == "HYBRID") {
-    value["type"] = "TIERED_VALUE_STORE";
+    value["type"]             = "TIERED_VALUE_STORE";
     const uint64_t dram_bytes = j.value("DRAM_SIZE", j.value("shmcapacity", 0));
     const uint64_t ssd_bytes  = j.value("SSD_SIZE", j.value("ssdcapacity", 0));
     if (dram_bytes == 0 || ssd_bytes == 0) {
-      throw std::invalid_argument("HYBRID requires shmcapacity and ssdcapacity");
+      throw std::invalid_argument(
+          "HYBRID requires shmcapacity and ssdcapacity");
     }
     if (!value.contains("dram_allocator")) {
       value["dram_allocator"] = {
@@ -197,14 +198,14 @@ inline EngineResolved ResolveEngine(BaseKVConfig cfg) {
     if (engine != "KVEngine") {
       for (const char* k : {"path", "capacity"}) {
         if (!j.contains(k)) {
-          throw std::invalid_argument(std::string(k) +
-                                      " is required for " + engine);
+          throw std::invalid_argument(
+              std::string(k) + " is required for " + engine);
         }
       }
-      const bool has_value_size = j.contains("value_size") ||
-                                  (j.contains("value") &&
-                                   j.at("value").contains(
-                                       "default_value_size_hint"));
+      const bool has_value_size =
+          j.contains("value_size") ||
+          (j.contains("value") &&
+           j.at("value").contains("default_value_size_hint"));
       if (!has_value_size) {
         throw std::invalid_argument("value_size is required for " + engine);
       }

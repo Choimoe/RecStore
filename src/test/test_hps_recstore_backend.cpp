@@ -11,16 +11,16 @@
 
 namespace {
 
-recstore::storage::HpsRecStoreBackendParams MakeParams(
-    const std::string& path) {
+recstore::storage::HpsRecStoreBackendParams
+MakeParams(const std::string& path) {
   recstore::storage::HpsRecStoreBackendParams params;
-  params.path              = path;
-  params.capacity          = 16;
-  params.value_size        = sizeof(float) * 2;
-  params.num_threads       = 1;
-  params.index_type        = "DRAM_EXTENDIBLE_HASH";
-  params.value_store_type  = "DRAM_VALUE_STORE";
-  params.dram_allocator    = "PERSIST_LOOP_SLAB";
+  params.path                = path;
+  params.capacity            = 16;
+  params.value_size          = sizeof(float) * 2;
+  params.num_threads         = 1;
+  params.index_type          = "DRAM_EXTENDIBLE_HASH";
+  params.value_store_type    = "DRAM_VALUE_STORE";
+  params.dram_allocator      = "PERSIST_LOOP_SLAB";
   params.dram_capacity_bytes = 4096;
   return params;
 }
@@ -84,12 +84,12 @@ TEST(HpsRecStoreBackendTest, SsdValueStoreInsertFetchAndMissCallback) {
   std::filesystem::remove_all(path);
   std::filesystem::create_directories(path);
 
-  auto params                 = MakeParams(path);
-  params.value_store_type     = "SSD_VALUE_STORE";
-  params.ssd_capacity_bytes   = 1024 * 1024;
-  params.ssd_value_file       = path + "/value_pages.db";
-  params.ssd_io_backend       = "IOURING";
-  params.ssd_queue_depth      = 64;
+  auto params               = MakeParams(path);
+  params.value_store_type   = "SSD_VALUE_STORE";
+  params.ssd_capacity_bytes = 1024 * 1024;
+  params.ssd_value_file     = path + "/value_pages.db";
+  params.ssd_io_backend     = "IOURING";
+  params.ssd_queue_depth    = 64;
   recstore::storage::HpsRecStoreBackend<long long> backend(params);
   AssertInsertFetchAndMiss(&backend);
 

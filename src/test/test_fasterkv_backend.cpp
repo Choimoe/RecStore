@@ -8,7 +8,7 @@
 TEST(FasterKVBackendTest, InsertThenFetchReturnsFixedWidthValuesAndMisses) {
   recstore::storage::fasterkv::FasterKVBackend backend(128, 4);
 
-  const long long keys[] = {11, 22, 33};
+  const long long keys[]         = {11, 22, 33};
   const std::vector<char> values = {
       'a',
       'a',
@@ -43,7 +43,7 @@ TEST(FasterKVBackendTest, InsertThenFetchReturnsFixedWidthValuesAndMisses) {
 TEST(FasterKVBackendTest, InsertCanOverwriteExistingFixedWidthValue) {
   recstore::storage::fasterkv::FasterKVBackend backend(128, 4);
 
-  const long long key = 7;
+  const long long key    = 7;
   const char old_value[] = {'o', 'l', 'd', '0'};
   const char new_value[] = {'n', 'e', 'w', '0'};
   backend.Insert(1, &key, old_value);
