@@ -133,28 +133,13 @@ add_test(NAME test_kvengine COMMAND test_kvengine)
 if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     add_executable(test_hps_recstore_backend
         test_hps_recstore_backend.cpp
-        ${PROJECT_SOURCE_DIR}/src/storage/external/hps/hps_shim.cc
-        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
-        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/database_backend.cpp
-    )
-    target_include_directories(test_hps_recstore_backend PRIVATE
-        ${PROJECT_SOURCE_DIR}
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
-        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
-        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/parallel-hashmap
-        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include
-        ${RECSTORE_CUDA_INCLUDE_DIRS}
     )
     target_link_libraries(test_hps_recstore_backend PUBLIC
-        base
         base_memory
-        ps_common
-        kv_engine
+        hps_backend_support
         gtest
         gtest_main
         pthread
-        TBB::tbb
     )
     add_test(NAME test_hps_recstore_backend COMMAND test_hps_recstore_backend)
 else()
@@ -203,6 +188,35 @@ else()
     message(STATUS
         "Skipping test_fasterkv_backend: fasterkv_backend target is unavailable."
     )
+endif()
+
+set(RECSTORE_EXTERNAL_KV_ENGINE_TEST_ENABLED OFF)
+set(RECSTORE_EXTERNAL_KV_ENGINE_TEST_LIBS
+    kv_engine
+    gtest
+    gtest_main
+    pthread
+)
+set(RECSTORE_EXTERNAL_KV_ENGINE_TEST_DEFS)
+if(TARGET fasterkv_backend)
+    set(RECSTORE_EXTERNAL_KV_ENGINE_TEST_ENABLED ON)
+    list(APPEND RECSTORE_EXTERNAL_KV_ENGINE_TEST_DEFS
+        RECSTORE_TEST_ENABLE_FASTERKV_ENGINE)
+endif()
+if(TARGET hps_backend_support)
+    set(RECSTORE_EXTERNAL_KV_ENGINE_TEST_ENABLED ON)
+    list(APPEND RECSTORE_EXTERNAL_KV_ENGINE_TEST_DEFS
+        RECSTORE_TEST_ENABLE_HPS_ENGINE)
+endif()
+if(RECSTORE_EXTERNAL_KV_ENGINE_TEST_ENABLED)
+    add_executable(test_external_kv_engine test_external_kv_engine.cpp)
+    target_compile_definitions(test_external_kv_engine PRIVATE
+        ${RECSTORE_EXTERNAL_KV_ENGINE_TEST_DEFS}
+    )
+    target_link_libraries(test_external_kv_engine PUBLIC
+        ${RECSTORE_EXTERNAL_KV_ENGINE_TEST_LIBS}
+    )
+    add_test(NAME test_external_kv_engine COMMAND test_external_kv_engine)
 endif()
 
 add_executable(test_index test_index.cpp)
@@ -385,6 +399,16 @@ set_tests_properties(
     test_run_hierkv_recstore_mixed_benchmark_py
     PROPERTIES
     LABELS "hierkv;python"
+)
+
+add_python_unittest(
+    test_recstore_config_schema_py
+    src/test/scripts/test_recstore_config_schema.py
+)
+set_tests_properties(
+    test_recstore_config_schema_py
+    PROPERTIES
+    LABELS "config;python"
 )
 
 add_python_unittest(

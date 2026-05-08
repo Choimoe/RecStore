@@ -8,8 +8,8 @@ add_subdirectory(io_backend)
 add_subdirectory(index)
 add_subdirectory(nvm)
 add_subdirectory(hybrid)
+add_subdirectory(external/fasterkv)
+add_subdirectory(external/hps)
 
 # 保持最后
 add_subdirectory(kv_engine)
-add_subdirectory(external/fasterkv)
-add_subdirectory(external/hps)

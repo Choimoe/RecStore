@@ -32,9 +32,9 @@ KVEngine uses the nested configuration format:
   }
 }
 
-ResolveEngine returns "KVEngine" for every valid configuration. Legacy top-level
-fields such as index_type, value_type, allocator_type, value_memory_management,
-io_backend_type, value_size, and engine_type are rejected.
+ResolveEngine returns "KVEngine" for valid local configurations and normalizes
+legacy top-level index_type/value_type configs into the nested index/value
+format. Explicit engine_type may select external engines.
 */
 
 class BaseKV {

@@ -35,29 +35,46 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 
 ### 1.3 base_kv_config 配置
 
-`base_kv_config` 定义底层键值存储引擎的配置，由 [src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h) 的 `ResolveEngine` 函数根据 `index_type` 和 `value_type` 自动推导引擎类型。
+`base_kv_config` 定义底层键值存储引擎的配置，由 [src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h) 的 `ResolveEngine` 函数解析。当前推荐使用嵌套的 `index` / `value` 配置；也可以通过 `engine_type` 显式选择外部 KV engine。
 
-#### 通用必填字段（非 HYBRID 模式）
+#### 推荐本地 KV 配置字段
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `path` | string | 是 | 存储路径，建议每个实例使用独立目录 |
-| `index_type` | string | 是 | 索引存储类型：`"DRAM"` 或 `"SSD"` |
-| `value_type` | string | 是 | 值存储类型：`"DRAM"`、`"SSD"` 或 `"HYBRID"` |
 | `capacity` | integer | 是 | 预估存储条目数 |
-| `value_size` | integer | 是 | 单条值的字节数 |
+| `index.type` | string | 是 | `DRAM_EXTENDIBLE_HASH`、`DRAM_UNORDERED_MAP`、`DRAM_PET_HASH`、`SSD` 或 `SSD_EXTENDIBLE_HASH` |
+| `value.type` | string | 是 | `DRAM_VALUE_STORE`、`SSD_VALUE_STORE` 或 `TIERED_VALUE_STORE` |
+| `value.default_value_size_hint` | integer | 建议 | 单条值的字节数 |
 
-作用位置：字段最终进入 `BaseKVConfig.json_config_`，在 [src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h) 中推导引擎类型，并在 [src/storage/kv_engine/base_kv.h](../src/storage/kv_engine/base_kv.h) 及对应引擎实现中用于容量预分配与值大小约束。
+本地 DRAM value store 需要 `value.dram_allocator`，SSD value store 需要 `value.ssd_allocator`，tiered value store 同时需要二者。
 
-#### HYBRID 模式必填字段
+#### 兼容旧版本地 KV 配置字段
+
+旧版配置中的 `index_type` / `value_type` 仍然可用，主要用于已有 DRAM+SSD、本地 CI 和历史实验配置。`ResolveEngine` 会把这类字段归一化为当前的 `index` / `value` 结构后再创建本地 `KVEngine`，不会影响外部 KV engine 的 `engine_type` 选择。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `shmcapacity` | integer | 是 | DRAM/共享内存侧的字节数容量 |
-| `ssdcapacity` | integer | 是 | SSD 侧的字节数容量 |
+| `path` | string | 是 | 存储路径 |
+| `index_type` | string | 是 | `DRAM` 或 `SSD` |
+| `value_type` | string | 是 | `DRAM`、`SSD` 或 `HYBRID` |
+| `capacity` | integer | DRAM/SSD 需要 | 预估存储条目数 |
+| `value_size` | integer | DRAM/SSD 需要 | 固定 value 字节数 |
+| `shmcapacity` | integer | HYBRID 需要 | DRAM 层字节数 |
+| `ssdcapacity` | integer | HYBRID 需要 | SSD 层字节数 |
+| `value_memory_management` | string | 否 | `PersistLoopShmMalloc` 或 `R2ShmMalloc` |
 
-???+ note "注意"
-    HYBRID 模式不需要 `capacity` 和 `value_size`。
+#### 外部 KV engine 配置字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `engine_type` | string | 是 | `KVEngineFasterKV`、`KVEngineHPSHashMap` 或 `KVEngineHPSRocksDB` |
+| `path` | string | 是 | 存储路径或工作目录 |
+| `capacity` | integer | 是 | 预估存储条目数 |
+| `value_size` | integer | 是 | 固定 value 字节数；也可用 `value.default_value_size_hint` |
+| `max_batch_size` | integer | 否 | HPS/FasterKV 批处理上限 |
+| `table_name` | string | 否 | HPS table name，默认 `default` |
+| `rocksdb_path` | string | 否 | HPS RocksDB 数据目录，默认 `${path}/hps_rocksdb` |
 
 #### 可选字段
 
@@ -69,12 +86,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 
 #### 引擎类型自动推导规则
 
-`base::ResolveEngine` 根据 `index_type` 和 `value_type` 组合自动推导引擎类型：
-
-- `value_type = "HYBRID"` → `KVEngineHybrid`
-- `value_type = "DRAM"` 或 `"SSD"`：
-  - `index_type = "DRAM"` → `KVEngineExtendibleHash`
-  - `index_type = "SSD"` → `KVEngineCCEH`
+`base::ResolveEngine` 默认返回本地 `KVEngine`，再由 `index.type` 和 `value.type` 选择具体 index/value store。设置 `engine_type` 时会显式选择对应的 `BaseKV` factory key。旧的 `index_type` / `value_type` 字段不是废弃删除路径，仍用于兼容历史 DRAM+SSD 等配置；新配置更推荐嵌套写法。
 
 引擎推导实现位置：[src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h)
 
@@ -172,10 +184,17 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
             "base_kv_config": {
                 "path": "/tmp/recstore_data",
                 "capacity": 40000000,
-                "value_size": 512,
-                "value_type": "DRAM",
-                "index_type": "DRAM",
-                "value_memory_management": "PersistLoopShmMalloc"
+                "index": {
+                    "type": "DRAM_EXTENDIBLE_HASH"
+                },
+                "value": {
+                    "type": "DRAM_VALUE_STORE",
+                    "default_value_size_hint": 512,
+                    "dram_allocator": {
+                        "type": "PERSIST_LOOP_SLAB",
+                        "capacity_bytes": 20480000000
+                    }
+                }
             }
         },
         "distributed_client": {
@@ -204,61 +223,86 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
     }
     ```
 
-??? example "DRAM 索引 + SSD 值配置"
+??? example "FasterKV 外部 KV 配置"
     ```json
     {
         "cache_ps": {
             "base_kv_config": {
-                "path": "/data/recstore",
-                "index_type": "DRAM",
-                "value_type": "SSD",
+                "engine_type": "KVEngineFasterKV",
+                "path": "/data/fasterkv",
                 "capacity": 2000000,
                 "value_size": 128,
-                "value_memory_management": "PersistLoopShmMalloc"
+                "max_batch_size": 65536
             }
         }
     }
     ```
 
-    推导引擎类型：`KVEngineExtendibleHash`
-
-??? example "SSD 索引 + SSD 值配置"
+??? example "HPS HashMap 外部 KV 配置"
     ```json
     {
         "cache_ps": {
             "base_kv_config": {
-                "path": "/data/recstore",
-                "index_type": "SSD",
-                "value_type": "SSD",
+                "engine_type": "KVEngineHPSHashMap",
+                "path": "/data/hps_hash_map",
                 "capacity": 2000000,
                 "value_size": 128,
-                "value_memory_management": "PersistLoopShmMalloc",
-                "queue_size": 1024
+                "max_batch_size": 65536,
+                "table_name": "default"
             }
         }
     }
     ```
 
-    推导引擎类型：`KVEngineCCEH`
+??? example "HPS RocksDB 外部 KV 配置"
+    ```json
+    {
+        "cache_ps": {
+            "base_kv_config": {
+                "engine_type": "KVEngineHPSRocksDB",
+                "path": "/data/hps",
+                "rocksdb_path": "/data/hps/rocksdb",
+                "capacity": 2000000,
+                "value_size": 128,
+                "max_batch_size": 65536,
+                "table_name": "default"
+            }
+        }
+    }
+    ```
 
-??? example "HYBRID 混合模式配置"
+??? example "本地 Tiered Value Store 配置"
 
     ```json
     {
         "cache_ps": {
             "base_kv_config": {
                 "path": "/data/recstore",
-                "index_type": "DRAM",
-                "value_type": "HYBRID",
-                "shmcapacity": 10737418240,
-                "ssdcapacity": 107374182400,
-                "value_memory_management": "PersistLoopShmMalloc"
+                "capacity": 2000000,
+                "index": {
+                    "type": "DRAM_EXTENDIBLE_HASH"
+                },
+                "value": {
+                    "type": "TIERED_VALUE_STORE",
+                    "default_value_size_hint": 128,
+                    "dram_allocator": {
+                        "type": "PERSIST_LOOP_SLAB",
+                        "capacity_bytes": 10737418240
+                    },
+                    "ssd_allocator": {
+                        "type": "SSD_BUDDY",
+                        "capacity_bytes": 107374182400,
+                        "io": {
+                            "type": "IOURING",
+                            "file_path": "/data/recstore/value.db",
+                            "queue_depth": 512
+                        }
+                    }
+                }
             }
         }
     }
     ```
-
-    推导引擎类型：`KVEngineHybrid`
 
 ??? example "在 CI 中的配置"
 

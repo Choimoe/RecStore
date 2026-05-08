@@ -22,7 +22,7 @@ if(NOT TARGET rocksdb-shared)
 endif()
 
 if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
-  add_library(hps_backend_support STATIC
+  add_library(hps_native_support STATIC
     hps_shim.cc
     raw_rocksdb.cc
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
@@ -31,8 +31,8 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/hash_map_backend.cpp
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/rocksdb_backend.cpp
   )
-  target_compile_definitions(hps_backend_support PUBLIC HCTR_USE_ROCKS_DB)
-  target_include_directories(hps_backend_support PUBLIC
+  target_compile_definitions(hps_native_support PUBLIC HCTR_USE_ROCKS_DB)
+  target_include_directories(hps_native_support PUBLIC
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
@@ -41,14 +41,18 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include
     ${RECSTORE_CUDA_INCLUDE_DIRS}
   )
-  target_link_libraries(hps_backend_support PUBLIC
+  target_link_libraries(hps_native_support PUBLIC
     pthread
     base
-    kv_engine
-    ps_common
     TBB::tbb
     rocksdb-shared
     OpenMP::OpenMP_CXX
+  )
+  add_library(hps_backend_support INTERFACE)
+  target_link_libraries(hps_backend_support INTERFACE
+    hps_native_support
+    kv_engine
+    ps_common
   )
 else()
   message(STATUS "Skipping hps_backend_support: HugeCTR CUDA headers are unavailable.")

@@ -796,3 +796,47 @@ TEST(KVEngineNestedConfigTest, DramIndexDramValueSmoke) {
   kv.reset();
   std::filesystem::remove_all(test_dir);
 }
+
+TEST(KVEngineLegacyConfigTest, DramIndexSsdValueConfigIsAccepted) {
+  const std::string test_dir =
+      "/tmp/test_kv_engine_legacy_dram_ssd_" + std::to_string(getpid());
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir);
+
+  BaseKVConfig cfg;
+  cfg.num_threads_ = 4;
+  cfg.json_config_ = {
+      {"path", test_dir},
+      {"capacity", 1024},
+      {"index_type", "DRAM"},
+      {"value_type", "SSD"},
+      {"value_size", 128},
+      {"value_memory_management", "PersistLoopShmMalloc"},
+      {"queue_size", 64}};
+
+  auto resolved = base::ResolveEngine(cfg);
+  ASSERT_EQ(resolved.engine, "KVEngine");
+  EXPECT_EQ(resolved.cfg.json_config_.at("index").at("type"),
+            "DRAM_EXTENDIBLE_HASH");
+  EXPECT_EQ(resolved.cfg.json_config_.at("value").at("type"),
+            "SSD_VALUE_STORE");
+  EXPECT_EQ(resolved.cfg.json_config_.at("value").at("default_value_size_hint"),
+            128);
+  EXPECT_TRUE(resolved.cfg.json_config_.at("value").contains("ssd_allocator"));
+
+  std::unique_ptr<BaseKV> kv(
+      base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
+          resolved.engine, resolved.cfg));
+  ASSERT_NE(kv, nullptr);
+
+  std::string value = "legacy-dram-ssd-value";
+  value.resize(128);
+  kv->Put(9, value, 0);
+
+  std::string out;
+  kv->Get(9, out, 0);
+  EXPECT_EQ(out, value);
+
+  kv.reset();
+  std::filesystem::remove_all(test_dir);
+}

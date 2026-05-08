@@ -30,6 +30,20 @@ cmake_policy(SET CMP0076 NEW)
 
 target_sources(
   kv_engine INTERFACE kv_engine_register.cc)
+
+if(TARGET fasterkv_backend)
+  target_sources(
+    kv_engine INTERFACE
+    ${PROJECT_SOURCE_DIR}/src/storage/external/fasterkv/fasterkv_engine.cc)
+  target_link_libraries(kv_engine INTERFACE fasterkv_backend)
+endif()
+
+if(TARGET hps_native_support)
+  target_sources(
+    kv_engine INTERFACE
+    ${PROJECT_SOURCE_DIR}/src/storage/external/hps/hps_engine.cc)
+  target_link_libraries(kv_engine INTERFACE hps_native_support)
+endif()
 # KV engine factory done
 
 add_executable(benchmark_kv_engine benchmark_kv_engine.cc)

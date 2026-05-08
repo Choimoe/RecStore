@@ -744,6 +744,7 @@ public:
               shard_config["base_kv_config"].is_object()) {
             auto& base_kv_config = shard_config["base_kv_config"];
             AppendShardSuffixIfPresent(base_kv_config, "path", shard);
+            AppendShardSuffixIfPresent(base_kv_config, "rocksdb_path", shard);
             AppendShardSuffixToNestedFilePaths(base_kv_config, shard);
             LOG(INFO) << "bRPC shard " << shard
                       << " using base_kv_config: " << base_kv_config.dump();

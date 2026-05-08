@@ -53,6 +53,15 @@ DEFINE_string(config_path,
 
 namespace {
 
+void AppendShardSuffixIfPresent(
+    nlohmann::json& config_node, const char* key, int shard_id) {
+  if (!config_node.contains(key) || !config_node[key].is_string()) {
+    return;
+  }
+  config_node[key] =
+      config_node[key].get<std::string>() + "_" + std::to_string(shard_id);
+}
+
 void AppendShardSuffixToNestedFilePaths(nlohmann::json& node, int shard_id) {
   if (node.is_object()) {
     for (auto& item : node.items()) {
@@ -537,15 +546,13 @@ public:
 
             nlohmann::json shard_config = config_["cache_ps"];
             if (shard_config.contains("base_kv_config") &&
-                shard_config["base_kv_config"].contains("path")) {
-              std::string original_path =
-                  shard_config["base_kv_config"]["path"];
-              shard_config["base_kv_config"]["path"] =
-                  original_path + "_" + std::to_string(shard);
-              AppendShardSuffixToNestedFilePaths(
-                  shard_config["base_kv_config"], shard);
-              LOG(INFO) << "Shard " << shard << " using data path: "
-                        << shard_config["base_kv_config"]["path"];
+                shard_config["base_kv_config"].is_object()) {
+              auto& base_kv_config = shard_config["base_kv_config"];
+              AppendShardSuffixIfPresent(base_kv_config, "path", shard);
+              AppendShardSuffixIfPresent(base_kv_config, "rocksdb_path", shard);
+              AppendShardSuffixToNestedFilePaths(base_kv_config, shard);
+              LOG(INFO) << "gRPC shard " << shard
+                        << " using base_kv_config: " << base_kv_config.dump();
             }
 
             auto cache_ps = std::make_unique<CachePS>(shard_config);

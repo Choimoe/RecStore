@@ -212,16 +212,69 @@
       "type": "object",
       "description": "Underlying KV engine config.",
       "additionalProperties": true,
-      "required": [
-        "path",
-        "index_type",
-        "value_type"
-      ],
       "properties": {
+        "engine_type": {
+          "type": "string",
+          "enum": [
+            "KVEngine",
+            "KVEngineFasterKV",
+            "KVEngineHPSHashMap",
+            "KVEngineHPSRocksDB"
+          ],
+          "description": "Optional explicit BaseKV factory key. External engines require path, capacity, and value_size or value.default_value_size_hint."
+        },
         "path": {
           "type": "string",
           "minLength": 1,
           "description": "Storage base path."
+        },
+        "index": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "DRAM_EXTENDIBLE_HASH",
+                "DRAM_UNORDERED_MAP",
+                "DRAM_PET_HASH",
+                "SSD",
+                "SSD_EXTENDIBLE_HASH"
+              ],
+              "description": "Nested local KV index type."
+            }
+          }
+        },
+        "value": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "DRAM_VALUE_STORE",
+                "SSD_VALUE_STORE",
+                "TIERED_VALUE_STORE"
+              ],
+              "description": "Nested local KV value store type."
+            },
+            "default_value_size_hint": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Fixed row byte size hint for local and external KV engines."
+            },
+            "dram_allocator": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "ssd_allocator": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
         },
         "index_type": {
           "type": "string",
@@ -277,9 +330,106 @@
         "type": {
           "type": "string",
           "description": "Compatibility field observed in CI snippets."
+        },
+        "max_batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional maximum batch size for external KV engines."
+        },
+        "table_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional HPS table name."
+        },
+        "rocksdb_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional HPS RocksDB database path."
         }
       },
       "allOf": [
+        {
+          "if": {
+            "required": [
+              "engine_type"
+            ],
+            "properties": {
+              "engine_type": {
+                "enum": [
+                  "KVEngineFasterKV",
+                  "KVEngineHPSHashMap",
+                  "KVEngineHPSRocksDB"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "path",
+              "capacity"
+            ],
+            "anyOf": [
+              {
+                "required": [
+                  "value_size"
+                ]
+              },
+              {
+                "required": [
+                  "value"
+                ],
+                "properties": {
+                  "value": {
+                    "required": [
+                      "default_value_size_hint"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "engine_type"
+            ],
+            "properties": {
+              "engine_type": {
+                "const": "KVEngine"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "path",
+              "capacity",
+              "index",
+              "value"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "index"
+            ]
+          },
+          "then": {
+            "required": [
+              "path",
+              "capacity",
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "required": [
+                  "type"
+                ]
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
@@ -318,6 +468,26 @@
               "value_size"
             ]
           }
+        }
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "engine_type"
+          ]
+        },
+        {
+          "required": [
+            "index",
+            "value"
+          ]
+        },
+        {
+          "required": [
+            "path",
+            "index_type",
+            "value_type"
+          ]
         }
       ]
     }
