@@ -66,12 +66,31 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         default=["hps_hash_map", "hps_rocksdb", "dram_eh_dram", "dram_map_dram", "dram_pet_dram"],
     )
-    parser.add_argument("--mode", choices=["fetch", "insert", "mixed"], default="fetch")
+    parser.add_argument("--mode", choices=["fetch", "insert", "mixed", "fetch_insert"], default="fetch")
     parser.add_argument("--read-ratio", type=int, default=100)
     parser.add_argument("--record-count", type=int, default=1_000_000)
     parser.add_argument("--runtime-seconds", type=int, default=5)
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--load-threads", type=int, default=0)
+    parser.add_argument(
+        "--hps-rocksdb-load-threads",
+        type=int,
+        default=1,
+        help=(
+            "Load thread count used only for hps_rocksdb when --load-threads is 0. "
+            "HugeCTR RocksDB can crash on large concurrent insert loads; fetch "
+            "transactions still use --threads."
+        ),
+    )
+    parser.add_argument(
+        "--hps-rocksdb-db-threads",
+        type=int,
+        default=1,
+        help=(
+            "RocksDB internal thread count used only for hps_rocksdb. "
+            "0 passes --threads through to RocksDB."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--value-size", type=int, default=512)
     parser.add_argument("--distribution", choices=["uniform", "zipfian"], default="uniform")
@@ -112,6 +131,9 @@ def gflag(name: str, value: object) -> str:
 
 
 def command_for(alias: str, spec: BackendSpec, data_path: Path, args: argparse.Namespace) -> list[str]:
+    load_threads = args.load_threads
+    if alias == "hps_rocksdb" and load_threads == 0:
+        load_threads = args.hps_rocksdb_load_threads
     cmd = [
         str(BENCHMARK_BIN),
         gflag("backend", spec.backend),
@@ -121,7 +143,7 @@ def command_for(alias: str, spec: BackendSpec, data_path: Path, args: argparse.N
         gflag("record_count", args.record_count),
         gflag("running_seconds", args.runtime_seconds),
         gflag("thread_num", args.threads),
-        gflag("load_thread_num", args.load_threads),
+        gflag("load_thread_num", load_threads),
         gflag("batch_size", args.batch_size),
         gflag("value_size", args.value_size),
         gflag("distribution", args.distribution),
@@ -132,6 +154,8 @@ def command_for(alias: str, spec: BackendSpec, data_path: Path, args: argparse.N
         cmd.append(gflag("index_type", spec.index_type))
     if spec.value_store_type:
         cmd.append(gflag("value_store_type", spec.value_store_type))
+    if alias == "hps_rocksdb":
+        cmd.append(gflag("hps_rocksdb_thread_num", args.hps_rocksdb_db_threads))
     if args.dram_capacity_bytes:
         cmd.append(gflag("dram_capacity_bytes", args.dram_capacity_bytes))
     cmd.extend(args.extra_arg)

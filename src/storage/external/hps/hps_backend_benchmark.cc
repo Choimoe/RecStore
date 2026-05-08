@@ -30,10 +30,13 @@ DEFINE_int32(value_size, 512, "value size bytes");
 DEFINE_int32(batch_size, 1024, "keys per HPS fetch/insert call");
 DEFINE_int32(thread_num, 16, "worker thread count");
 DEFINE_int32(load_thread_num, 0, "load thread count; 0 uses thread_num");
+DEFINE_int32(hps_rocksdb_thread_num,
+             1,
+             "RocksDB internal thread count; 0 uses thread_num");
 DEFINE_int32(running_seconds, 5, "transaction runtime seconds");
 DEFINE_string(distribution, "uniform", "uniform|zipfian");
 DEFINE_double(zipfian_alpha, 0.9, "Zipfian alpha");
-DEFINE_string(mode, "fetch", "fetch|insert|mixed");
+DEFINE_string(mode, "fetch", "fetch|insert|mixed|fetch_insert");
 DEFINE_int32(read_ratio, 100, "read percentage for mixed mode");
 DEFINE_string(table_name, "hps_recstore_bench_table", "HPS table name");
 
@@ -125,6 +128,11 @@ private:
 
 using HpsBackend = HugeCTR::DatabaseBackendBase<long long>;
 
+const std::string& EffectiveTableName() {
+  static const std::string kRocksDbDefaultTable = "default";
+  return FLAGS_backend == "hps_rocksdb" ? kRocksDbDefaultTable : FLAGS_table_name;
+}
+
 std::unique_ptr<HpsBackend> CreateBackend() {
   if (FLAGS_backend == "hps_hash_map") {
     HugeCTR::HashMapBackendParams params;
@@ -137,7 +145,10 @@ std::unique_ptr<HpsBackend> CreateBackend() {
     HugeCTR::RocksDBBackendParams params;
     params.path           = FLAGS_path;
     params.max_batch_size = static_cast<size_t>(FLAGS_batch_size);
-    params.num_threads    = static_cast<size_t>(std::max(1, FLAGS_thread_num));
+    const int rocksdb_threads =
+        FLAGS_hps_rocksdb_thread_num > 0 ? FLAGS_hps_rocksdb_thread_num
+                                         : FLAGS_thread_num;
+    params.num_threads = static_cast<size_t>(std::max(1, rocksdb_threads));
     return std::make_unique<HugeCTR::RocksDBBackend<long long>>(params);
   }
   if (FLAGS_backend == "recstore") {
@@ -192,7 +203,7 @@ PhaseStats LoadRecords(HpsBackend* backend, int load_threads) {
         while (key < end && keys.size() < static_cast<size_t>(FLAGS_batch_size)) {
           keys.push_back(static_cast<long long>(key++));
         }
-        backend->insert(FLAGS_table_name,
+        backend->insert(EffectiveTableName(),
                         keys.size(),
                         keys.data(),
                         values.data(),
@@ -220,10 +231,12 @@ void PrepareBackendForLoad(HpsBackend* backend) {
     return;
   }
 
+  // RocksDBBackend lazily creates non-default column families on insert. Use
+  // the default column family in this benchmark to avoid that unstable path.
   const long long key = 1;
   std::vector<char> value =
       MakeValues(1, static_cast<size_t>(FLAGS_value_size), 0);
-  backend->insert(FLAGS_table_name,
+  backend->insert(EffectiveTableName(),
                   1,
                   &key,
                   value.data(),
@@ -235,8 +248,9 @@ PhaseStats RunTransactions(HpsBackend* backend) {
   const bool fetch_only  = FLAGS_mode == "fetch";
   const bool insert_only = FLAGS_mode == "insert";
   const bool mixed       = FLAGS_mode == "mixed";
-  if (!fetch_only && !insert_only && !mixed) {
-    throw std::invalid_argument("mode must be fetch|insert|mixed");
+  const bool fetch_insert = FLAGS_mode == "fetch_insert";
+  if (!fetch_only && !insert_only && !mixed && !fetch_insert) {
+    throw std::invalid_argument("mode must be fetch|insert|mixed|fetch_insert");
   }
 
   std::atomic<bool> start{false};
@@ -264,11 +278,11 @@ PhaseStats RunTransactions(HpsBackend* backend) {
           key = static_cast<long long>(key_gen.NextKey());
         }
         const bool do_fetch =
-            fetch_only ||
+            fetch_only || fetch_insert ||
             (mixed && static_cast<int>(key_gen.NextUint(100)) < FLAGS_read_ratio);
         if (do_fetch) {
           size_t misses = 0;
-          backend->fetch(FLAGS_table_name,
+          backend->fetch(EffectiveTableName(),
                          keys.size(),
                          keys.data(),
                          out.data(),
@@ -276,8 +290,9 @@ PhaseStats RunTransactions(HpsBackend* backend) {
                          [&](size_t) { ++misses; },
                          std::chrono::nanoseconds::zero());
           local.misses += misses;
-        } else {
-          backend->insert(FLAGS_table_name,
+        }
+        if (insert_only || fetch_insert || (mixed && !do_fetch)) {
+          backend->insert(EffectiveTableName(),
                           keys.size(),
                           keys.data(),
                           values.data(),
