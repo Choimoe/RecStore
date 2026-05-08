@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-#include "storage/kv_engine/hps_recstore_backend.h"
+#include "storage/external/hps/hps_recstore_backend.h"
 
 namespace {
 

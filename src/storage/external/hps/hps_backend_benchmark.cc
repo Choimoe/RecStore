@@ -15,7 +15,7 @@
 #include "base/bind_core.h"
 #include "base/init.h"
 #include "base/log.h"
-#include "storage/kv_engine/hps_recstore_backend.h"
+#include "storage/external/hps/hps_recstore_backend.h"
 #include "third_party/HugeCTR/HugeCTR/include/hps/hash_map_backend.hpp"
 #include "third_party/HugeCTR/HugeCTR/include/hps/rocksdb_backend.hpp"
 

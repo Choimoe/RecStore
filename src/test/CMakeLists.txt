@@ -130,32 +130,38 @@ target_link_libraries(test_kvengine PUBLIC
 )
 add_test(NAME test_kvengine COMMAND test_kvengine)
 
-add_executable(test_hps_recstore_backend
-    test_hps_recstore_backend.cpp
-    ${PROJECT_SOURCE_DIR}/src/storage/kv_engine/hps_backend_shim.cc
-    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
-    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/database_backend.cpp
-)
-target_include_directories(test_hps_recstore_backend PRIVATE
-    ${PROJECT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src
-    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
-    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
-    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/parallel-hashmap
-    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include
-    ${CUDA_TOOLKIT_INCLUDE}
-)
-target_link_libraries(test_hps_recstore_backend PUBLIC
-    base
-    base_memory
-    ps_common
-    kv_engine
-    gtest
-    gtest_main
-    pthread
-    TBB::tbb
-)
-add_test(NAME test_hps_recstore_backend COMMAND test_hps_recstore_backend)
+if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
+    add_executable(test_hps_recstore_backend
+        test_hps_recstore_backend.cpp
+        ${PROJECT_SOURCE_DIR}/src/storage/external/hps/hps_backend_shim.cc
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/core23/logger.cpp
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/src/hps/database_backend.cpp
+    )
+    target_include_directories(test_hps_recstore_backend PRIVATE
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/parallel-hashmap
+        ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include
+        ${RECSTORE_CUDA_INCLUDE_DIRS}
+    )
+    target_link_libraries(test_hps_recstore_backend PUBLIC
+        base
+        base_memory
+        ps_common
+        kv_engine
+        gtest
+        gtest_main
+        pthread
+        TBB::tbb
+    )
+    add_test(NAME test_hps_recstore_backend COMMAND test_hps_recstore_backend)
+else()
+    message(STATUS
+        "Skipping test_hps_recstore_backend: HugeCTR CUDA headers are unavailable."
+    )
+endif()
 
 add_executable(test_index test_index.cpp)
 target_link_libraries(test_index PUBLIC
@@ -372,6 +378,7 @@ set(HUGECTR_CONFIG_TEMPLATE
 )
 
 if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER AND
+   RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE AND
    EXISTS ${HUGECTR_TENSOR2_HEADER} AND
    EXISTS ${HUGECTR_CONFIG_TEMPLATE})
     set(HUGECTR_TEST_GENERATED_INCLUDE_DIR
@@ -403,7 +410,7 @@ if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER AND
         ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
         ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
         ${HUGECTR_TEST_GENERATED_INCLUDE_DIR}
-        ${CUDA_TOOLKIT_INCLUDE}
+        ${RECSTORE_CUDA_INCLUDE_DIRS}
     )
     target_link_libraries(test_hugectr_emb PUBLIC
         base
