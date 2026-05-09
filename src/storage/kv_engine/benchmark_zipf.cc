@@ -106,6 +106,7 @@ int main(int argc, char* argv[]) {
     LOG(FATAL) << "benchmark_zipf currently supports DRAM_VALUE_STORE only";
   }
   auto resolved = base::ResolveEngine(config);
+  base::RegisterKVEngineFactories();
   kv            = base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
       resolved.engine, resolved.cfg);
   for (int i = 0; i < FLAGS_thread_count; i++) {

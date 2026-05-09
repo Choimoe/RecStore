@@ -55,6 +55,7 @@ protected:
                                           {"queue_depth", 512},
                                           {"base_offset_bytes", 4096}}}}}}}};
     auto r = base::ResolveEngine(config_);
+    base::RegisterKVEngineFactories();
     kv_engine_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
         r.engine, r.cfg));
   }

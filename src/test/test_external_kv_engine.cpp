@@ -47,6 +47,7 @@ std::unique_ptr<BaseKV> CreateEngine(const std::string& engine_type) {
   base::EngineResolved resolved;
   EXPECT_NO_THROW(resolved = base::ResolveEngine(config));
   EXPECT_EQ(resolved.engine, engine_type);
+  base::RegisterKVEngineFactories();
   return std::unique_ptr<BaseKV>(
       base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
           resolved.engine, resolved.cfg));
@@ -96,6 +97,7 @@ CreateEngineFromRecstoreConfigFile(const std::string& engine_type) {
   base::EngineResolved resolved;
   EXPECT_NO_THROW(resolved = base::ResolveEngine(config));
   EXPECT_EQ(resolved.engine, engine_type);
+  base::RegisterKVEngineFactories();
   return std::unique_ptr<BaseKV>(
       base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
           resolved.engine, resolved.cfg));

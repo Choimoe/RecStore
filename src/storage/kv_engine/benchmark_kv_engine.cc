@@ -379,6 +379,7 @@ int main(int argc, char* argv[]) {
 
   BaseKVConfig config = BuildConfig();
   auto resolved       = base::ResolveEngine(config);
+  base::RegisterKVEngineFactories();
   std::unique_ptr<BaseKV> kv(
       base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
           resolved.engine, resolved.cfg));
