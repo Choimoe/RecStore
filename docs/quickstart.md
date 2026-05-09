@@ -33,6 +33,7 @@ RecStore 推荐使用 Docker 进行环境配置。在开始之前，请确保你
 git clone https://github.com/RecStore/RecStore.git
 cd RecStore
 git submodule update --init --recursive
+git config core.hooksPath .githooks  # 启用仓库自带的提交前格式化检查
 ```
 
 ??? note "下载打包后的子模块"
