@@ -125,7 +125,11 @@ def main(argv: list[str] | None = None) -> int:
             cfg.recstore_runtime_dir = str(runtime_dir)
 
     proc = None
+    previous_recstore_config = os.environ.get("RECSTORE_CONFIG")
+    recstore_config_was_set = "RECSTORE_CONFIG" in os.environ
     try:
+        if cfg.backend == "recstore":
+            os.environ["RECSTORE_CONFIG"] = str(runtime_cfg_path)
         if server_needed:
             print(f"[rs_demo] starting server ({effective_ps_type}) with {runtime_cfg_path}")
             proc = start_server(repo_root, runtime_cfg_path, Path(cfg.server_log))
@@ -205,6 +209,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         stop_server(proc)
+        if recstore_config_was_set:
+            os.environ["RECSTORE_CONFIG"] = previous_recstore_config or ""
+        else:
+            os.environ.pop("RECSTORE_CONFIG", None)
 
 
 if __name__ == "__main__":

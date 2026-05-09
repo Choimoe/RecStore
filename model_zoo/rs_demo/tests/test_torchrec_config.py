@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -487,6 +488,59 @@ class TestTorchRecConfig(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertEqual(captured_cfg["recstore_runtime_dir"], str(generated_runtime))
+
+    def test_cli_recstore_exports_generated_runtime_config_to_ops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_root = Path(tmpdir)
+            base_cfg = {
+                "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
+                "cache_ps": {"servers": []},
+                "distributed_client": {"servers": []},
+            }
+            (repo_root / "recstore_config.json").write_text(json.dumps(base_cfg), encoding="utf-8")
+            generated_runtime = repo_root / "runtime-generated"
+            generated_runtime.mkdir()
+            generated_config = generated_runtime / "recstore_config.json"
+            generated_config.write_text(json.dumps(base_cfg), encoding="utf-8")
+
+            captured_env = {}
+
+            class _FakeRunner:
+                def run(self, repo_root, cfg):
+                    captured_env["RECSTORE_CONFIG"] = os.environ.get("RECSTORE_CONFIG")
+                    Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
+                    Path(cfg.recstore_main_csv).write_text(
+                        "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,output_unpack_ms,dense_fwd_ms,backward_ms,optimizer_ms,sparse_update_ms,emb_stage_ms\n"
+                        "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n",
+                        encoding="utf-8",
+                    )
+                    return {"backend": "recstore", "rows": []}
+
+            with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+                cli, "build_runner", return_value=_FakeRunner()
+            ), mock.patch.object(
+                cli, "repo_root_from_this_file", return_value=repo_root
+            ), mock.patch.object(
+                cli, "make_runtime_dir", return_value=(generated_runtime, generated_config)
+            ), mock.patch.object(
+                cli, "analyze_embupdate", return_value="ok"
+            ):
+                rc = cli.main(
+                    [
+                        "--backend",
+                        "recstore",
+                        "--steps",
+                        "1",
+                        "--no-start-server",
+                        "--output-root",
+                        str(repo_root),
+                        "--run-id",
+                        "recstore-generated-runtime",
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured_env["RECSTORE_CONFIG"], str(generated_config))
 
 
 if __name__ == "__main__":
