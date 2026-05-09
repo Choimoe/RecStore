@@ -99,6 +99,7 @@ public:
     }
 
     auto resolved = base::ResolveEngine(cfg);
+    base::RegisterKVEngineFactories();
     kv_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
         resolved.engine, resolved.cfg));
     if (!kv_) {

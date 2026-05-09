@@ -87,6 +87,7 @@ int main(int argc, char* argv[]) {
   BaseKVConfig config;
   config.json_config_["capacity"]   = kKeySpace;
   config.json_config_["value_size"] = FLAGS_value_size;
+  base::RegisterKVEngineFactories();
   kv =
       base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(FLAGS_db, config);
   for (int i = 0; i < FLAGS_thread_count; i++) {

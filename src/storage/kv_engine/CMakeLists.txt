@@ -21,7 +21,7 @@ endif()
 
 target_link_libraries(
   kv_engine
-  INTERFACE pet_kv index
+  INTERFACE pet_kv index io_backend
   # spdk_wrapper
 )
   # INTERFACE pet_kv dash_hash PMHashPCLHT PMHashLevel PMHashClevel PMHashCCEHVM)

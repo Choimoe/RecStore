@@ -37,6 +37,7 @@ protected:
     };
 
     auto r = base::ResolveEngine(config_);
+    base::RegisterKVEngineFactories();
     kv_engine_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
         r.engine, r.cfg));
     // KVEngineCCEH

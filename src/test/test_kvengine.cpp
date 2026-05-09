@@ -46,6 +46,25 @@ TEST(AllocatorFactoryTest, CreatesCanonicalDramAllocators) {
   }
 }
 
+TEST(KVEngineFactoryRegistrationTest, ExplicitRegistrationRestoresLocalEngineFactories) {
+  using BaseKVFactory = base::Factory<BaseKV, const BaseKVConfig&>;
+  using IndexFactory = base::Factory<Index, const BaseKVConfig&>;
+  using ValueStoreFactory = base::Factory<ValueStore, const BaseKVConfig&>;
+
+  BaseKVFactory::creators().clear();
+  IndexFactory::creators().clear();
+  ValueStoreFactory::creators().clear();
+
+  base::RegisterKVEngineFactories();
+
+  EXPECT_NE(BaseKVFactory::creators().find("KVEngine"),
+            BaseKVFactory::creators().end());
+  EXPECT_NE(IndexFactory::creators().find("DRAM_EXTENDIBLE_HASH"),
+            IndexFactory::creators().end());
+  EXPECT_NE(ValueStoreFactory::creators().find("DRAM_VALUE_STORE"),
+            ValueStoreFactory::creators().end());
+}
+
 class KVEngineCartesianTest
     : public ::testing::TestWithParam<
           std::tuple<const char*, const char*, const char*>> {
@@ -131,6 +150,7 @@ protected:
         << "selector derived mismatch for (" << index_type_ << ","
         << value_type_ << "," << allocator_type_ << ")";
 
+    base::RegisterKVEngineFactories();
     try {
       kv_engine_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
           engine_name_, r.cfg));
@@ -799,6 +819,7 @@ TEST(KVEngineNestedConfigTest, DramIndexDramValueSmoke) {
 
   auto resolved = base::ResolveEngine(cfg);
   ASSERT_EQ(resolved.engine, "KVEngine");
+  base::RegisterKVEngineFactories();
   std::unique_ptr<BaseKV> kv(
       base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
           resolved.engine, resolved.cfg));
@@ -848,6 +869,7 @@ TEST(KVEngineLegacyConfigTest, DramIndexSsdValueConfigIsAccepted) {
             128);
   EXPECT_TRUE(resolved.cfg.json_config_.at("value").contains("ssd_allocator"));
 
+  base::RegisterKVEngineFactories();
   std::unique_ptr<BaseKV> kv(
       base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
           resolved.engine, resolved.cfg));

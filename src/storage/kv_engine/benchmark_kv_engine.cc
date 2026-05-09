@@ -100,6 +100,7 @@ int main(int argc, char* argv[]) {
   config.json_config_["capacity"]   = FLAGS_key_space_m * 1024 * 1024LL;
   config.json_config_["value_size"] = FLAGS_value_size;
   config.num_threads_ = std::max(FLAGS_thread_num, FLAGS_warmup_thread_num);
+  base::RegisterKVEngineFactories();
   base_kv =
       base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(FLAGS_db, config);
 

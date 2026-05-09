@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <boost/coroutine2/all.hpp>
 #include <cstddef>
 #include <glog/logging.h>
@@ -14,7 +15,16 @@ public:
   virtual ~Index() { std::cout << "exit Index" << std::endl; }
   explicit Index(const BaseKVConfig& config){};
 
+  virtual void Get(Key_t key, Value_t& pointer) {
+    Get(key, pointer, CurrentTid());
+  }
   virtual void Get(Key_t key, Value_t& pointer, unsigned tid) = 0;
+  virtual void GetAsync(coroutine<void>::push_type& sink,
+                        int index,
+                        Key_t key,
+                        Value_t& pointer) {
+    Get(sink, index, key, pointer, CurrentTid());
+  }
   virtual void
   Get(coroutine<void>::push_type& sink,
       int index,
@@ -22,6 +32,9 @@ public:
       Value_t& pointer,
       unsigned tid) {
     LOG(FATAL) << "not implemented";
+  }
+  virtual void Put(Key_t key, Value_t pointer) {
+    Put(key, pointer, CurrentTid());
   }
   virtual void Put(Key_t key, Value_t pointer, unsigned tid) = 0;
   virtual void
@@ -32,8 +45,14 @@ public:
       unsigned tid) {
     LOG(FATAL) << "not implemented";
   }
+  virtual void BatchPut(base::ConstArray<Key_t> keys, Value_t* pointers) {
+    BatchPut(keys, pointers, CurrentTid());
+  }
   virtual void
   BatchPut(base::ConstArray<Key_t> keys, Value_t* pointers, unsigned tid) = 0;
+  virtual void BatchGet(base::ConstArray<Key_t> keys, Value_t* pointers) {
+    BatchGet(keys, pointers, CurrentTid());
+  }
   virtual void
   BatchGet(base::ConstArray<Key_t> keys, Value_t* pointers, unsigned tid) = 0;
   virtual bool Delete(Key_t& key)                                         = 0;
@@ -56,4 +75,13 @@ public:
     delete[] values;
   };
   virtual void DebugInfo() const {}
+
+protected:
+  static unsigned CurrentTid() {
+    static std::atomic<unsigned> counter{0};
+    thread_local unsigned tid = counter.fetch_add(1, std::memory_order_relaxed);
+    return tid;
+  }
 };
+
+static constexpr Value_t kValueHandleNone = NONE;

@@ -53,6 +53,7 @@ public:
     kv_config.num_threads_ = config["num_threads"].get<int>();
     kv_config.json_config_ = config["base_kv_config"];
     auto r                 = base::ResolveEngine(kv_config);
+    base::RegisterKVEngineFactories();
     base_kv_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
         r.engine, r.cfg));
   }
