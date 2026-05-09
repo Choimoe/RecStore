@@ -2,11 +2,13 @@
 
 ## 配置文件结构
 
-RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含以下顶层配置块：`cache_ps`、`distributed_client`、`client`、`report_API`，以及按需启用的 `hugectr`、`hierkv`。
+RecStore 默认从仓库根目录的 `recstore_config.json` 读取配置。常用顶层字段有 `cache_ps`、`distributed_client`、`client`、`report_API`；HugeCTR 路径还会读取 `hugectr`，当 `hugectr.backend = "hierkv"` 时再读取 `hierkv`。
+
+配置文件可以带 `$schema`，当前默认文件指向 `./ci/schema/recstore_config.schema.json`，方便编辑器做基础校验。运行时仍以 C++/Python 代码里的检查为准。
 
 ## 1. cache_ps 配置
 
-`cache_ps` 配置用于参数服务器（Parameter Server）端，定义服务器的运行参数和底层存储引擎。
+`cache_ps` 是参数服务器端的配置，包含 RPC 类型、分片监听地址，以及每个分片背后的 KV 存储配置。
 
 ### 1.1 服务器基础配置
 
@@ -16,9 +18,14 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `max_batch_keys_size` | integer | 是 | 单次批量请求的最大键数量 |
 | `num_threads` | integer | 是 | 服务器工作线程数 |
 | `num_shards` | integer | 是 | 分片数量，应等于 `servers` 数组长度 |
-| `servers` | array | 是 | 服务器节点配置数组 |
+| `servers` | array | 是 | 服务器节点列表 |
 
-作用位置：通信协议选择见 [src/framework/op.cc](../src/framework/op.cc)、[src/grpc_ps/grpc_ps_server.cpp](../src/grpc_ps/grpc_ps_server.cpp)。同时也可通过统一入口可执行程序 [src/grpc_ps/ps_server.cpp](../src/grpc_ps/ps_server.cpp) 按 `ps_type` 自动选择 GRPC 或 bRPC；批量限制与线程数在 [src/grpc_ps/grpc_ps_client.h](../src/grpc_ps/grpc_ps_client.h) 及 [src/storage/kv_engine/base_kv.h](../src/storage/kv_engine/base_kv.h) 中生效；分片与 servers 列表用于分布式路由。
+相关代码：
+
+- [src/framework/op.cc](../src/framework/op.cc)、[src/ps/grpc/grpc_ps_server.cpp](../src/ps/grpc/grpc_ps_server.cpp) 和 [src/ps/brpc/brpc_ps_server.cpp](../src/ps/brpc/brpc_ps_server.cpp) 会按 `ps_type` 走不同 RPC 路径
+- [src/ps/ps_server.cpp](../src/ps/ps_server.cpp) 是统一的 `ps_server` 入口
+- [src/ps/grpc/grpc_ps_client.h](../src/ps/grpc/grpc_ps_client.h) 和 [src/storage/kv_engine/base_kv.h](../src/storage/kv_engine/base_kv.h) 使用批量大小等限制
+- 多分片时，`servers` 里的 `shard` 字段参与路由，不要把它当成数组下标
 
 ### 1.2 servers 数组配置
 
@@ -28,14 +35,14 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 |------|------|------|------|
 | `host` | string | 是 | 服务器主机地址 |
 | `port` | integer | 是 | 服务器监听端口 |
-| `shard` | integer | 是 | 分片编号，从 0 开始 
+| `shard` | integer | 是 | 分片编号，从 0 开始 |
 
 ???+ tip "多机环境"
-    默认配置中 `host` 为 `127.0.0.1`，仅允许本地访问。在多机场景下，必须修改为 `0.0.0.0` 或本机对外的局域网 IP (LAN IP)，以允许远程客户端连接。
+    默认 `host` 是 `127.0.0.1`，只能本机连接。多机运行时，把它改成 `0.0.0.0` 或本机对外的局域网 IP；客户端侧也要使用能从训练节点访问到的地址。
 
 ### 1.3 base_kv_config 配置
 
-`base_kv_config` 定义底层键值存储引擎的配置，由 [src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h) 的 `ResolveEngine` 函数解析。当前推荐使用嵌套的 `index` / `value` 配置；也可以通过 `engine_type` 显式选择外部 KV engine。
+`base_kv_config` 交给 [src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h) 里的 `ResolveEngine` 解析。新配置优先使用嵌套的 `index` / `value` 写法；需要接入 FasterKV 或 HPS 时，再显式写 `engine_type`。
 
 #### 推荐本地 KV 配置字段
 
@@ -47,11 +54,15 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `value.type` | string | 是 | `DRAM_VALUE_STORE`、`SSD_VALUE_STORE` 或 `TIERED_VALUE_STORE` |
 | `value.default_value_size_hint` | integer | 建议 | 单条值的字节数 |
 
-本地 DRAM value store 需要 `value.dram_allocator`，SSD value store 需要 `value.ssd_allocator`，tiered value store 同时需要二者。
+本地 value store 的 allocator 要和类型匹配：
+
+- `DRAM_VALUE_STORE` 需要 `value.dram_allocator`
+- `SSD_VALUE_STORE` 需要 `value.ssd_allocator`
+- `TIERED_VALUE_STORE` 同时需要 `value.dram_allocator` 和 `value.ssd_allocator`
 
 #### 兼容旧版本地 KV 配置字段
 
-旧版配置中的 `index_type` / `value_type` 仍然可用，主要用于已有 DRAM+SSD、本地 CI 和历史实验配置。`ResolveEngine` 会把这类字段归一化为当前的 `index` / `value` 结构后再创建本地 `KVEngine`，不会影响外部 KV engine 的 `engine_type` 选择。
+旧配置里的 `index_type` / `value_type` 还在兼容，主要服务已有 DRAM+SSD 配置、本地 CI 和历史实验。`ResolveEngine` 会先把它们归一到当前的 `index` / `value` 结构，再创建本地 `KVEngine`。如果配置里显式写了外部 `engine_type`，这条兼容路径不会抢走外部 engine。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -82,17 +93,17 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 |------|------|--------|------|
 | `value_memory_management` | string | `"PersistLoopShmMalloc"` | 内存管理器类型：`"PersistLoopShmMalloc"` 或 `"R2ShmMalloc"` |
 
-作用位置：内存管理器选择在 [src/storage/hybrid/value.h](../src/storage/hybrid/value.h) 生效，决定底层分配策略。
+内存管理器选择在 [src/storage/hybrid/value.h](../src/storage/hybrid/value.h) 生效。做本地 benchmark bring-up 时要留意：当前 `rs_demo` 路径下，`R2ShmMalloc` 可能触发 `ps_server` 不稳定；只想先拿到可运行 baseline 时，可以临时使用 `PersistLoopShmMalloc`，但报告里要写清楚。
 
 #### 引擎类型自动推导规则
 
-`base::ResolveEngine` 默认返回本地 `KVEngine`，再由 `index.type` 和 `value.type` 选择具体 index/value store。设置 `engine_type` 时会显式选择对应的 `BaseKV` factory key。旧的 `index_type` / `value_type` 字段不是废弃删除路径，仍用于兼容历史 DRAM+SSD 等配置；新配置更推荐嵌套写法。
+`base::ResolveEngine` 默认走本地 `KVEngine`，再根据 `index.type` 和 `value.type` 选择具体 index/value store。写了 `engine_type` 时，会按对应的 `BaseKV` factory key 创建外部 engine。旧的 `index_type` / `value_type` 不是废弃字段，仍用于兼容历史 DRAM+SSD 配置；新文件建议写嵌套结构。
 
 引擎推导实现位置：[src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h)
 
 ## 2. distributed_client 配置
 
-`distributed_client` 配置用于分布式客户端，实现多分片参数服务器的访问。
+`distributed_client` 是分布式客户端的路由配置。多分片读写时，客户端按这里的 `hash_method` 把 key 分到 shard，再按 `servers` 里的显式 `shard` id 找到目标节点。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -101,11 +112,16 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `max_keys_per_request` | integer | 否（默认 500） | 单次请求最大键数量 |
 | `servers` | array | 是 | 服务器节点配置，结构同 `cache_ps.servers` |
 
-作用位置：分片数与哈希方法在 [src/grpc_ps/dist_brpc_ps_client.cpp](../src/grpc_ps/dist_brpc_ps_client.cpp) 与 [src/grpc_ps/dist_grpc_ps_client.cpp](../src/grpc_ps/dist_grpc_ps_client.cpp) 的 `GetShardId`、`PartitionKeys` 中决定路由；`max_keys_per_request` 限制单分片请求大小；`servers` 列表在 `InitializeClients` 中生成各分片客户端。
+相关代码在 [src/ps/brpc/dist_brpc_ps_client.cpp](../src/ps/brpc/dist_brpc_ps_client.cpp) 和 [src/ps/grpc/dist_grpc_ps_client.cpp](../src/ps/grpc/dist_grpc_ps_client.cpp)。`GetShardId`、`PartitionKeys` 决定 key 到 shard 的映射，`InitializeClients` 根据 `servers` 建立每个 shard 的客户端。
+
+注意两点：
+
+- 分布式客户端以 `distributed_client.servers` 为准，不要默认复用 `cache_ps.servers`
+- `shard` 是配置里的显式 id，不等于 `servers` 数组排序后的下标
 
 ## 3. client 配置
 
-`client` 配置用于单节点客户端，直接连接单个参数服务器。
+`client` 是单节点客户端配置，用来直接连一个参数服务器实例。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -113,37 +129,37 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `port` | integer | 是 | 服务器端口 |
 | `shard` | integer | 是 | 目标分片编号 |
 
-作用位置：单节点客户端在 [src/grpc_ps/grpc_ps_client.cpp](../src/grpc_ps/grpc_ps_client.cpp) 读取以上字段创建 gRPC 通道并标识分片，在 [src/grpc_ps/grpc_ps_client.h](../src/grpc_ps/grpc_ps_client.h) 中保存元数据。
+单节点客户端会在 [src/ps/grpc/grpc_ps_client.cpp](../src/ps/grpc/grpc_ps_client.cpp) 读取这些字段，创建 gRPC 通道，并把分片元数据保存在 [src/ps/grpc/grpc_ps_client.h](../src/ps/grpc/grpc_ps_client.h)。
 
 ???+ tip "动态覆盖"
-    在实际运行时（尤其是在多机训练场景下），可以通过 KVClient 动态覆盖配置文件的 `host` 与 `port` 设置 `client.set_ps_config(host, port)`，这允许在不修改 `recstore_config.json` 的情况下灵活调整连接目标。你可以在 [KVClient Python 客户端](./calc/kvclient.md) 中找到详细信息。
+    多机训练时，Python 侧可以通过 `client.set_ps_config(host, port)` 覆盖配置文件里的 `host` 和 `port`。这样不用为每个训练节点改一份 `recstore_config.json`。接口说明见 [KVClient Python 客户端](./calc/kvclient.md)。
 
 ## 4. report_API 配置
 
-`report_API` 是顶层配置项，用于指定性能 report 的 HTTP 上报入口。
+`report_API` 配置性能事件的 HTTP 上报地址。
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `report_API` | string | 否 | `http://127.0.0.1:8081/report` | `report()` 异步上报接口地址，通常由该服务写入 ClickHouse 并供 Grafana 展示 |
 
-作用位置：`report_API` 由 [src/base/report/report_client.cpp](../src/base/report/report_client.cpp) 读取；当该字段缺失时会回退到默认地址 `http://127.0.0.1:8081/report`。
+[src/base/report/report_client.cpp](../src/base/report/report_client.cpp) 读取这个字段。缺失时默认使用 `http://127.0.0.1:8081/report`。
 
 ## 5. hugectr 配置
 
-`hugectr` 顶层配置用于 HugeCTR 入口的运行时后端选择。它不会修改 `CommonOp` 语义，而是只影响 [src/framework/hugectr/op_hugectr.cc](../src/framework/hugectr/op_hugectr.cc) 内部的 backend 分发。
+`hugectr` 只影响 HugeCTR 入口的运行时 backend 选择，不改变 `CommonOp` 的语义。分发逻辑在 [src/framework/hugectr/op_hugectr.cc](../src/framework/hugectr/op_hugectr.cc)。
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | `backend` | string | 否 | `recstore` | HugeCTR 运行时后端，可选 `recstore` 或 `hierkv` |
 
-当前行为：
+当前两个取值：
 
-- `recstore`：沿用现有 host staging + RecStore OP 路径
+- `recstore`：使用现有 host staging + RecStore OP 路径
 - `hierkv`：切到 HugeCTR 专用 HierKV backend 适配层
 
 ## 6. hierkv 配置
 
-`hierkv` 顶层配置仅在 `hugectr.backend = "hierkv"` 时使用，用于初始化 HugeCTR 专用 HierarchicalKV backend。
+`hierkv` 只在 `hugectr.backend = "hierkv"` 时读取，用来初始化 HugeCTR 专用的 HierarchicalKV backend。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -155,8 +171,8 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 
 注意：
 
-- 这组配置当前只进入 HugeCTR 侧适配层，不会回流到 `CommonOp`
-- 如果选择 `hierkv` 但缺少上述必填字段，HugeCTR 入口会直接抛出配置错误
+- 这组字段只进入 HugeCTR 侧适配层，不回流到 `CommonOp`
+- 选择 `hierkv` 但缺少必填字段时，HugeCTR 入口会直接报配置错误
 
 ## 配置示例
 
@@ -304,9 +320,9 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
     }
     ```
 
-??? example "在 CI 中的配置"
+??? example "CI 中的轻量配置"
 
-    Github Actions 服务器环境限制 CPU 使用，同时无显卡支持，在 ci 配置脚本中使用：
+    GitHub Actions 的 CPU 资源有限，也没有 GPU。CI 脚本会把配置压到更小规模，例如：
 
     ```shell
     jq '.cache_ps.base_kv_config.capacity = 512
@@ -319,11 +335,11 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
         | .cache_ps.base_kv_config.queue_size = 1024'
     ```
 
-    来配置DRAM 索引 + SSD 值配置。
+    这组覆盖会使用 DRAM 索引 + SSD value，并降低容量和批量大小，避免 CI 资源被默认配置吃满。
 
 ## 配置文件使用
 
-配置文件通常保存为 `recstore_config.json`，可通过以下方式读取：
+配置文件通常保存为 `recstore_config.json`。常见读取方式如下：
 
 ```cpp
 std::ifstream config_file("recstore_config.json");
