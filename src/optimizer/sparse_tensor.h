@@ -27,6 +27,7 @@ public:
   void BatchGet(const std::vector<uint64_t>& keys,
                 std::vector<base::ConstArray<float>>* values,
                 unsigned tid);
+  int64_t EmbeddingDim() const;
   bool ApplySgdUpdateFlat(
       const base::ConstArray<uint64_t>& keys,
       const float* grads,

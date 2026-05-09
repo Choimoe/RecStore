@@ -41,6 +41,13 @@ void SparseTensor::BatchGet(const std::vector<uint64_t>& keys,
   kv->BatchGet(base::ConstArray<uint64_t>(hashed_keys), values, tid);
 }
 
+int64_t SparseTensor::EmbeddingDim() const {
+  if (shape.size() < 2) {
+    return 0;
+  }
+  return static_cast<int64_t>(shape[1]);
+}
+
 bool SparseTensor::ApplySgdUpdateFlat(
     const base::ConstArray<uint64_t>& keys,
     const float* grads,

@@ -460,6 +460,26 @@ std::optional<int> PSServerLauncher::ParseReadyShard(const std::string& line) {
   return std::nullopt;
 }
 
+std::string PSServerLauncher::FormatRecentLogsForErrorForTest(
+    const std::vector<std::string>& logs,
+    size_t max_lines) {
+  if (logs.empty() || max_lines == 0) {
+    return "";
+  }
+
+  std::ostringstream oss;
+  oss << "\nRecent ps_server output:";
+  const size_t start = logs.size() > max_lines ? logs.size() - max_lines : 0;
+  for (size_t i = start; i < logs.size(); ++i) {
+    oss << "\n  " << logs[i];
+  }
+  return oss.str();
+}
+
+std::string PSServerLauncher::FormatRecentLogsForError(size_t max_lines) const {
+  return FormatRecentLogsForErrorForTest(recent_logs_, max_lines);
+}
+
 void PSServerLauncher::OutputThreadLoop(int fd,
                                         const std::string& stream_name) {
   FILE* stream = fdopen(fd, "r");
@@ -586,6 +606,9 @@ bool PSServerLauncher::SpawnProcess() {
     if (!cwd.empty()) {
       chdir(cwd.c_str());
     }
+
+    setenv("GLOG_logtostderr", "1", 0);
+    setenv("GLOG_alsologtostderr", "1", 0);
 
     std::vector<std::string> args;
     args.push_back(options_.server_path.string());
@@ -760,8 +783,26 @@ bool PSServerLauncher::WaitUntilReady() {
 
   std::unique_lock<std::mutex> lock(mu_);
   while (ready_shards_.size() < static_cast<size_t>(options_.num_shards)) {
-    if (!IsProcessAlive()) {
+    int child_status = 0;
+    pid_t wait_rc    = waitpid(pid_, &child_status, WNOHANG);
+    if (wait_rc == pid_) {
+      pid_        = -1;
       last_error_ = "ps_server exited before reaching ready state";
+      if (WIFEXITED(child_status)) {
+        last_error_ +=
+            " with exit code " + std::to_string(WEXITSTATUS(child_status));
+      } else if (WIFSIGNALED(child_status)) {
+        last_error_ +=
+            " from signal " + std::to_string(WTERMSIG(child_status));
+      }
+      last_error_ += FormatRecentLogsForError();
+      return false;
+    }
+
+    if (!IsProcessAlive()) {
+      last_error_ =
+          "ps_server exited before reaching ready state" +
+          FormatRecentLogsForError();
       return false;
     }
 
@@ -782,6 +823,7 @@ bool PSServerLauncher::WaitUntilReady() {
       std::ostringstream oss;
       oss << "Timeout waiting for ps_server ready shards: got="
           << ready_shards_.size() << ", expected=" << options_.num_shards;
+      oss << FormatRecentLogsForError();
       last_error_ = oss.str();
       return false;
     }

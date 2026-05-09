@@ -24,6 +24,21 @@ TEST(PSServerLauncherUnitTest, ParseReadyShardWorks) {
   EXPECT_FALSE(invalid.has_value());
 }
 
+TEST(PSServerLauncherUnitTest, FormatsRecentLogsForError) {
+  std::vector<std::string> logs = {
+      "Starting PS Server: /tmp/ps_server",
+      "[STDERR] no Factory instance",
+      "[STDERR] aborting"};
+
+  auto message =
+      PSServerLauncher::FormatRecentLogsForErrorForTest(logs, 2);
+
+  EXPECT_NE(message.find("Recent ps_server output:"), std::string::npos);
+  EXPECT_EQ(message.find("Starting PS Server"), std::string::npos);
+  EXPECT_NE(message.find("[STDERR] no Factory instance"), std::string::npos);
+  EXPECT_NE(message.find("[STDERR] aborting"), std::string::npos);
+}
+
 TEST(PSServerLauncherUnitTest, ExtractPortsFromConfigSupportsCachePS) {
   const std::filesystem::path config_path =
       std::filesystem::temp_directory_path() /

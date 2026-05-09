@@ -101,6 +101,10 @@ void SGD::UpdateFlat(
     LOG(ERROR) << "Table not found in SGD optimizer: '" << table << "'";
     throw std::runtime_error("Table not found: " + table);
   }
+  if (it->second->EmbeddingDim() != embedding_dim) {
+    throw std::runtime_error(
+        "SGD::UpdateFlat embedding_dim mismatch for table " + table);
+  }
 
   const auto direct_update_start = std::chrono::steady_clock::now();
   if (it->second->ApplySgdUpdateFlat(

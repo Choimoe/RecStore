@@ -61,6 +61,9 @@ public:
   ExtractPortsFromConfig(const std::filesystem::path& config_path);
   static std::vector<int> FindAvailablePorts(size_t count);
   static std::optional<int> ParseReadyShard(const std::string& line);
+  static std::string FormatRecentLogsForErrorForTest(
+      const std::vector<std::string>& logs,
+      size_t max_lines);
 
   bool Start();
   void Stop();
@@ -91,6 +94,7 @@ private:
   void OutputThreadLoop(int fd, const std::string& stream_name);
   void AppendLogLine(const std::string& line);
   void SetError(const std::string& error);
+  std::string FormatRecentLogsForError(size_t max_lines = 40) const;
 
 private:
   LauncherOptions options_;
