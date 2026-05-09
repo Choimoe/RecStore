@@ -17,10 +17,34 @@
 #include <vector>
 
 #include "base/json.h"
+#include "memory/allocators/allocator_factory.h"
 #include "memory/shm_file.h"
 
 #include "storage/kv_engine/engine_factory.h"
 #include "storage/kv_engine/engine_selector.h"
+
+TEST(AllocatorFactoryTest, CreatesCanonicalDramAllocators) {
+  for (const char* allocator_type : {"PERSIST_LOOP_SLAB", "R2_SLAB"}) {
+    const int64_t capacity_bytes = 128LL * 1024 * 1024;
+    const std::string test_dir =
+        "/tmp/test_allocator_factory_" + std::string(allocator_type) + "_" +
+        std::to_string(getpid());
+    std::filesystem::remove_all(test_dir);
+    std::filesystem::create_directories(test_dir);
+
+    json cfg = {{"type", allocator_type}, {"capacity_bytes", capacity_bytes}};
+    auto allocator = base::allocators::CreateAllocator(
+        cfg, test_dir + "/value", capacity_bytes, "DRAM", "impl", "type");
+    ASSERT_NE(allocator, nullptr) << allocator_type;
+    char* data = allocator->New(128);
+    ASSERT_NE(data, nullptr) << allocator_type;
+    EXPECT_GE(allocator->GetMallocOffset(data), 0) << allocator_type;
+    EXPECT_TRUE(allocator->Free(data)) << allocator_type;
+
+    allocator.reset();
+    std::filesystem::remove_all(test_dir);
+  }
+}
 
 class KVEngineCartesianTest
     : public ::testing::TestWithParam<

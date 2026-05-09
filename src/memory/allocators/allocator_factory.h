@@ -7,6 +7,8 @@
 
 #include "base/factory.h"
 #include "base/json.h"
+#include "memory/allocators/persist_loop_slab_allocator.h"
+#include "memory/allocators/r2_slab_allocator.h"
 #include "memory/malloc.h"
 
 namespace base {
@@ -106,10 +108,15 @@ inline std::unique_ptr<base::MallocApi> CreateAllocator(
     const std::string& impl_key = "value_memory_management",
     const std::string& type_key = "allocator_type") {
   const std::string impl = ResolveAllocatorImpl(j, impl_key, type_key);
-  using MF               = base::
-      Factory<base::MallocApi, const std::string&, int64, const std::string&>;
-  return std::unique_ptr<base::MallocApi>(
-      MF::NewInstance(impl, filename, memory_size, medium));
+  if (impl == "PERSIST_LOOP_SLAB") {
+    return std::unique_ptr<base::MallocApi>(
+        new base::PersistLoopShmMalloc(filename, memory_size, medium));
+  }
+  if (impl == "R2_SLAB") {
+    return std::unique_ptr<base::MallocApi>(
+        new base::R2alloc(filename, memory_size, medium));
+  }
+  throw std::invalid_argument("unknown allocator impl: " + impl);
 }
 
 } // namespace allocators

@@ -6,7 +6,7 @@
 #include <string>
 
 #include "base/factory.h"
-#include "memory/memory_factory.h"
+#include "memory/allocators/allocator_factory.h"
 #include "storage/value_store/value_store.h"
 
 class DramValueStore : public ValueStore {
@@ -19,12 +19,9 @@ public:
           "DramValueStore requires value.dram_allocator");
     }
     const auto& dram                 = j.at("value").at("dram_allocator");
-    const std::string allocator_type = dram.value("type", "PERSIST_LOOP_SLAB");
     const uint64_t capacity_bytes = dram.at("capacity_bytes").get<uint64_t>();
-    using MF                      = base::
-        Factory<base::MallocApi, const std::string&, int64, const std::string&>;
-    allocator_.reset(MF::NewInstance(
-        allocator_type, path, static_cast<int64>(capacity_bytes), "DRAM"));
+    allocator_ = base::allocators::CreateAllocator(
+        dram, path, static_cast<int64>(capacity_bytes), "DRAM", "impl", "type");
     if (!allocator_) {
       throw std::runtime_error("failed to create DramValueStore allocator");
     }
