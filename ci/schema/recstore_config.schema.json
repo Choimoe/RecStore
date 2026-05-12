@@ -212,25 +212,18 @@
       "type": "object",
       "description": "Underlying KV engine config.",
       "additionalProperties": true,
+      "required": [
+        "capacity",
+        "index",
+        "value"
+      ],
       "properties": {
-        "engine_type": {
-          "type": "string",
-          "enum": [
-            "KVEngine",
-            "KVEngineFasterKV",
-            "KVEngineHPSHashMap",
-            "KVEngineHPSRocksDB"
-          ],
-          "description": "Optional explicit BaseKV factory key. External engines require path, capacity, and value_size or value.default_value_size_hint."
-        },
-        "path": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Storage base path."
+        "capacity": {
+          "type": "integer",
+          "minimum": 1
         },
         "index": {
           "type": "object",
-          "additionalProperties": true,
           "required": [
             "type"
           ],
@@ -243,14 +236,37 @@
                 "DRAM_PET_HASH",
                 "SSD",
                 "SSD_EXTENDIBLE_HASH"
-              ],
-              "description": "Nested local KV index type."
+              ]
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "io": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "queue_depth": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "base_offset_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": true
             }
-          }
+          },
+          "additionalProperties": true
         },
         "value": {
           "type": "object",
-          "additionalProperties": true,
+          "required": [
+            "type"
+          ],
           "properties": {
             "type": {
               "type": "string",
@@ -258,236 +274,168 @@
                 "DRAM_VALUE_STORE",
                 "SSD_VALUE_STORE",
                 "TIERED_VALUE_STORE"
-              ],
-              "description": "Nested local KV value store type."
+              ]
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
             },
             "default_value_size_hint": {
               "type": "integer",
-              "minimum": 1,
-              "description": "Fixed row byte size hint for local and external KV engines."
+              "minimum": 1
             },
             "dram_allocator": {
               "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "capacity_bytes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
               "additionalProperties": true
             },
             "ssd_allocator": {
               "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "capacity_bytes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "min_block_size": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_block_size": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "io": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "queue_depth": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "base_offset_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": true
+            },
+            "tiering": {
+              "type": "object",
               "additionalProperties": true
             }
-          }
-        },
-        "index_type": {
-          "type": "string",
-          "enum": [
-            "DRAM",
-            "SSD"
-          ],
-          "description": "Keyword check: index storage type."
-        },
-        "value_type": {
-          "type": "string",
-          "enum": [
-            "DRAM",
-            "SSD",
-            "HYBRID"
-          ],
-          "description": "Keyword check: value storage type."
-        },
-        "capacity": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Required when value_type is DRAM/SSD."
-        },
-        "value_size": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Required when value_type is DRAM/SSD."
-        },
-        "shmcapacity": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Required when value_type is HYBRID."
-        },
-        "ssdcapacity": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Required when value_type is HYBRID."
-        },
-        "value_memory_management": {
-          "type": "string",
-          "enum": [
-            "PersistLoopShmMalloc",
-            "R2ShmMalloc"
-          ],
-          "default": "PersistLoopShmMalloc",
-          "description": "Keyword check: memory manager type."
-        },
-        "queue_size": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Optional queue size used by some SSD paths."
-        },
-        "type": {
-          "type": "string",
-          "description": "Compatibility field observed in CI snippets."
-        },
-        "max_batch_size": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Optional maximum batch size for external KV engines."
-        },
-        "table_name": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Optional HPS table name."
-        },
-        "rocksdb_path": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Optional HPS RocksDB database path."
+          },
+          "additionalProperties": true,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "DRAM_VALUE_STORE"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "required": [
+                  "path",
+                  "dram_allocator"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "SSD_VALUE_STORE"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "required": [
+                  "path",
+                  "ssd_allocator"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "TIERED_VALUE_STORE"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "then": {
+                "required": [
+                  "dram_allocator",
+                  "ssd_allocator"
+                ]
+              }
+            }
+          ]
         }
       },
       "allOf": [
         {
           "if": {
-            "required": [
-              "engine_type"
-            ],
             "properties": {
-              "engine_type": {
-                "enum": [
-                  "KVEngineFasterKV",
-                  "KVEngineHPSHashMap",
-                  "KVEngineHPSRocksDB"
-                ]
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "path",
-              "capacity"
-            ],
-            "anyOf": [
-              {
-                "required": [
-                  "value_size"
-                ]
-              },
-              {
-                "required": [
-                  "value"
-                ],
+              "index": {
                 "properties": {
-                  "value": {
-                    "required": [
-                      "default_value_size_hint"
+                  "type": {
+                    "enum": [
+                      "SSD",
+                      "SSD_EXTENDIBLE_HASH"
                     ]
                   }
-                }
-              }
-            ]
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "engine_type"
-            ],
-            "properties": {
-              "engine_type": {
-                "const": "KVEngine"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "path",
-              "capacity",
-              "index",
-              "value"
-            ]
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "index"
-            ]
-          },
-          "then": {
-            "required": [
-              "path",
-              "capacity",
-              "value"
-            ],
-            "properties": {
-              "value": {
+                },
                 "required": [
                   "type"
                 ]
               }
             }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "value_type": {
-                "const": "HYBRID"
-              }
-            },
-            "required": [
-              "value_type"
-            ]
           },
           "then": {
-            "required": [
-              "shmcapacity",
-              "ssdcapacity"
-            ]
-          }
-        },
-        {
-          "if": {
             "properties": {
-              "value_type": {
-                "enum": [
-                  "DRAM",
-                  "SSD"
+              "index": {
+                "required": [
+                  "path",
+                  "io"
                 ]
               }
-            },
-            "required": [
-              "value_type"
-            ]
-          },
-          "then": {
-            "required": [
-              "capacity",
-              "value_size"
-            ]
+            }
           }
-        }
-      ],
-      "anyOf": [
-        {
-          "required": [
-            "engine_type"
-          ]
-        },
-        {
-          "required": [
-            "index",
-            "value"
-          ]
-        },
-        {
-          "required": [
-            "path",
-            "index_type",
-            "value_type"
-          ]
         }
       ]
     }

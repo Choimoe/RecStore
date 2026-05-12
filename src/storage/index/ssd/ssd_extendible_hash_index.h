@@ -3,7 +3,7 @@
 #include <memory>
 
 #include "base/factory.h"
-#include "storage/index/ssd_cceh/CCEH.h"
+#include "storage/index/ssd/CCEH.h"
 
 class SsdExtendibleHashIndex : public Index {
 public:
@@ -50,7 +50,7 @@ private:
       j["queue_cnt"]       = io.value("queue_depth", 512);
       j["page_id_offset"] =
           io.value("base_offset_bytes", static_cast<uint64_t>(0)) / PAGE_SIZE;
-      j["file_path"] = io.at("file_path").get<std::string>();
+      j["file_path"] = j.at("index").at("path").get<std::string>();
     }
     return out;
   }

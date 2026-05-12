@@ -1,11 +1,20 @@
 #pragma once
 
-#include "storage/kv_engine/kv_engine.h"
+#include "storage/kv_engine/engine_composite.h"
+#include "storage/kv_engine/engine_extendible_hash.h"
+#include "storage/kv_engine/engine_cceh.h"
+#include "storage/kv_engine/engine_petkv.h"
 
 namespace base {
 
 inline void RegisterKVEngineFactories() {
-  FactoryCreatorImpl<BaseKV, KVEngine, const BaseKVConfig&>("KVEngine");
+  FactoryCreatorImpl<BaseKV, KVEngineComposite, const BaseKVConfig&>(
+      "KVEngineComposite");
+  FactoryCreatorImpl<BaseKV, KVEngineExtendibleHash, const BaseKVConfig&>(
+      "KVEngineExtendibleHash");
+  FactoryCreatorImpl<BaseKV, KVEngineCCEH, const BaseKVConfig&>("KVEngineCCEH");
+  FactoryCreatorImpl<BaseKV, KVEnginePetKV, const BaseKVConfig&>(
+      "KVEnginePetKV");
   FactoryCreatorImpl<Index, DramExtendibleHashIndex, const BaseKVConfig&>(
       "DRAM_EXTENDIBLE_HASH");
   FactoryCreatorImpl<Index, DramExtendibleHashIndex, const BaseKVConfig&>(

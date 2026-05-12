@@ -19,15 +19,20 @@
 #include "base/log.h"
 #include "memory/shm_file.h"
 #include "storage/kv_engine/base_kv.h"
-#include "storage/kv_engine/engine_factory.h"
+#include "storage/kv_engine/engine_cceh.h"
+#include "storage/kv_engine/engine_extendible_hash.h"
 #include "storage/kv_engine/engine_selector.h"
 
-DEFINE_string(path, "", "KVEngine data path");
+DEFINE_string(
+    dram_path,
+    "",
+    "DRAM data directory; empty only works with anonymous DRAM allocators");
+DEFINE_string(ssd_path, "", "SSD data directory");
 DEFINE_string(index_type, "DRAM_EXTENDIBLE_HASH", "index.type");
 DEFINE_string(value_store_type, "DRAM_VALUE_STORE", "value.type");
+DEFINE_string(engine_class, "KVEngineComposite", "BaseKV factory class name");
 DEFINE_string(dram_allocator, "PERSIST_LOOP_SLAB", "value.dram_allocator.type");
 DEFINE_string(ssd_io_backend, "IOURING", "SSD IO backend");
-DEFINE_string(ssd_file, "", "SSD value file; empty uses the type-derived path");
 DEFINE_int32(ssd_queue_depth, 512, "SSD IO queue depth");
 DEFINE_int64(dram_capacity_bytes, 0, "override DRAM allocator capacity bytes");
 DEFINE_int64(ssd_capacity_bytes, 0, "override SSD allocator capacity bytes");
@@ -172,17 +177,71 @@ bool HasDramValueStore(const std::string& type) {
   return type == "DRAM_VALUE_STORE" || type == "TIERED_VALUE_STORE";
 }
 
+bool HasSsdValueStore(const std::string& type) {
+  return type == "SSD_VALUE_STORE" || type == "TIERED_VALUE_STORE";
+}
+
+bool IsLegacyDirectEngine(const std::string& engine_class) {
+  return engine_class == "KVEngineExtendibleHash" ||
+         engine_class == "KVEngineCCEH";
+}
+
 BaseKVConfig BuildConfig() {
   BaseKVConfig config;
   const uint64_t capacity = static_cast<uint64_t>(FLAGS_record_count);
   const uint64_t value_slot_bytes =
       static_cast<uint64_t>(std::max(FLAGS_value_size, 1)) + sizeof(uint64_t);
-  const uint64_t value_capacity  = capacity * value_slot_bytes * 6 / 5;
-  const bool ssd_index           = IsSsdIndexType(FLAGS_index_type);
-  const std::string primary_path = FLAGS_path;
+  const uint64_t value_capacity           = capacity * value_slot_bytes * 6 / 5;
+  constexpr uint64_t kMinSsdCapacityBytes = 256ULL * 1024ULL * 1024ULL;
+  if (FLAGS_engine_class == "KVEngineExtendibleHash") {
+    const uint64_t dram_capacity =
+        FLAGS_dram_capacity_bytes > 0
+            ? static_cast<uint64_t>(FLAGS_dram_capacity_bytes)
+            : value_capacity;
+    const uint64_t ssd_capacity =
+        FLAGS_ssd_capacity_bytes > 0
+            ? static_cast<uint64_t>(FLAGS_ssd_capacity_bytes)
+            : std::max(value_capacity, kMinSsdCapacityBytes);
+    std::string value_medium = "DRAM";
+    if (FLAGS_value_store_type == "SSD_VALUE_STORE") {
+      value_medium = "SSD";
+    } else if (FLAGS_value_store_type != "DRAM_VALUE_STORE") {
+      throw std::invalid_argument("KVEngineExtendibleHash only supports "
+                                  "DRAM_VALUE_STORE/SSD_VALUE_STORE");
+    }
+    const std::string engine_path =
+        (value_medium == "SSD" && !FLAGS_ssd_path.empty())
+            ? FLAGS_ssd_path
+            : FLAGS_dram_path;
+    config.json_config_ = {
+        {"capacity", capacity},
+        {"path", engine_path},
+        {"value_size", FLAGS_value_size},
+        {"value_type", value_medium},
+        {"DRAM_SIZE", dram_capacity},
+        {"SSD_SIZE", ssd_capacity}};
+    config.num_threads_ = std::max(FLAGS_thread_num, FLAGS_load_thread_num);
+    return config;
+  }
+  if (FLAGS_engine_class == "KVEngineCCEH") {
+    const uint64_t ssd_capacity =
+        FLAGS_ssd_capacity_bytes > 0
+            ? static_cast<uint64_t>(FLAGS_ssd_capacity_bytes)
+            : std::max(value_capacity, kMinSsdCapacityBytes);
+    config.json_config_ = {
+        {"capacity", capacity},
+        {"path", FLAGS_ssd_path},
+        {"value_size", FLAGS_value_size},
+        {"queue_cnt", std::max(FLAGS_thread_num, 1)},
+        {"io_backend_type", FLAGS_ssd_io_backend},
+        {"SSD_SIZE", ssd_capacity}};
+    config.num_threads_ = std::max(FLAGS_thread_num, FLAGS_load_thread_num);
+    return config;
+  }
+
+  const bool ssd_index = IsSsdIndexType(FLAGS_index_type);
 
   config.json_config_ = {
-      {"path", primary_path},
       {"capacity", capacity},
       {"index", {{"type", FLAGS_index_type}}},
       {"value",
@@ -190,9 +249,9 @@ BaseKVConfig BuildConfig() {
         {"default_value_size_hint", FLAGS_value_size}}}};
 
   if (ssd_index) {
-    config.json_config_["index"]["io"] = {
+    config.json_config_["index"]["path"] = FLAGS_ssd_path + "/index.db";
+    config.json_config_["index"]["io"]   = {
         {"type", FLAGS_ssd_io_backend},
-        {"file_path", primary_path + "_index.db"},
         {"queue_depth", FLAGS_ssd_queue_depth},
         {"base_offset_bytes", 0}};
   }
@@ -204,36 +263,39 @@ BaseKVConfig BuildConfig() {
   const uint64_t ssd_capacity =
       FLAGS_ssd_capacity_bytes > 0
           ? static_cast<uint64_t>(FLAGS_ssd_capacity_bytes)
-          : value_capacity;
+          : std::max(value_capacity, kMinSsdCapacityBytes);
 
   if (FLAGS_value_store_type == "DRAM_VALUE_STORE") {
+    if (!FLAGS_dram_path.empty()) {
+      config.json_config_["value"]["path"] = FLAGS_dram_path + "/value";
+    }
     config.json_config_["value"]["dram_allocator"] = {
         {"type", FLAGS_dram_allocator}, {"capacity_bytes", dram_capacity}};
   }
-  const std::string ssd_value_file =
-      FLAGS_ssd_file.empty() ? primary_path + "_value.db" : FLAGS_ssd_file;
   if (FLAGS_value_store_type == "SSD_VALUE_STORE") {
+    config.json_config_["value"]["path"] = FLAGS_ssd_path + "/value.db";
     config.json_config_["value"]["ssd_allocator"] = {
-        {"type", "SSD_BUDDY"},
+        {"type", "SSD_SLAB"},
         {"capacity_bytes", ssd_capacity},
         {"min_block_size", 128},
         {"max_block_size", 4096},
         {"io",
          {{"type", FLAGS_ssd_io_backend},
-          {"file_path", ssd_value_file},
           {"queue_depth", FLAGS_ssd_queue_depth},
           {"base_offset_bytes", 4096}}}};
   } else if (FLAGS_value_store_type == "TIERED_VALUE_STORE") {
     config.json_config_["value"]["dram_allocator"] = {
-        {"type", FLAGS_dram_allocator}, {"capacity_bytes", dram_capacity}};
+        {"type", FLAGS_dram_allocator},
+        {"capacity_bytes", dram_capacity},
+        {"path", FLAGS_dram_path + "/dram"}};
     config.json_config_["value"]["ssd_allocator"] = {
-        {"type", "SSD_BUDDY"},
+        {"type", "SSD_SLAB"},
         {"capacity_bytes", ssd_capacity},
         {"min_block_size", 128},
         {"max_block_size", 4096},
+        {"path", FLAGS_ssd_path + "/ssd.db"},
         {"io",
          {{"type", FLAGS_ssd_io_backend},
-          {"file_path", ssd_value_file},
           {"queue_depth", FLAGS_ssd_queue_depth},
           {"base_offset_bytes", 4096}}}};
     config.json_config_["value"]["tiering"] = {{"cache_policy", "LRU"}};
@@ -356,9 +418,6 @@ int main(int argc, char* argv[]) {
   if (FLAGS_record_count <= 0) {
     LOG(FATAL) << "record_count must be positive";
   }
-  if (FLAGS_path.empty()) {
-    LOG(FATAL) << "path must be set";
-  }
   if (FLAGS_thread_num <= 0) {
     LOG(FATAL) << "thread_num must be positive";
   }
@@ -367,6 +426,27 @@ int main(int argc, char* argv[]) {
   }
   if (FLAGS_running_seconds <= 0) {
     LOG(FATAL) << "running_seconds must be positive";
+  }
+  if (!IsLegacyDirectEngine(FLAGS_engine_class) &&
+      IsSsdIndexType(FLAGS_index_type) && FLAGS_ssd_path.empty()) {
+    LOG(FATAL) << "ssd_path must be set for SSD index";
+  }
+  if (!IsLegacyDirectEngine(FLAGS_engine_class) &&
+      HasSsdValueStore(FLAGS_value_store_type) && FLAGS_ssd_path.empty()) {
+    LOG(FATAL) << "ssd_path must be set for SSD/TIERED value store";
+  }
+  if (!IsLegacyDirectEngine(FLAGS_engine_class) &&
+      FLAGS_value_store_type == "TIERED_VALUE_STORE" &&
+      FLAGS_dram_path.empty()) {
+    LOG(FATAL) << "dram_path must be set for TIERED value store";
+  }
+  if (FLAGS_engine_class == "KVEngineCCEH" && FLAGS_ssd_path.empty()) {
+    LOG(FATAL) << "ssd_path must be set for KVEngineCCEH";
+  }
+  if (FLAGS_engine_class == "KVEngineExtendibleHash" &&
+      FLAGS_dram_path.empty() && FLAGS_ssd_path.empty()) {
+    LOG(FATAL)
+        << "dram_path or ssd_path must be set for KVEngineExtendibleHash";
   }
 
   const std::string workload = NormalizeWorkload(FLAGS_workload);
@@ -378,11 +458,15 @@ int main(int argc, char* argv[]) {
       HasDramValueStore(FLAGS_value_store_type);
 
   BaseKVConfig config = BuildConfig();
-  auto resolved       = base::ResolveEngine(config);
-  base::RegisterKVEngineFactories();
-  std::unique_ptr<BaseKV> kv(
-      base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
-          resolved.engine, resolved.cfg));
+  std::unique_ptr<BaseKV> kv;
+  if (FLAGS_engine_class == "KVEngine") {
+    auto resolved = base::ResolveEngine(config);
+    kv.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
+        resolved.engine, resolved.cfg));
+  } else {
+    kv.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
+        FLAGS_engine_class, config));
+  }
   if (!kv) {
     LOG(FATAL) << "failed to create KVEngine";
   }

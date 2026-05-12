@@ -12,14 +12,18 @@
 class SsdValueStore : public ValueStore {
 public:
   explicit SsdValueStore(const BaseKVConfig& config) {
-    const auto& v   = config.json_config_.at("value");
+    const auto& v = config.json_config_.at("value");
+    if (!v.contains("path") || v.at("path").get<std::string>().empty()) {
+      throw std::invalid_argument(
+          "SsdValueStore requires non-empty value.path");
+    }
     const auto& ssd = v.at("ssd_allocator");
     const auto& io  = ssd.at("io");
 
     BaseKVConfig io_cfg  = config;
     auto& j              = io_cfg.json_config_;
     j["io_backend_type"] = io.value("type", "IOURING");
-    j["file_path"]       = io.at("file_path").get<std::string>();
+    j["file_path"]       = v.at("path").get<std::string>();
     j["queue_cnt"]       = io.value("queue_depth", 512);
     j["page_id_offset"] =
         io.value("base_offset_bytes", static_cast<uint64_t>(0)) / PAGE_SIZE;
@@ -28,7 +32,7 @@ public:
     io_backend_.reset(IOF::NewInstance(j.at("io_backend_type"), io_cfg));
     io_backend_->init();
 
-    const std::string allocator_type = ssd.value("type", "SSD_BUDDY");
+    const std::string allocator_type = ssd.value("type", "SSD_SLAB");
     const uint64_t capacity_bytes    = ssd.at("capacity_bytes").get<uint64_t>();
     const uint64_t base_offset =
         ssd.value("base_offset_bytes", static_cast<uint64_t>(0));
@@ -88,6 +92,19 @@ public:
 
   size_t SlotCapacity(uint64_t handle) const override {
     return allocator_->SlotCapacity(handle);
+  }
+
+  void BatchWrite(const std::vector<uint64_t>& handles,
+                  const std::vector<WriteSpec>& specs) override {
+    if (handles.size() != specs.size()) {
+      throw std::invalid_argument("SsdValueStore::BatchWrite size mismatch");
+    }
+    for (size_t i = 0; i < handles.size(); ++i) {
+      if (handles[i] == kValueHandleNone) {
+        continue;
+      }
+      allocator_->Write(handles[i], specs[i].data, specs[i].size);
+    }
   }
 
   void BatchRead(const std::vector<uint64_t>& handles,

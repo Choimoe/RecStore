@@ -149,7 +149,7 @@ def build_runtime_config(
         }
 
     base_kv = cfg["cache_ps"].setdefault("base_kv_config", {})
-    base_kv["path"] = resolve_kv_data_path(
+    kv_data_path = resolve_kv_data_path(
         output_root=output_root,
         run_id=run_id,
         path_suffix=path_suffix,
@@ -159,6 +159,7 @@ def build_runtime_config(
         base_kv["capacity"] = int(kv_capacity)
     capacity = int(base_kv.get("capacity", kv_capacity or 1_000_000))
     value = base_kv.setdefault("value", {})
+    value["path"] = f"{kv_data_path}/value"
     if value_size_bytes is not None:
         value["default_value_size_hint"] = int(value_size_bytes)
     value_size_hint = int(value.get("default_value_size_hint", value_size_bytes or 512))

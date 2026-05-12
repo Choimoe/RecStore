@@ -107,6 +107,17 @@ target_link_libraries(test_io_backend PUBLIC
 )
 add_test(NAME test_io_backend COMMAND test_io_backend)
 
+add_executable(test_ssd_allocators test_ssd_allocators.cpp)
+target_link_libraries(test_ssd_allocators PUBLIC
+    base
+    gtest
+    gtest_main
+    boost_context
+    boost_coroutine
+    pthread
+)
+add_test(NAME test_ssd_allocators COMMAND test_ssd_allocators)
+
 add_executable(test_io_uring_test_utils test_io_uring_test_utils.cpp)
 target_link_libraries(test_io_uring_test_utils PUBLIC
     gtest

@@ -16,7 +16,7 @@ protected:
   void SetUp() override {
     // 创建临时测试目录
     test_dir_ =
-        "/tmp/test_kv_engine_extendible_hash_" + std::to_string(getpid());
+        "/dev/shm/test_kv_engine_extendible_hash_" + std::to_string(getpid());
     std::filesystem::create_directories(test_dir_);
 
     // 配置使用DRAM而不是持久内存
@@ -26,11 +26,11 @@ protected:
     // 创建配置
     config_.num_threads_ = 16;
     config_.json_config_ = {
-        {"path", test_dir_},
         {"capacity", 1000000},
         {"index", {{"type", "DRAM_EXTENDIBLE_HASH"}}},
         {"value",
          {{"type", "DRAM_VALUE_STORE"},
+          {"path", test_dir_ + "/value"},
           {"default_value_size_hint", 128},
           {"dram_allocator",
            {{"type", "R2_SLAB"}, {"capacity_bytes", 128000000}}}}}};

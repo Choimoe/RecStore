@@ -1,12 +1,12 @@
 add_library(extendible_hash)
 
 target_sources(extendible_hash
-  PRIVATE 
-   extendible_hash.cpp
+  PRIVATE
+    extendible_hash.cpp
 )
 
 target_include_directories(extendible_hash
-  PUBLIC 
+  PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

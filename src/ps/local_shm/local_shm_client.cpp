@@ -462,6 +462,14 @@ int LocalShmPSClient::UpdateParameterFlat(
       embedding_dim <= 0 || keys.Size() != static_cast<size_t>(num_rows)) {
     return -1;
   }
+  const auto known_dim_it = table_embedding_dims_.find(table_name);
+  if (known_dim_it != table_embedding_dims_.end() &&
+      known_dim_it->second != embedding_dim) {
+    LOG(ERROR) << "LocalShmPSClient::UpdateParameterFlat embedding_dim mismatch"
+               << " table_name=" << table_name << " expected="
+               << known_dim_it->second << " actual=" << embedding_dim;
+    return -1;
+  }
   const int slot = AcquireSlot();
   if (slot < 0) {
     return -1;
@@ -569,6 +577,9 @@ int LocalShmPSClient::InitEmbeddingTable(const std::string& table_name,
       WaitForSlot(static_cast<uint32_t>(slot), request_id) &&
       header->status_code == static_cast<uint32_t>(LocalStatusCode::kOk);
   ReleaseSlot(static_cast<uint32_t>(slot));
+  if (ok) {
+    table_embedding_dims_[table_name] = config.embedding_dim;
+  }
   return ok ? 0 : -1;
 }
 

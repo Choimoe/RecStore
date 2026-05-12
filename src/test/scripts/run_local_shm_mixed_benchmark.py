@@ -44,11 +44,17 @@ def build_runtime_config(
             "ps_type": "LOCAL_SHM",
             "num_threads": 1,
             "base_kv_config": {
-                "path": kv_path,
-                "index_type": "DRAM",
-                "value_type": "DRAM",
                 "capacity": capacity,
-                "value_size": value_size,
+                "index": {"type": "DRAM_EXTENDIBLE_HASH"},
+                "value": {
+                    "type": "DRAM_VALUE_STORE",
+                    "path": f"{kv_path}/value",
+                    "default_value_size_hint": value_size,
+                    "dram_allocator": {
+                        "type": "PERSIST_LOOP_SLAB",
+                        "capacity_bytes": capacity * value_size,
+                    },
+                },
             },
         },
         "local_shm": {

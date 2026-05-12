@@ -95,6 +95,7 @@ class TestChooseAvailablePorts(unittest.TestCase):
                 ps_type="BRPC",
             )
             runtime_cfg = runtime_cfg_path.read_text(encoding="utf-8")
+            self.assertIn('"value"', runtime_cfg)
             self.assertIn('"path"', runtime_cfg)
             self.assertIn(str(Path(tmpdir) / "runtime" / "case-shards"), runtime_cfg)
 

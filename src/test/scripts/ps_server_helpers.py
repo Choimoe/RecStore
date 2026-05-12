@@ -89,7 +89,7 @@ def get_rdma_runner_config():
     base_kv = cache_ps.get('base_kv_config', {})
     return {
         'num_servers': int(dist_client.get('num_shards', cache_ps.get('num_shards', 1))),
-        'value_size': int(base_kv.get('value_size', 512)),
+        'value_size': int(base_kv.get('value', {}).get('default_value_size_hint', base_kv.get('value_size', 512))),
         'max_kv_num_per_request': int(dist_client.get('max_keys_per_request', 64)),
     }
 

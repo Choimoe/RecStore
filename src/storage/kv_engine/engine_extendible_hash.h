@@ -12,7 +12,7 @@
 #include <shared_mutex>
 #include <vector>
 
-#include "../index/dram_cceh/extendible_hash.h"
+#include "../index/dram/extendible_hash.h"
 #include "storage/index/index.h"
 #include "storage/nvm/pet_kv/shm_common.h"
 #include "base/factory.h"

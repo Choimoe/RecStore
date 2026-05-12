@@ -1,5 +1,5 @@
-add_subdirectory(dram_cceh)
-add_subdirectory(ssd_cceh)
+add_subdirectory(dram)
+add_subdirectory(ssd)
 
 add_library(index INTERFACE)
 

@@ -43,7 +43,10 @@ protected:
   json MakeLocalShmConfig(const std::string& region_name,
                           uint32_t ready_queue_count       = 1,
                           uint32_t ready_queue_burst_limit = 8) {
-    const std::string storage_path = "/tmp/" + region_name + "_kv_store";
+    static std::atomic<uint64_t> storage_counter{0};
+    const std::string storage_path =
+        "/dev/shm/recstore_lshm_" + std::to_string(::getpid()) + "_" +
+        std::to_string(storage_counter.fetch_add(1, std::memory_order_relaxed));
     cleanup_paths_.push_back(storage_path);
     cleanup_region_names_.push_back(region_name);
     std::error_code ec;
@@ -54,11 +57,11 @@ protected:
          {{"num_threads", 1},
           {"ps_type", "LOCAL_SHM"},
           {"base_kv_config",
-           {{"path", storage_path},
-            {"capacity", 1024},
+           {{"capacity", 1024},
             {"index", {{"type", "DRAM_EXTENDIBLE_HASH"}}},
             {"value",
              {{"type", "DRAM_VALUE_STORE"},
+              {"path", storage_path + "/value"},
               {"default_value_size_hint", 16},
               {"dram_allocator",
                {{"type", "PERSIST_LOOP_SLAB"},
@@ -93,8 +96,8 @@ TEST_F(LocalShmPSClientTest, StoragePathIsScopedToRegionName) {
   const auto config_a = MakeLocalShmConfig("recstore_local_shm_ps_client_a");
   const auto config_b = MakeLocalShmConfig("recstore_local_shm_ps_client_b");
 
-  EXPECT_NE(config_a["cache_ps"]["base_kv_config"]["path"],
-            config_b["cache_ps"]["base_kv_config"]["path"]);
+  EXPECT_NE(config_a["cache_ps"]["base_kv_config"]["value"]["path"],
+            config_b["cache_ps"]["base_kv_config"]["value"]["path"]);
 }
 
 TEST_F(LocalShmPSClientTest, FactoryClientTypeCanBeConstructed) {

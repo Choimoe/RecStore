@@ -6,22 +6,31 @@
 #include <string>
 
 #include "base/factory.h"
-#include "memory/allocators/allocator_factory.h"
+#include "memory/memory_factory.h"
 #include "storage/value_store/value_store.h"
 
 class DramValueStore : public ValueStore {
 public:
   explicit DramValueStore(const BaseKVConfig& config) {
-    const auto& j          = config.json_config_;
-    const std::string path = j.at("path").get<std::string>() + "/value";
+    const auto& j = config.json_config_;
     if (!j.contains("value") || !j.at("value").contains("dram_allocator")) {
       throw std::invalid_argument(
           "DramValueStore requires value.dram_allocator");
     }
-    const auto& dram                 = j.at("value").at("dram_allocator");
+    const auto& value = j.at("value");
+    if (!value.contains("path") ||
+        value.at("path").get<std::string>().empty()) {
+      throw std::invalid_argument(
+          "DramValueStore requires non-empty value.path");
+    }
+    const std::string path           = value.at("path").get<std::string>();
+    const auto& dram                 = value.at("dram_allocator");
+    const std::string allocator_type = dram.value("type", "PERSIST_LOOP_SLAB");
     const uint64_t capacity_bytes = dram.at("capacity_bytes").get<uint64_t>();
-    allocator_ = base::allocators::CreateAllocator(
-        dram, path, static_cast<int64>(capacity_bytes), "DRAM", "impl", "type");
+    using MF                      = base::
+        Factory<base::MallocApi, const std::string&, int64, const std::string&>;
+    allocator_.reset(MF::NewInstance(
+        allocator_type, path, static_cast<int64>(capacity_bytes), "DRAM"));
     if (!allocator_) {
       throw std::runtime_error("failed to create DramValueStore allocator");
     }

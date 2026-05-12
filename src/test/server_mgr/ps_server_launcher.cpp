@@ -684,6 +684,33 @@ std::filesystem::path PSServerLauncher::PrepareConfigForLaunch() {
     config["cache_ps"]["ps_type"] = *options_.override_ps_type;
   }
 
+  auto normalize_dram_value_path = [&](json& base_kv_config) {
+    if (!base_kv_config.is_object() || !base_kv_config.contains("value") ||
+        !base_kv_config["value"].is_object()) {
+      return;
+    }
+    auto& value_cfg = base_kv_config["value"];
+    const std::string value_type =
+        value_cfg.value("type", std::string("DRAM_VALUE_STORE"));
+    if (value_type != "DRAM_VALUE_STORE") {
+      return;
+    }
+    const std::string path = value_cfg.value("path", std::string());
+    if (path.empty() || path.rfind("/dev/shm", 0) == 0) {
+      return;
+    }
+    value_cfg["path"] = "/dev/shm/recstore_test_" + TimestampNow() + "/value";
+  };
+
+  if (config["cache_ps"].contains("base_kv_config")) {
+    normalize_dram_value_path(config["cache_ps"]["base_kv_config"]);
+  }
+  if (config.contains("distributed_client") &&
+      config["distributed_client"].is_object() &&
+      config["distributed_client"].contains("base_kv_config")) {
+    normalize_dram_value_path(config["distributed_client"]["base_kv_config"]);
+  }
+
   if (options_.local_shard_id.has_value()) {
     if (!config["cache_ps"].contains("servers") ||
         !config["cache_ps"]["servers"].is_array()) {

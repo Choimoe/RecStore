@@ -36,7 +36,8 @@ class TestRunLocalShmMixedBenchmark(unittest.TestCase):
         self.assertEqual(config["local_shm"]["ready_queue_count"], 4)
         self.assertEqual(config["local_shm"]["ready_queue_burst_limit"], 16)
         self.assertEqual(
-            config["cache_ps"]["base_kv_config"]["path"], "/tmp/bench_kv"
+            config["cache_ps"]["base_kv_config"]["value"]["path"],
+            "/tmp/bench_kv/value"
         )
 
     def test_build_local_shm_server_cmd_contains_config_path(self):

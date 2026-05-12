@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,18 @@ public:
   virtual void Free(uint64_t handle)                                   = 0;
   virtual const char* DirectPtr(uint64_t handle) const { return nullptr; }
   virtual size_t SlotCapacity(uint64_t handle) const = 0;
+  virtual void BatchWrite(const std::vector<uint64_t>& handles,
+                          const std::vector<WriteSpec>& specs) {
+    if (handles.size() != specs.size()) {
+      throw std::invalid_argument("BatchWrite size mismatch");
+    }
+    for (size_t i = 0; i < handles.size(); ++i) {
+      if (handles[i] == kValueHandleNone) {
+        continue;
+      }
+      Write(handles[i], specs[i].data, specs[i].size);
+    }
+  }
 
   virtual void BatchRead(const std::vector<uint64_t>& handles,
                          std::vector<ReadResult>& out_results) {

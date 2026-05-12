@@ -91,11 +91,11 @@ int main(int argc, char* argv[]) {
   base::Init(&argc, &argv);
   BaseKVConfig config;
   config.json_config_ = {
-      {"path", "/tmp/" + FLAGS_db},
       {"capacity", kKeySpace},
       {"index", {{"type", FLAGS_index_type}}},
       {"value",
        {{"type", FLAGS_value_store_type},
+        {"path", "/tmp/" + FLAGS_db + "/value"},
         {"default_value_size_hint", FLAGS_value_size}}}};
   if (FLAGS_value_store_type == "DRAM_VALUE_STORE") {
     config.json_config_["value"]["dram_allocator"] = {

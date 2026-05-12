@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <unordered_map>
 
 #include "base/array.h"
@@ -83,6 +84,7 @@ private:
   uint32_t client_id_      = 0;
   uint32_t ready_queue_id_ = 0;
   uint32_t timeout_ms_     = 30000;
+  std::unordered_map<std::string, int64_t> table_embedding_dims_;
   std::unordered_map<uint64_t, std::pair<uint32_t, uint64_t>> prefetch_map_;
 };
 

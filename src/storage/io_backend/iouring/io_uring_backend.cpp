@@ -20,7 +20,6 @@ private:
       throw std::runtime_error(
           "Failed to allocate aligned buffer, rc=" + std::to_string(rc));
     }
-    std::memset(ptr, 0, bytes);
     return reinterpret_cast<char*>(ptr);
   }
 
@@ -154,6 +153,7 @@ public:
       next_page_id = 1;
     }
     empty_page = AllocateAligned(PAGE_SIZE);
+    std::memset(empty_page, 0, PAGE_SIZE);
   }
 
   char* AllocateBuffer() override { return AllocateAligned(PAGE_SIZE); }

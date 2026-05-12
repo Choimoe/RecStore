@@ -17,7 +17,6 @@
       }
     ],
     "base_kv_config": {
-      "path": "/tmp/recstore_data_rdma_multishard_test",
       "capacity": 1000000,
       "index": {
         "type": "DRAM_EXTENDIBLE_HASH"
@@ -28,7 +27,8 @@
         "dram_allocator": {
           "type": "PERSIST_LOOP_SLAB",
           "capacity_bytes": 16000000
-        }
+        },
+        "path": "/tmp/recstore_data_rdma_multishard_test/value"
       }
     }
   },

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 
 #include "base/factory.h"
 #include "storage/value_store/dram_value_store.h"
@@ -11,7 +12,8 @@
 class HybridValueStore : public ValueStore {
 public:
   explicit HybridValueStore(const BaseKVConfig& config)
-      : dram_store_(BuildDramConfig(config)), ssd_store_(config) {
+      : dram_store_(BuildDramConfig(config)),
+        ssd_store_(BuildSsdConfig(config)) {
     const auto& v        = config.json_config_.at("value");
     const auto& dram     = v.at("dram_allocator");
     dram_capacity_bytes_ = dram.at("capacity_bytes").get<uint64_t>();
@@ -97,6 +99,39 @@ public:
     return dram_store_.SlotCapacity(DramRawHandle(handle));
   }
 
+  void BatchWrite(const std::vector<uint64_t>& handles,
+                  const std::vector<WriteSpec>& specs) override {
+    if (handles.size() != specs.size()) {
+      throw std::invalid_argument("HybridValueStore::BatchWrite size mismatch");
+    }
+    std::vector<uint64_t> dram_handles;
+    std::vector<WriteSpec> dram_specs;
+    std::vector<uint64_t> ssd_handles;
+    std::vector<WriteSpec> ssd_specs;
+    dram_handles.reserve(handles.size());
+    dram_specs.reserve(handles.size());
+    ssd_handles.reserve(handles.size());
+    ssd_specs.reserve(handles.size());
+    for (size_t i = 0; i < handles.size(); ++i) {
+      if (handles[i] == kValueHandleNone) {
+        continue;
+      }
+      if (IsOnSSD(handles[i])) {
+        ssd_handles.push_back(SsdRawHandle(handles[i]));
+        ssd_specs.push_back(specs[i]);
+      } else {
+        dram_handles.push_back(DramRawHandle(handles[i]));
+        dram_specs.push_back(specs[i]);
+      }
+    }
+    if (!dram_handles.empty()) {
+      dram_store_.BatchWrite(dram_handles, dram_specs);
+    }
+    if (!ssd_handles.empty()) {
+      ssd_store_.BatchWrite(ssd_handles, ssd_specs);
+    }
+  }
+
   std::string GetInfo() const override {
     std::ostringstream os;
     os << "HybridValueStore(dram_reserved="
@@ -127,7 +162,27 @@ private:
     }
     json value    = j.at("value");
     value["type"] = "DRAM_VALUE_STORE";
+    if (value.at("dram_allocator").contains("path")) {
+      value["path"] = value.at("dram_allocator").at("path");
+    }
     value.erase("ssd_allocator");
+    value.erase("tiering");
+    j["value"] = value;
+    return out;
+  }
+
+  static BaseKVConfig BuildSsdConfig(const BaseKVConfig& config) {
+    BaseKVConfig out = config;
+    auto& j          = out.json_config_;
+    if (!j.contains("value") || !j.at("value").contains("ssd_allocator")) {
+      return out;
+    }
+    json value    = j.at("value");
+    value["type"] = "SSD_VALUE_STORE";
+    if (value.at("ssd_allocator").contains("path")) {
+      value["path"] = value.at("ssd_allocator").at("path");
+    }
+    value.erase("dram_allocator");
     value.erase("tiering");
     j["value"] = value;
     return out;

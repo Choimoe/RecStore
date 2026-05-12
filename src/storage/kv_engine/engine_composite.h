@@ -1,10 +1,13 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 #include "base/factory.h"
@@ -17,17 +20,17 @@
 #include "storage/value_store/hybrid_value_store.h"
 #include "storage/value_store/ssd_value_store.h"
 
-class KVEngine : public BaseKV {
+class KVEngineComposite : public BaseKV {
 public:
-  KVEngine(std::unique_ptr<Index> index,
-           std::unique_ptr<ValueStore> value_store,
-           int num_threads = 0)
+  KVEngineComposite(std::unique_ptr<Index> index,
+                    std::unique_ptr<ValueStore> value_store,
+                    int num_threads = 0)
       : BaseKV(BaseKVConfig{}),
         index_(std::move(index)),
         value_store_(std::move(value_store)),
         num_threads_(num_threads) {}
 
-  explicit KVEngine(const BaseKVConfig& config) : BaseKV(config) {
+  explicit KVEngineComposite(const BaseKVConfig& config) : BaseKV(config) {
     config_                      = config;
     const auto& j                = config.json_config_;
     const std::string index_type = j.at("index").at("type").get<std::string>();
@@ -77,13 +80,109 @@ public:
     if (values == nullptr || keys.Size() != static_cast<int>(values->size())) {
       LOG(FATAL) << "KVEngine::BatchPut size mismatch";
     }
+    (void)tid;
+    if (keys.Size() == 0) {
+      return;
+    }
+
+    std::unordered_set<uint64_t> seen_keys;
+    seen_keys.reserve(static_cast<size_t>(keys.Size()));
+    bool has_duplicate_key = false;
     for (int i = 0; i < keys.Size(); ++i) {
-      const auto& item = (*values)[i];
-      PutInternal(keys[i],
-                  item.Data(),
-                  static_cast<size_t>(item.Size()) * sizeof(float),
-                  tid,
-                  false);
+      if (!seen_keys.insert(keys[i]).second) {
+        has_duplicate_key = true;
+        break;
+      }
+    }
+    if (has_duplicate_key) {
+      for (int i = 0; i < keys.Size(); ++i) {
+        const auto& item = (*values)[i];
+        PutInternal(keys[i],
+                    item.Data(),
+                    static_cast<size_t>(item.Size()) * sizeof(float),
+                    tid,
+                    false);
+      }
+      return;
+    }
+
+    std::vector<size_t> lock_ids;
+    lock_ids.reserve(static_cast<size_t>(keys.Size()));
+    for (int i = 0; i < keys.Size(); ++i) {
+      lock_ids.push_back(LockIndex(keys[i]));
+    }
+    std::sort(lock_ids.begin(), lock_ids.end());
+    lock_ids.erase(
+        std::unique(lock_ids.begin(), lock_ids.end()), lock_ids.end());
+
+    std::vector<std::unique_lock<std::shared_mutex>> locks;
+    locks.reserve(lock_ids.size());
+    for (size_t id : lock_ids) {
+      locks.emplace_back(key_mutexes_[id]);
+    }
+
+    struct OverwriteItem {
+      Value_t handle = kValueHandleNone;
+      ValueStore::WriteSpec spec{};
+    };
+    struct ReallocItem {
+      uint64_t key       = 0;
+      Value_t old_handle = kValueHandleNone;
+      ValueStore::WriteSpec spec{};
+    };
+    std::vector<OverwriteItem> overwrites;
+    std::vector<ReallocItem> reallocs;
+    overwrites.reserve(static_cast<size_t>(keys.Size()));
+    reallocs.reserve(static_cast<size_t>(keys.Size()));
+
+    for (int i = 0; i < keys.Size(); ++i) {
+      const auto& item   = (*values)[i];
+      const void* data   = item.Data();
+      const size_t size  = static_cast<size_t>(item.Size()) * sizeof(float);
+      Value_t old_handle = kValueHandleNone;
+      index_->Get(keys[i], old_handle);
+      if (old_handle != kValueHandleNone &&
+          value_store_->SlotCapacity(old_handle) >= size) {
+        overwrites.push_back(
+            OverwriteItem{old_handle, ValueStore::WriteSpec{data, size}});
+        continue;
+      }
+      reallocs.push_back(
+          ReallocItem{keys[i], old_handle, ValueStore::WriteSpec{data, size}});
+    }
+
+    if (!overwrites.empty()) {
+      std::vector<uint64_t> handles;
+      std::vector<ValueStore::WriteSpec> specs;
+      handles.reserve(overwrites.size());
+      specs.reserve(overwrites.size());
+      for (const auto& item : overwrites) {
+        handles.push_back(item.handle);
+        specs.push_back(item.spec);
+      }
+      value_store_->BatchWrite(handles, specs);
+    }
+
+    if (!reallocs.empty()) {
+      std::vector<ValueStore::WriteSpec> specs;
+      specs.reserve(reallocs.size());
+      for (const auto& item : reallocs) {
+        specs.push_back(item.spec);
+      }
+      const auto new_handles = value_store_->BatchAllocAndWrite(specs);
+      if (new_handles.size() != reallocs.size()) {
+        LOG(FATAL) << "KVEngine::BatchPut allocation result size mismatch";
+      }
+      for (size_t i = 0; i < reallocs.size(); ++i) {
+        if (new_handles[i] == kValueHandleNone) {
+          LOG(FATAL) << "KVEngine batch value allocation failed, key="
+                     << reallocs[i].key << " size=" << reallocs[i].spec.size;
+        }
+        index_->Put(reallocs[i].key, new_handles[i]);
+        if (reallocs[i].old_handle != kValueHandleNone) {
+          value_store_->Free(reallocs[i].old_handle);
+        }
+      }
     }
   }
 
@@ -98,8 +197,26 @@ public:
     buffers.clear();
     buffers.resize(keys.Size());
 
+    std::vector<size_t> lock_ids;
+    lock_ids.reserve(static_cast<size_t>(keys.Size()));
     for (int i = 0; i < keys.Size(); ++i) {
-      std::shared_lock<std::shared_mutex> lock(KeyMutex(keys[i]));
+      lock_ids.push_back(LockIndex(keys[i]));
+    }
+    std::sort(lock_ids.begin(), lock_ids.end());
+    lock_ids.erase(
+        std::unique(lock_ids.begin(), lock_ids.end()), lock_ids.end());
+
+    std::vector<std::shared_lock<std::shared_mutex>> locks;
+    locks.reserve(lock_ids.size());
+    for (size_t id : lock_ids) {
+      locks.emplace_back(key_mutexes_[id]);
+    }
+
+    std::vector<uint64_t> batch_handles;
+    std::vector<size_t> batch_indices;
+    batch_handles.reserve(static_cast<size_t>(keys.Size()));
+    batch_indices.reserve(static_cast<size_t>(keys.Size()));
+    for (int i = 0; i < keys.Size(); ++i) {
       index_->Get(keys[i], handles[i]);
       if (handles[i] == kValueHandleNone) {
         (*values)[i] = base::ConstArray<float>();
@@ -112,12 +229,27 @@ public:
             bytes / sizeof(float));
         continue;
       }
-      buffers[i].resize(value_store_->SlotCapacity(handles[i]) / sizeof(float));
-      const size_t actual = value_store_->Read(
-          handles[i], buffers[i].data(), buffers[i].size() * sizeof(float));
-      buffers[i].resize(actual / sizeof(float));
-      (*values)[i] =
-          base::ConstArray<float>(buffers[i].data(), buffers[i].size());
+      batch_handles.push_back(handles[i]);
+      batch_indices.push_back(static_cast<size_t>(i));
+    }
+
+    std::vector<ValueStore::ReadResult> batch_results;
+    if (!batch_handles.empty()) {
+      value_store_->BatchRead(batch_handles, batch_results);
+      if (batch_results.size() != batch_indices.size()) {
+        LOG(FATAL) << "KVEngine::BatchGet read result size mismatch";
+      }
+      for (size_t i = 0; i < batch_indices.size(); ++i) {
+        const size_t idx   = batch_indices[i];
+        const auto& result = batch_results[i];
+        buffers[idx].resize(result.data.size() / sizeof(float));
+        if (!result.data.empty()) {
+          std::memcpy(
+              buffers[idx].data(), result.data.data(), result.data.size());
+        }
+        (*values)[idx] =
+            base::ConstArray<float>(buffers[idx].data(), buffers[idx].size());
+      }
     }
   }
 
@@ -197,7 +329,7 @@ private:
     }
     Value_t new_handle = value_store_->AllocAndWrite(data, size);
     if (new_handle == kValueHandleNone) {
-      LOG(ERROR) << "KVEngine value allocation failed, key=" << key
+      LOG(FATAL) << "KVEngine value allocation failed, key=" << key
                  << " size=" << size;
       return;
     }
@@ -208,7 +340,11 @@ private:
   }
 
   std::shared_mutex& KeyMutex(uint64_t key) {
-    return key_mutexes_[key & (kLockStripeNum - 1)];
+    return key_mutexes_[LockIndex(key)];
+  }
+
+  size_t LockIndex(uint64_t key) const {
+    return static_cast<size_t>(key & (kLockStripeNum - 1));
   }
 
   BaseKVConfig config_;
@@ -219,4 +355,5 @@ private:
   std::array<std::shared_mutex, kLockStripeNum> key_mutexes_;
 };
 
-FACTORY_REGISTER(BaseKV, KVEngine, KVEngine, const BaseKVConfig&);
+FACTORY_REGISTER(
+    BaseKV, KVEngineComposite, KVEngineComposite, const BaseKVConfig&);

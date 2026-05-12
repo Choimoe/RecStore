@@ -3,7 +3,7 @@
 #include <memory>
 
 #include "base/factory.h"
-#include "storage/index/dram_cceh/extendible_hash.h"
+#include "storage/index/dram/extendible_hash.h"
 
 class DramExtendibleHashIndex : public Index {
 public:

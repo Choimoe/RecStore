@@ -1,4 +1,4 @@
-#include "storage/index/ssd_cceh/CCEH.h"
+#include "storage/index/ssd/CCEH.h"
 #include "test_io_uring_helper.h"
 #include "gtest/gtest.h"
 #include <filesystem>

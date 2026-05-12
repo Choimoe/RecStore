@@ -12,7 +12,6 @@
       }
     ],
     "base_kv_config": {
-      "path": "/tmp/recstore_data_op_rdma",
       "capacity": 1000000,
       "index": {
         "type": "DRAM_EXTENDIBLE_HASH"
@@ -23,7 +22,8 @@
         "dram_allocator": {
           "type": "PERSIST_LOOP_SLAB",
           "capacity_bytes": 512000000
-        }
+        },
+        "path": "/tmp/recstore_data_op_rdma/value"
       }
     }
   },
