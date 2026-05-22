@@ -288,6 +288,7 @@ def run_one_case(
     rdma_server_ready_timeout_sec: int,
     rdma_client_receive_arena_bytes: int,
     rdma_put_client_send_arena_bytes: int,
+    rdma_per_thread_response_limit_bytes: int,
     rdma_put_server_scratch_bytes: int,
     rdma_put_v2_push_slot_bytes: int,
     rdma_put_v2_push_slots_per_client: int,
@@ -342,6 +343,8 @@ def run_one_case(
             rdma_server_ready_timeout_sec=rdma_server_ready_timeout_sec or None,
             rdma_client_receive_arena_bytes=rdma_client_receive_arena_bytes or None,
             rdma_put_client_send_arena_bytes=rdma_put_client_send_arena_bytes or None,
+            rdma_per_thread_response_limit_bytes=rdma_per_thread_response_limit_bytes
+            or None,
             rdma_put_server_scratch_bytes=rdma_put_server_scratch_bytes or None,
             rdma_put_v2_push_slot_bytes=rdma_put_v2_push_slot_bytes or None,
             rdma_put_v2_push_slots_per_client=rdma_put_v2_push_slots_per_client
@@ -557,7 +560,7 @@ def main() -> int:
     parser.add_argument(
         "--rdma-transport-mode",
         choices=["raw_message", "descriptor_doorbell"],
-        default="raw_message",
+        default="descriptor_doorbell",
     )
     parser.add_argument(
         "--rdma-put-protocol-version",
@@ -568,12 +571,17 @@ def main() -> int:
     parser.add_argument(
         "--rdma-put-v2-transfer-mode",
         choices=["read", "push"],
-        default="push",
+        default="read",
     )
     parser.add_argument("--rdma-wait-timeout-ms", type=int, default=30000)
     parser.add_argument("--rdma-server-ready-timeout-sec", type=int, default=30)
     parser.add_argument("--rdma-client-receive-arena-bytes", type=int, default=0)
     parser.add_argument("--rdma-put-client-send-arena-bytes", type=int, default=0)
+    parser.add_argument(
+        "--rdma-per-thread-response-limit-bytes",
+        type=int,
+        default=1024 * 1024,
+    )
     parser.add_argument("--rdma-put-server-scratch-bytes", type=int, default=0)
     parser.add_argument("--rdma-put-v2-push-slot-bytes", type=int, default=0)
     parser.add_argument("--rdma-put-v2-push-slots-per-client", type=int, default=0)
@@ -669,6 +677,9 @@ def main() -> int:
                 rdma_server_ready_timeout_sec=args.rdma_server_ready_timeout_sec,
                 rdma_client_receive_arena_bytes=args.rdma_client_receive_arena_bytes,
                 rdma_put_client_send_arena_bytes=args.rdma_put_client_send_arena_bytes,
+                rdma_per_thread_response_limit_bytes=(
+                    args.rdma_per_thread_response_limit_bytes
+                ),
                 rdma_put_server_scratch_bytes=args.rdma_put_server_scratch_bytes,
                 rdma_put_v2_push_slot_bytes=args.rdma_put_v2_push_slot_bytes,
                 rdma_put_v2_push_slots_per_client=args.rdma_put_v2_push_slots_per_client,

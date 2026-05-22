@@ -157,13 +157,14 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
                     rdma_use_local_memcached="auto",
                     rdma_memcached_host="127.0.0.1",
                     rdma_memcached_port=21211,
-                    rdma_transport_mode="raw_message",
+                    rdma_transport_mode="descriptor_doorbell",
                     rdma_put_protocol_version=2,
-                    rdma_put_v2_transfer_mode="push",
+                    rdma_put_v2_transfer_mode="read",
                     rdma_wait_timeout_ms=30000,
                     rdma_server_ready_timeout_sec=30,
                     rdma_client_receive_arena_bytes=0,
                     rdma_put_client_send_arena_bytes=0,
+                    rdma_per_thread_response_limit_bytes=1048576,
                     rdma_put_server_scratch_bytes=0,
                     rdma_put_v2_push_slot_bytes=0,
                     rdma_put_v2_push_slots_per_client=0,
@@ -180,6 +181,9 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
         self.assertEqual(kwargs["thread_num"], 3)
         self.assertEqual(kwargs["value_size"], 512)
         self.assertEqual(kwargs["max_kv_num_per_request"], 128)
+        self.assertEqual(kwargs["rdma_transport_mode"], "descriptor_doorbell")
+        self.assertEqual(kwargs["rdma_put_v2_transfer_mode"], "read")
+        self.assertEqual(kwargs["rdma_per_thread_response_limit_bytes"], 1048576)
         self.assertTrue(kwargs["rdma_use_dram"])
         client_cmd = runner.run_client.call_args.args[0]
         self.assertIn("--transport=rdma", client_cmd)
