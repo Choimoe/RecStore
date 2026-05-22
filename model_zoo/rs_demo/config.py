@@ -86,8 +86,13 @@ class RunConfig:
     rdma_put_v2_transfer_mode: str = "push"
     rdma_wait_timeout_ms: int = 30000
     rdma_server_ready_timeout_sec: int = 30
+    rdma_per_thread_response_limit_bytes: int = 1048576
+    rdma_client_receive_arena_bytes: int = 67108864
+    rdma_put_client_send_arena_bytes: int = 67108864
+    rdma_put_server_scratch_bytes: int = 1048576
     rdma_put_v2_push_slot_bytes: int = 1048576
     rdma_put_v2_push_slots_per_client: int = 8
+    rdma_put_v2_push_region_offset: int = 8388608
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -272,8 +277,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rdma-wait-timeout-ms", type=int, default=30000)
     parser.add_argument("--rdma-server-ready-timeout-sec", type=int, default=30)
+    parser.add_argument(
+        "--rdma-per-thread-response-limit-bytes",
+        type=int,
+        default=1048576,
+    )
+    parser.add_argument(
+        "--rdma-client-receive-arena-bytes",
+        type=int,
+        default=67108864,
+    )
+    parser.add_argument(
+        "--rdma-put-client-send-arena-bytes",
+        type=int,
+        default=67108864,
+    )
+    parser.add_argument(
+        "--rdma-put-server-scratch-bytes",
+        type=int,
+        default=1048576,
+    )
     parser.add_argument("--rdma-put-v2-push-slot-bytes", type=int, default=1048576)
     parser.add_argument("--rdma-put-v2-push-slots-per-client", type=int, default=8)
+    parser.add_argument(
+        "--rdma-put-v2-push-region-offset",
+        type=int,
+        default=8388608,
+    )
     return parser
 
 
@@ -346,10 +376,20 @@ def validate_recstore_config(cfg: RunConfig) -> None:
             raise RuntimeError("--rdma-max-keys-per-request must be positive")
         if cfg.rdma_memcached_port <= 0:
             raise RuntimeError("--rdma-memcached-port must be positive")
+        if cfg.rdma_per_thread_response_limit_bytes <= 0:
+            raise RuntimeError("--rdma-per-thread-response-limit-bytes must be positive")
+        if cfg.rdma_client_receive_arena_bytes <= 0:
+            raise RuntimeError("--rdma-client-receive-arena-bytes must be positive")
+        if cfg.rdma_put_client_send_arena_bytes <= 0:
+            raise RuntimeError("--rdma-put-client-send-arena-bytes must be positive")
+        if cfg.rdma_put_server_scratch_bytes <= 0:
+            raise RuntimeError("--rdma-put-server-scratch-bytes must be positive")
         if cfg.rdma_put_v2_push_slot_bytes <= 0:
             raise RuntimeError("--rdma-put-v2-push-slot-bytes must be positive")
         if cfg.rdma_put_v2_push_slots_per_client <= 0:
             raise RuntimeError("--rdma-put-v2-push-slots-per-client must be positive")
+        if cfg.rdma_put_v2_push_region_offset < 0:
+            raise RuntimeError("--rdma-put-v2-push-region-offset must be non-negative")
     if cfg.enable_single_node_distributed_fast_path:
         if cfg.nnodes != 1:
             raise RuntimeError(

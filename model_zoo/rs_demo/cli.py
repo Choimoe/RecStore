@@ -89,8 +89,15 @@ def build_rdma_cluster_runner(repo_root: Path, runtime_cfg_path: Path, runtime_d
         rdma_put_v2_transfer_mode=cfg.rdma_put_v2_transfer_mode,
         rdma_wait_timeout_ms=cfg.rdma_wait_timeout_ms,
         rdma_server_ready_timeout_sec=cfg.rdma_server_ready_timeout_sec,
+        rdma_per_thread_response_limit_bytes=(
+            cfg.rdma_per_thread_response_limit_bytes
+        ),
+        rdma_client_receive_arena_bytes=cfg.rdma_client_receive_arena_bytes,
+        rdma_put_client_send_arena_bytes=cfg.rdma_put_client_send_arena_bytes,
+        rdma_put_server_scratch_bytes=cfg.rdma_put_server_scratch_bytes,
         rdma_put_v2_push_slot_bytes=cfg.rdma_put_v2_push_slot_bytes,
         rdma_put_v2_push_slots_per_client=cfg.rdma_put_v2_push_slots_per_client,
+        rdma_put_v2_push_region_offset=cfg.rdma_put_v2_push_region_offset,
         rdma_use_dram=True,
         show_status_logs=False,
         show_memcached_logs=False,
@@ -102,9 +109,18 @@ def build_rdma_client_env(cfg: RunConfig) -> dict[str, str]:
         "RECSTORE_RDMA_PUT_PROTOCOL_VERSION": str(cfg.rdma_put_protocol_version),
         "RECSTORE_RDMA_PUT_V2_TRANSFER_MODE": cfg.rdma_put_v2_transfer_mode,
         "RECSTORE_RDMA_WAIT_TIMEOUT_MS": str(cfg.rdma_wait_timeout_ms),
+        "RECSTORE_RDMA_CLIENT_RECEIVE_ARENA_BYTES": str(
+            cfg.rdma_client_receive_arena_bytes
+        ),
+        "RECSTORE_RDMA_PUT_CLIENT_SEND_ARENA_BYTES": str(
+            cfg.rdma_put_client_send_arena_bytes
+        ),
         "RECSTORE_RDMA_PUT_V2_PUSH_SLOT_BYTES": str(cfg.rdma_put_v2_push_slot_bytes),
         "RECSTORE_RDMA_PUT_V2_PUSH_SLOTS_PER_CLIENT": str(
             cfg.rdma_put_v2_push_slots_per_client
+        ),
+        "RECSTORE_RDMA_PUT_V2_PUSH_REGION_OFFSET": str(
+            cfg.rdma_put_v2_push_region_offset
         ),
     }
     if cfg.rdma_transport_mode:
