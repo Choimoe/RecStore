@@ -32,6 +32,11 @@ from .runtime.server import (
 )
 from recstore_config_path import resolve_recstore_config_path
 
+try:
+    from src.test.scripts.petps_cluster_runner import PetPSClusterRunner
+except ModuleNotFoundError:
+    PetPSClusterRunner = None  # type: ignore[assignment]
+
 
 def repo_root_from_this_file() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -42,6 +47,69 @@ def estimate_recstore_kv_capacity(num_embeddings: int, table_count: int = 26) ->
     # Keep the runtime capacity close to the benchmark scale so ps_server
     # initialization does not reserve the oversized repository default.
     return max(int(num_embeddings) * int(table_count) * 2, 100_000)
+
+
+def _rdma_env_context(env_updates: dict[str, str]):
+    class _Ctx:
+        def __enter__(self):
+            self.previous = {key: os.environ.get(key) for key in env_updates}
+            self.was_set = {key: key in os.environ for key in env_updates}
+            os.environ.update(env_updates)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            for key in env_updates:
+                if self.was_set[key]:
+                    os.environ[key] = self.previous[key] or ""
+                else:
+                    os.environ.pop(key, None)
+            return False
+
+    return _Ctx()
+
+
+def build_rdma_cluster_runner(repo_root: Path, runtime_cfg_path: Path, runtime_dir: Path, cfg: RunConfig):
+    if PetPSClusterRunner is None:
+        raise RuntimeError("PetPSClusterRunner is unavailable; cannot start RDMA rs_demo server")
+    return PetPSClusterRunner(
+        server_path=repo_root / "build/bin/petps_server",
+        config_path=runtime_cfg_path,
+        num_servers=1,
+        num_clients=1,
+        thread_num=cfg.rdma_thread_num,
+        value_size=int(cfg.embedding_dim) * 4,
+        max_kv_num_per_request=cfg.rdma_max_keys_per_request,
+        timeout=int(cfg.server_wait_seconds),
+        log_dir=runtime_dir / "petps_logs",
+        memcached_host=cfg.rdma_memcached_host,
+        memcached_port=cfg.rdma_memcached_port,
+        use_local_memcached=cfg.rdma_use_local_memcached,
+        rdma_transport_mode=cfg.rdma_transport_mode,
+        rdma_put_protocol_version=cfg.rdma_put_protocol_version,
+        rdma_put_v2_transfer_mode=cfg.rdma_put_v2_transfer_mode,
+        rdma_wait_timeout_ms=cfg.rdma_wait_timeout_ms,
+        rdma_server_ready_timeout_sec=cfg.rdma_server_ready_timeout_sec,
+        rdma_put_v2_push_slot_bytes=cfg.rdma_put_v2_push_slot_bytes,
+        rdma_put_v2_push_slots_per_client=cfg.rdma_put_v2_push_slots_per_client,
+        rdma_use_dram=True,
+        show_status_logs=False,
+        show_memcached_logs=False,
+    )
+
+
+def build_rdma_client_env(cfg: RunConfig) -> dict[str, str]:
+    env = {
+        "RECSTORE_RDMA_PUT_PROTOCOL_VERSION": str(cfg.rdma_put_protocol_version),
+        "RECSTORE_RDMA_PUT_V2_TRANSFER_MODE": cfg.rdma_put_v2_transfer_mode,
+        "RECSTORE_RDMA_WAIT_TIMEOUT_MS": str(cfg.rdma_wait_timeout_ms),
+        "RECSTORE_RDMA_PUT_V2_PUSH_SLOT_BYTES": str(cfg.rdma_put_v2_push_slot_bytes),
+        "RECSTORE_RDMA_PUT_V2_PUSH_SLOTS_PER_CLIENT": str(
+            cfg.rdma_put_v2_push_slots_per_client
+        ),
+    }
+    if cfg.rdma_transport_mode:
+        env["RECSTORE_RDMA_TRANSPORT_MODE"] = cfg.rdma_transport_mode
+    return env
 
 
 def build_runner(cfg: RunConfig, runtime_dir: Path):
@@ -120,7 +188,12 @@ def main(argv: list[str] | None = None) -> int:
                 kv_capacity=estimate_recstore_kv_capacity(cfg.num_embeddings),
                 value_size_bytes=(
                     int(cfg.embedding_dim) * 4
-                    if effective_ps_type == "LOCAL_SHM"
+                    if effective_ps_type in {"LOCAL_SHM", "RDMA"}
+                    else None
+                ),
+                max_keys_per_request=(
+                    int(cfg.rdma_max_keys_per_request)
+                    if effective_ps_type == "RDMA"
                     else None
                 ),
             )
@@ -134,23 +207,34 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["RECSTORE_CONFIG"] = str(runtime_cfg_path)
         if server_needed:
             print(f"[rs_demo] starting server ({effective_ps_type}) with {runtime_cfg_path}")
-            proc = start_server(repo_root, runtime_cfg_path, Path(cfg.server_log))
-            if not wait_server_ready(
-                proc=proc,
-                host=cfg.server_host,
-                port0=cfg.server_port0,
-                port1=cfg.server_port1,
-                timeout_s=cfg.server_wait_seconds,
-                ps_type=effective_ps_type,
-            ):
-                raise RuntimeError(
-                    f"server failed to become ready: {cfg.server_host}:{cfg.server_port0},{cfg.server_port1}; "
-                    f"log={cfg.server_log}"
-                )
-            print("[rs_demo] server is ready")
-
-        runner = build_runner(cfg, runtime_dir)
-        _run_result = runner.run(repo_root, cfg)
+            if effective_ps_type == "RDMA":
+                rdma_runner = build_rdma_cluster_runner(repo_root, runtime_cfg_path, runtime_dir, cfg)
+                rdma_env = rdma_runner.build_env()
+                rdma_env.update(build_rdma_client_env(cfg))
+                with _rdma_env_context(rdma_env), rdma_runner.run():
+                    print("[rs_demo] server is ready")
+                    runner = build_runner(cfg, runtime_dir)
+                    _run_result = runner.run(repo_root, cfg)
+            else:
+                proc = start_server(repo_root, runtime_cfg_path, Path(cfg.server_log))
+                if not wait_server_ready(
+                    proc=proc,
+                    host=cfg.server_host,
+                    port0=cfg.server_port0,
+                    port1=cfg.server_port1,
+                    timeout_s=cfg.server_wait_seconds,
+                    ps_type=effective_ps_type,
+                ):
+                    raise RuntimeError(
+                        f"server failed to become ready: {cfg.server_host}:{cfg.server_port0},{cfg.server_port1}; "
+                        f"log={cfg.server_log}"
+                    )
+                print("[rs_demo] server is ready")
+                runner = build_runner(cfg, runtime_dir)
+                _run_result = runner.run(repo_root, cfg)
+        else:
+            runner = build_runner(cfg, runtime_dir)
+            _run_result = runner.run(repo_root, cfg)
         if cfg.backend == "torchrec":
             if is_torchrec_worker:
                 return 0

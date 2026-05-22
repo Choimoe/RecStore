@@ -59,6 +59,7 @@ class PetPSClusterRunner:
         rdma_wait_timeout_ms=None,
         rdma_transport_mode=None,
         rdma_transport_mode_client_flag=True,
+        rdma_use_dram=True,
         validate_routing=False,
     ):
         self.server_path = Path(server_path)
@@ -104,6 +105,7 @@ class PetPSClusterRunner:
         self.rdma_wait_timeout_ms = rdma_wait_timeout_ms
         self.rdma_transport_mode = rdma_transport_mode
         self.rdma_transport_mode_client_flag = rdma_transport_mode_client_flag
+        self.rdma_use_dram = rdma_use_dram
         self.validate_routing = validate_routing
         self.processes = []
         self.process_logs = {}
@@ -177,6 +179,7 @@ class PetPSClusterRunner:
             f"--thread_num={self.thread_num}",
             f"--value_size={self.value_size}",
             f"--max_kv_num_per_request={self.max_kv_num_per_request}",
+            f"--use_dram={'true' if self.rdma_use_dram else 'false'}",
         ]
         if self.rdma_per_thread_response_limit_bytes is not None:
             cmd.append(

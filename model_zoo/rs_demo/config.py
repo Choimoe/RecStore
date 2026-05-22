@@ -76,6 +76,18 @@ class RunConfig:
     torchrec_trace_csv: str = ""
     torchrec_compare_recstore_csv: str = ""
     torchrec_compare_csv: str = ""
+    rdma_thread_num: int = 1
+    rdma_max_keys_per_request: int = 4096
+    rdma_use_local_memcached: str = "auto"
+    rdma_memcached_host: str = "127.0.0.1"
+    rdma_memcached_port: int = 21211
+    rdma_transport_mode: str = "raw_message"
+    rdma_put_protocol_version: int = 2
+    rdma_put_v2_transfer_mode: str = "push"
+    rdma_wait_timeout_ms: int = 30000
+    rdma_server_ready_timeout_sec: int = 30
+    rdma_put_v2_push_slot_bytes: int = 1048576
+    rdma_put_v2_push_slots_per_client: int = 8
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -139,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ps-type",
         type=str,
         default="BRPC",
-        choices=["BRPC", "GRPC", "LOCAL_SHM"],
+        choices=["BRPC", "GRPC", "LOCAL_SHM", "RDMA"],
     )
     parser.add_argument("--num-embeddings", type=int, default=200000)
     parser.add_argument("--embedding-dim", type=int, default=128)
@@ -235,6 +247,33 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
     )
+    parser.add_argument("--rdma-thread-num", type=int, default=1)
+    parser.add_argument("--rdma-max-keys-per-request", type=int, default=4096)
+    parser.add_argument(
+        "--rdma-use-local-memcached",
+        type=str,
+        default="auto",
+        choices=["always", "auto", "never"],
+    )
+    parser.add_argument("--rdma-memcached-host", type=str, default="127.0.0.1")
+    parser.add_argument("--rdma-memcached-port", type=int, default=21211)
+    parser.add_argument(
+        "--rdma-transport-mode",
+        type=str,
+        default="raw_message",
+        choices=["raw_message", "descriptor_doorbell"],
+    )
+    parser.add_argument("--rdma-put-protocol-version", type=int, default=2, choices=[1, 2])
+    parser.add_argument(
+        "--rdma-put-v2-transfer-mode",
+        type=str,
+        default="push",
+        choices=["read", "push"],
+    )
+    parser.add_argument("--rdma-wait-timeout-ms", type=int, default=30000)
+    parser.add_argument("--rdma-server-ready-timeout-sec", type=int, default=30)
+    parser.add_argument("--rdma-put-v2-push-slot-bytes", type=int, default=1048576)
+    parser.add_argument("--rdma-put-v2-push-slots-per-client", type=int, default=8)
     return parser
 
 
@@ -298,6 +337,19 @@ def validate_recstore_config(cfg: RunConfig) -> None:
         )
     if cfg.prefetch_depth < 0:
         raise RuntimeError("--prefetch-depth must be non-negative")
+    if cfg.ps_type == "RDMA":
+        if cfg.nnodes != 1 or cfg.nproc_per_node != 1:
+            raise RuntimeError("RecStore RDMA rs_demo path currently supports single-process runs only.")
+        if cfg.rdma_thread_num <= 0:
+            raise RuntimeError("--rdma-thread-num must be positive")
+        if cfg.rdma_max_keys_per_request <= 0:
+            raise RuntimeError("--rdma-max-keys-per-request must be positive")
+        if cfg.rdma_memcached_port <= 0:
+            raise RuntimeError("--rdma-memcached-port must be positive")
+        if cfg.rdma_put_v2_push_slot_bytes <= 0:
+            raise RuntimeError("--rdma-put-v2-push-slot-bytes must be positive")
+        if cfg.rdma_put_v2_push_slots_per_client <= 0:
+            raise RuntimeError("--rdma-put-v2-push-slots-per-client must be positive")
     if cfg.enable_single_node_distributed_fast_path:
         if cfg.nnodes != 1:
             raise RuntimeError(

@@ -147,6 +147,34 @@ class TestChooseAvailablePorts(unittest.TestCase):
             self.assertEqual(runtime_cfg["cache_ps"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
             self.assertEqual(runtime_cfg["distributed_client"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
 
+    def test_make_runtime_dir_uses_single_rdma_shard_and_value_size_hint(self) -> None:
+        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _runtime_dir, runtime_cfg_path = make_runtime_dir(
+                base_cfg=base_cfg,
+                host="127.0.0.1",
+                port0=25000,
+                port1=25001,
+                allocator="PersistLoopShmMalloc",
+                output_root=tmpdir,
+                run_id="case-rdma-single",
+                ps_type="RDMA",
+                value_size_bytes=64,
+                max_keys_per_request=4096,
+            )
+            runtime_cfg = json.loads(runtime_cfg_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(runtime_cfg["cache_ps"]["ps_type"], "RDMA")
+            self.assertEqual(runtime_cfg["cache_ps"]["num_shards"], 1)
+            self.assertEqual(runtime_cfg["distributed_client"]["num_shards"], 1)
+            self.assertEqual(runtime_cfg["cache_ps"]["servers"], [{"host": "127.0.0.1", "port": 25000, "shard": 0}])
+            self.assertEqual(runtime_cfg["distributed_client"]["servers"], [{"host": "127.0.0.1", "port": 25000, "shard": 0}])
+            self.assertEqual(
+                runtime_cfg["cache_ps"]["base_kv_config"]["value"]["default_value_size_hint"],
+                64,
+            )
+            self.assertEqual(runtime_cfg["distributed_client"]["max_keys_per_request"], 4096)
+
     def test_wait_server_ready_local_shm_only_requires_live_process(self) -> None:
         proc = mock.Mock()
         proc.poll.return_value = None

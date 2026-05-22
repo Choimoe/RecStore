@@ -521,6 +521,24 @@ class TestRecStoreRunner(unittest.TestCase):
 
         self.assertFalse(cfg.enable_single_node_distributed_fast_path)
         self.assertEqual(cfg.single_node_ps_backend, "local_shm")
+
+    def test_parse_config_accepts_rdma_ps_type(self) -> None:
+        cfg = config.parse_config(
+            [
+                "--backend",
+                "recstore",
+                "--ps-type",
+                "RDMA",
+                "--rdma-thread-num",
+                "2",
+                "--rdma-max-keys-per-request",
+                "4096",
+            ]
+        )
+
+        self.assertEqual(cfg.ps_type, "RDMA")
+        self.assertEqual(cfg.rdma_thread_num, 2)
+        self.assertEqual(cfg.rdma_max_keys_per_request, 4096)
         self.assertEqual(cfg.single_node_owner_policy, "hash_mod_world_size")
 
     def test_parse_config_accepts_gpu_cache_options(self) -> None:

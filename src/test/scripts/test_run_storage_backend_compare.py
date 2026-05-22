@@ -11,7 +11,8 @@ from run_storage_backend_compare import (  # noqa: E402
     collect_hierkv_rows,
     merge_rows,
 )
-from run_hps_backend_compare import command_for  # noqa: E402
+from run_hps_backend_compare import BACKEND_ALIASES as HPS_BACKEND_ALIASES  # noqa: E402
+from run_hps_backend_compare import command_for, data_path_for  # noqa: E402
 
 
 class TestRunStorageBackendCompare(unittest.TestCase):
@@ -103,6 +104,29 @@ class TestRunStorageBackendCompare(unittest.TestCase):
         self.assertIn("--hps_rocksdb_thread_num=1", cmd)
         self.assertIn("--ssd_io_backend=IOURING", cmd)
         self.assertIn("--ssd_queue_depth=512", cmd)
+
+    def test_recstore_dram_value_store_uses_dev_shm_path(self):
+        data_path = data_path_for(
+            "dram_eh_dram",
+            HPS_BACKEND_ALIASES["dram_eh_dram"],
+            Path("/tmp/bench-output"),
+            "dram_eh_dram_fetch_uniform_r0",
+        )
+
+        self.assertEqual(
+            data_path,
+            Path("/dev/shm/recstore_storage_bench/dram_eh_dram_fetch_uniform_r0"),
+        )
+
+    def test_non_dram_backends_use_output_dir_data_path(self):
+        data_path = data_path_for(
+            "hps_hash_map",
+            HPS_BACKEND_ALIASES["hps_hash_map"],
+            Path("/tmp/bench-output"),
+            "hps_hash_map_fetch_uniform_r0",
+        )
+
+        self.assertEqual(data_path, Path("/tmp/bench-output/data/hps_hash_map_fetch_uniform_r0"))
 
     def test_merge_rows_preserves_common_fields(self):
         merged = merge_rows(

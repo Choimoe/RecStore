@@ -23,7 +23,7 @@
           "type": "PERSIST_LOOP_SLAB",
           "capacity_bytes": 16000000
         },
-        "path": "/tmp/recstore_data_rdma_test/value"
+        "path": "/dev/shm/recstore_data_rdma_test/value"
       }
     }
   },

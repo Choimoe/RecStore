@@ -8,6 +8,9 @@ _THIS_DIR = Path(__file__).resolve().parent
 _PKG_PARENT = str(_THIS_DIR.parent)
 if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
+_REPO_ROOT = str(_THIS_DIR.parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from rs_demo.cli import main  # noqa: E402
 

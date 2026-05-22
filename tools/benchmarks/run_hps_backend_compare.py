@@ -136,6 +136,12 @@ def gflag(name: str, value: object) -> str:
     return f"--{name}={value}"
 
 
+def data_path_for(alias: str, spec: BackendSpec, output_dir: Path, run_name: str) -> Path:
+    if spec.backend == "recstore" and spec.value_store_type == "DRAM_VALUE_STORE":
+        return Path("/dev/shm/recstore_storage_bench") / run_name
+    return output_dir / "data" / run_name
+
+
 def command_for(alias: str, spec: BackendSpec, data_path: Path, args: argparse.Namespace) -> list[str]:
     load_threads = args.load_threads
     if alias == "hps_rocksdb" and load_threads == 0:
@@ -204,7 +210,7 @@ def run_one(alias: str, repeat: int, args: argparse.Namespace) -> list[dict[str,
         raise ValueError(f"unknown backend alias '{alias}'")
     spec = BACKEND_ALIASES[alias]
     run_name = f"{sanitize(alias)}_{sanitize(args.mode)}_{sanitize(args.distribution)}_r{repeat}"
-    data_path = args.output_dir / "data" / run_name
+    data_path = data_path_for(alias, spec, args.output_dir, run_name)
     log_path = args.output_dir / "logs" / f"{run_name}.log"
     if data_path.exists() and not args.keep_data:
         shutil.rmtree(data_path)

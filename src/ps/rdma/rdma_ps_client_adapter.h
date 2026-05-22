@@ -80,6 +80,8 @@ private:
   std::unordered_map<std::string, TableState> tables_;
   std::unordered_map<uint64_t, PrefetchState> prefetches_;
   uint64_t next_prefetch_id_ = 1;
+  static thread_local float* sync_get_buffer_;
+  static thread_local std::size_t sync_get_buffer_bytes_;
 };
 
 } // namespace recstore

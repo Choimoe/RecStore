@@ -30,6 +30,7 @@ class TestPetPSClusterRunner(unittest.TestCase):
         self.assertIn("--thread_num=2", cmd)
         self.assertIn("--value_size=16", cmd)
         self.assertIn("--max_kv_num_per_request=64", cmd)
+        self.assertIn("--use_dram=true", cmd)
 
     def test_detects_ready_lines(self):
         runner = PetPSClusterRunner()

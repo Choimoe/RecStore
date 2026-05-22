@@ -113,6 +113,7 @@ def build_runtime_config(
     run_id: str,
     kv_capacity: int | None = None,
     value_size_bytes: int | None = None,
+    max_keys_per_request: int | None = None,
 ) -> dict:
     cfg = copy.deepcopy(base_cfg)
     cfg.setdefault("cache_ps", {})
@@ -124,7 +125,7 @@ def build_runtime_config(
     cfg["client"]["shard"] = 0
 
     cfg.setdefault("distributed_client", {})
-    if cfg["cache_ps"]["ps_type"] == "LOCAL_SHM":
+    if cfg["cache_ps"]["ps_type"] in {"LOCAL_SHM", "RDMA"}:
         servers = [{"host": host, "port": port0, "shard": 0}]
     else:
         servers = [
@@ -133,6 +134,8 @@ def build_runtime_config(
         ]
     cfg["distributed_client"]["num_shards"] = len(servers)
     cfg["distributed_client"]["servers"] = list(servers)
+    if max_keys_per_request is not None:
+        cfg["distributed_client"]["max_keys_per_request"] = int(max_keys_per_request)
 
     cfg["cache_ps"]["num_shards"] = len(servers)
     cfg["cache_ps"]["servers"] = list(servers)
@@ -238,6 +241,7 @@ def make_runtime_dir(
     ps_type: str = "BRPC",
     kv_capacity: int | None = None,
     value_size_bytes: int | None = None,
+    max_keys_per_request: int | None = None,
 ) -> tuple[Path, Path]:
     unique_tag = f"{time.time_ns()}_{uuid.uuid4().hex[:8]}"
     runtime_cfg = build_runtime_config(
@@ -252,6 +256,7 @@ def make_runtime_dir(
         run_id=run_id,
         kv_capacity=kv_capacity,
         value_size_bytes=value_size_bytes,
+        max_keys_per_request=max_keys_per_request,
     )
     runtime_dir = Path(output_root) / "runtime" / run_id / unique_tag
     runtime_dir.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -18,11 +17,31 @@ DECLARE_int32(global_id);
 DECLARE_int32(num_server_processes);
 DECLARE_int32(num_client_processes);
 DECLARE_string(rdma_transport_mode);
+DECLARE_int32(rdma_put_protocol_version);
+DECLARE_string(rdma_put_v2_transfer_mode);
+DECLARE_uint64(rdma_put_v2_push_slot_bytes);
+DECLARE_int32(rdma_put_v2_push_slots_per_client);
+DECLARE_uint64(rdma_put_v2_push_region_offset);
+DECLARE_uint64(rdma_client_receive_arena_bytes);
+DECLARE_uint64(rdma_put_client_send_arena_bytes);
+DECLARE_int32(rdma_wait_timeout_ms);
 
 namespace recstore {
 
 namespace {
 constexpr float kRdmaUpdateLearningRate = 0.01f;
+
+void SetIntFlagFromEnv(const char* env_name, int* flag) {
+  if (const char* value = std::getenv(env_name)) {
+    *flag = std::stoi(value);
+  }
+}
+
+void SetUInt64FlagFromEnv(const char* env_name, std::uint64_t* flag) {
+  if (const char* value = std::getenv(env_name)) {
+    *flag = static_cast<std::uint64_t>(std::stoull(value));
+  }
+}
 
 int ValueSizeHintFromBaseKvConfig(const json& base_kv_config,
                                   int fallback_value_size) {
@@ -37,39 +56,12 @@ int ValueSizeHintFromBaseKvConfig(const json& base_kv_config,
       "default_value_size_hint", fallback_value_size);
 }
 
-std::vector<std::string> ReadProcessArgv() {
-  std::ifstream cmdline("/proc/self/cmdline", std::ios::binary);
-  std::vector<std::string> argv;
-  if (!cmdline.is_open()) {
-    return argv;
-  }
-
-  std::string current;
-  char ch = '\0';
-  while (cmdline.get(ch)) {
-    if (ch == '\0') {
-      if (!current.empty()) {
-        argv.push_back(current);
-        current.clear();
-      }
-      continue;
-    }
-    current.push_back(ch);
-  }
-  if (!current.empty()) {
-    argv.push_back(current);
-  }
-  return argv;
-}
 } // namespace
 
 void InitializeRdmaProcessRuntime() {
   static std::once_flag init_once;
   std::call_once(init_once, []() {
-    std::vector<std::string> argv_strings = ReadProcessArgv();
-    if (argv_strings.empty()) {
-      argv_strings.emplace_back("recstore_rdma_client");
-    }
+    std::vector<std::string> argv_strings = {"recstore_rdma_client"};
 
     std::vector<char*> argv_storage;
     argv_storage.reserve(argv_strings.size() + 1);
@@ -86,6 +78,9 @@ void InitializeRdmaProcessRuntime() {
 
 RDMAPSClientAdapter::RDMAPSClientAdapter(json config)
     : BasePSClient(config), config_(std::move(config)) {}
+
+thread_local float* RDMAPSClientAdapter::sync_get_buffer_            = nullptr;
+thread_local std::size_t RDMAPSClientAdapter::sync_get_buffer_bytes_ = 0;
 
 void RDMAPSClientAdapter::EnsureClientInitialized() {
   std::lock_guard<std::mutex> guard(init_mu_);
@@ -113,6 +108,24 @@ void RDMAPSClientAdapter::EnsureClientInitialized() {
   if (const char* mode = std::getenv("RECSTORE_RDMA_TRANSPORT_MODE")) {
     FLAGS_rdma_transport_mode = mode;
   }
+  if (const char* transfer_mode =
+          std::getenv("RECSTORE_RDMA_PUT_V2_TRANSFER_MODE")) {
+    FLAGS_rdma_put_v2_transfer_mode = transfer_mode;
+  }
+  SetIntFlagFromEnv(
+      "RECSTORE_RDMA_PUT_PROTOCOL_VERSION", &FLAGS_rdma_put_protocol_version);
+  SetUInt64FlagFromEnv("RECSTORE_RDMA_PUT_V2_PUSH_SLOT_BYTES",
+                       &FLAGS_rdma_put_v2_push_slot_bytes);
+  SetIntFlagFromEnv("RECSTORE_RDMA_PUT_V2_PUSH_SLOTS_PER_CLIENT",
+                    &FLAGS_rdma_put_v2_push_slots_per_client);
+  SetUInt64FlagFromEnv("RECSTORE_RDMA_PUT_V2_PUSH_REGION_OFFSET",
+                       &FLAGS_rdma_put_v2_push_region_offset);
+  SetUInt64FlagFromEnv("RECSTORE_RDMA_CLIENT_RECEIVE_ARENA_BYTES",
+                       &FLAGS_rdma_client_receive_arena_bytes);
+  SetUInt64FlagFromEnv("RECSTORE_RDMA_PUT_CLIENT_SEND_ARENA_BYTES",
+                       &FLAGS_rdma_put_client_send_arena_bytes);
+  SetIntFlagFromEnv(
+      "RECSTORE_RDMA_WAIT_TIMEOUT_MS", &FLAGS_rdma_wait_timeout_ms);
 
   if (num_shards <= 1) {
     shard_clients_.push_back(std::make_unique<petps::PetPSClient>(
@@ -223,7 +236,13 @@ int RDMAPSClientAdapter::GetParameter(const base::ConstArray<uint64_t>& keys,
     heap_recv.resize(response_bytes / sizeof(float), 0.0f);
     recv = heap_recv.data();
   } else {
-    recv = static_cast<float*>(client_->GetReceiveBuffer(response_bytes));
+    if (sync_get_buffer_ == nullptr ||
+        sync_get_buffer_bytes_ < response_bytes) {
+      sync_get_buffer_ =
+          static_cast<float*>(client_->GetReceiveBuffer(response_bytes));
+      sync_get_buffer_bytes_ = response_bytes;
+    }
+    recv = sync_get_buffer_;
     std::memset(recv, 0, response_bytes);
   }
 

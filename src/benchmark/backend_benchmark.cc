@@ -16,11 +16,13 @@
 #include "base/bind_core.h"
 #include "base/init.h"
 #include "base/log.h"
-#include "storage/external/fasterkv/fasterkv_backend.h"
 #include "storage/external/hps/hps_recstore.h"
 #include "storage/external/hps/raw_rocksdb.h"
 #include "third_party/HugeCTR/HugeCTR/include/hps/hash_map_backend.hpp"
 #include "third_party/HugeCTR/HugeCTR/include/hps/rocksdb_backend.hpp"
+#ifdef RECSTORE_HAS_FASTERKV_BACKEND
+#  include "storage/external/fasterkv/fasterkv_backend.h"
+#endif
 
 DEFINE_string(backend,
               "hps_hash_map",
@@ -244,6 +246,7 @@ private:
   recstore::storage::RawRocksDBBackend backend_;
 };
 
+#ifdef RECSTORE_HAS_FASTERKV_BACKEND
 class FasterKVBenchmarkBackend : public BenchmarkBackend {
 public:
   FasterKVBenchmarkBackend(
@@ -313,6 +316,7 @@ recstore::storage::fasterkv::FasterKVBackendOptions FasterKvOptions() {
   }
   return options;
 }
+#endif
 
 const std::string& EffectiveTableName() {
   static const std::string kRocksDbDefaultTable = "default";
@@ -376,10 +380,15 @@ std::unique_ptr<BenchmarkBackend> CreateBenchmarkBackend() {
         FLAGS_backend == "raw_rocksdb_memenv");
   }
   if (FLAGS_backend == "fasterkv") {
+#ifdef RECSTORE_HAS_FASTERKV_BACKEND
     return std::make_unique<FasterKVBenchmarkBackend>(
         static_cast<uint64_t>(FLAGS_record_count),
         static_cast<size_t>(FLAGS_value_size),
         FasterKvOptions());
+#else
+    throw std::runtime_error("fasterkv backend is unavailable: "
+                             "fasterkv_backend target was not built");
+#endif
   }
   return std::make_unique<HpsBenchmarkBackend>(CreateBackend());
 }

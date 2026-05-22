@@ -30,6 +30,15 @@ if(NOT TARGET rocksdb-shared)
 endif()
 
 if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
+  set(HUGECTR_GENERATED_INCLUDE_DIR
+    ${PROJECT_BINARY_DIR}/third_party/HugeCTR/HugeCTR/include)
+  file(MAKE_DIRECTORY ${HUGECTR_GENERATED_INCLUDE_DIR})
+  configure_file(
+    ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include/config.hpp.in
+    ${HUGECTR_GENERATED_INCLUDE_DIR}/config.hpp
+    @ONLY
+  )
+
   add_library(hps_native_support STATIC
     hps_shim.cc
     raw_rocksdb.cc
@@ -44,6 +53,7 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR
+    ${HUGECTR_GENERATED_INCLUDE_DIR}
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/HugeCTR/include
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/parallel-hashmap
     ${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/include

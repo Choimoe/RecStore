@@ -8,10 +8,14 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
         ps_common
         TBB::tbb
         hps_backend_support
-        fasterkv_backend
         rocksdb-shared
         OpenMP::OpenMP_CXX
     )
+    if(TARGET fasterkv_backend)
+        target_compile_definitions(backend_benchmark PRIVATE
+            RECSTORE_HAS_FASTERKV_BACKEND=1)
+        target_link_libraries(backend_benchmark PUBLIC fasterkv_backend)
+    endif()
 else()
     message(STATUS "Skipping backend_benchmark: HugeCTR CUDA headers are unavailable.")
 endif()
@@ -42,7 +46,9 @@ add_executable(ps_transport_benchmark
 target_link_libraries(ps_transport_benchmark PUBLIC
     base
     grpc_ps_client
+    dist_grpc_ps_client
     brpc_ps_client
+    dist_brpc_ps_client
     local_shm_ps_client
     ${warp_wq_ps_client}
     Folly::folly
@@ -58,7 +64,9 @@ add_executable(recstore_mixed_benchmark
 target_link_libraries(recstore_mixed_benchmark PUBLIC
     base
     grpc_ps_client
+    dist_grpc_ps_client
     brpc_ps_client
+    dist_brpc_ps_client
     local_shm_ps_client
     ${warp_wq_ps_client}
     Folly::folly
