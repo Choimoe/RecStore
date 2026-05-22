@@ -161,13 +161,20 @@ class RecStoreClient:
         # unless the caller explicitly requests custom initialization data.
         if init_func is not None:
             initial_data = init_func(shape, dtype)
+            all_keys = torch.arange(shape[0], dtype=torch.int64)
+            if base_offset != 0:
+                all_keys = all_keys + int(base_offset)
+            self.ops.emb_write(all_keys, initial_data)
         else:
-            initial_data = torch.zeros(shape, dtype=dtype)
-        
-        all_keys = torch.arange(shape[0], dtype=torch.int64)
-        if base_offset != 0:
-            all_keys = all_keys + int(base_offset)
-        self.ops.emb_write(all_keys, initial_data)
+            # Keep initialization bounded for large tables and network PS backends.
+            init_chunk_rows = 4096
+            for begin in range(0, int(num_embeddings), init_chunk_rows):
+                end = min(begin + init_chunk_rows, int(num_embeddings))
+                keys = torch.arange(begin, end, dtype=torch.int64)
+                if base_offset != 0:
+                    keys = keys + int(base_offset)
+                data = torch.zeros((end - begin, embedding_dim), dtype=dtype)
+                self.ops.emb_write(keys, data)
         self._clear_gpu_cache_if_available()
 
 
