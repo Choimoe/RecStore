@@ -337,6 +337,10 @@ PhaseStats
 LoadRecords(const std::string& transport, int load_threads, int dim) {
   std::vector<std::thread> threads;
   std::vector<PhaseStats> stats(load_threads);
+  std::shared_ptr<recstore::BasePSClient> shared_rdma_client;
+  if (transport == "rdma") {
+    shared_rdma_client = CreateBenchmarkClient(transport);
+  }
   const uint64_t record_count = static_cast<uint64_t>(FLAGS_record_count);
   const uint64_t per_thread =
       (record_count + static_cast<uint64_t>(load_threads) - 1) /
@@ -345,7 +349,14 @@ LoadRecords(const std::string& transport, int load_threads, int dim) {
   for (int tid = 0; tid < load_threads; ++tid) {
     threads.emplace_back([&, tid]() {
       base::auto_bind_core();
-      auto client = CreateBenchmarkClient(transport);
+      auto owned_client =
+          shared_rdma_client == nullptr
+              ? CreateBenchmarkClient(transport)
+              : nullptr;
+      recstore::BasePSClient* client =
+          shared_rdma_client != nullptr
+              ? shared_rdma_client.get()
+              : owned_client.get();
       std::vector<uint64_t> keys;
       keys.reserve(static_cast<size_t>(FLAGS_batch_keys));
       std::vector<float> values =
@@ -359,7 +370,7 @@ LoadRecords(const std::string& transport, int load_threads, int dim) {
                keys.size() < static_cast<size_t>(FLAGS_batch_keys)) {
           keys.push_back(key++);
         }
-        CHECK(PutFlat(client.get(), transport, keys, values, dim))
+        CHECK(PutFlat(client, transport, keys, values, dim))
             << transport << " preload PutParameter failed";
         ++local.batches;
         local.key_ops += keys.size();
@@ -390,11 +401,22 @@ PhaseStats RunTransactions(const std::string& transport, int dim) {
   std::atomic<bool> stop{false};
   std::vector<std::thread> threads;
   std::vector<PhaseStats> stats(FLAGS_thread_num);
+  std::shared_ptr<recstore::BasePSClient> shared_rdma_client;
+  if (transport == "rdma") {
+    shared_rdma_client = CreateBenchmarkClient(transport);
+  }
 
   for (int tid = 0; tid < FLAGS_thread_num; ++tid) {
     threads.emplace_back([&, tid]() {
       base::auto_bind_core();
-      auto client = CreateBenchmarkClient(transport);
+      auto owned_client =
+          shared_rdma_client == nullptr
+              ? CreateBenchmarkClient(transport)
+              : nullptr;
+      recstore::BasePSClient* client =
+          shared_rdma_client != nullptr
+              ? shared_rdma_client.get()
+              : owned_client.get();
       KeyGenerator key_gen(
           FLAGS_distribution,
           static_cast<uint64_t>(FLAGS_record_count),
@@ -417,11 +439,11 @@ PhaseStats RunTransactions(const std::string& transport, int dim) {
             (mixed &&
              static_cast<int>(key_gen.NextUint(100)) < FLAGS_read_ratio);
         if (do_fetch) {
-          CHECK(GetFlat(client.get(), transport, keys, &output))
+          CHECK(GetFlat(client, transport, keys, &output))
               << transport << " GetParameter failed";
         }
         if (insert_only || fetch_insert || (mixed && !do_fetch)) {
-          CHECK(PutFlat(client.get(), transport, keys, values, dim))
+          CHECK(PutFlat(client, transport, keys, values, dim))
               << transport << " PutParameter failed";
         }
         ++local.batches;

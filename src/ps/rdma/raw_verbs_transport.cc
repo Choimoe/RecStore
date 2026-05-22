@@ -99,6 +99,53 @@ void ModifyQpToRts(ibv_qp* qp) {
   }
 }
 
+std::string HexEncodeBytes(const void* data, std::size_t size) {
+  static constexpr char kHex[] = "0123456789abcdef";
+  const auto* bytes            = static_cast<const std::uint8_t*>(data);
+  std::string out(size * 2, '\0');
+  for (std::size_t i = 0; i < size; ++i) {
+    out[i * 2]     = kHex[bytes[i] >> 4];
+    out[i * 2 + 1] = kHex[bytes[i] & 0x0f];
+  }
+  return out;
+}
+
+int HexValue(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return 10 + ch - 'a';
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return 10 + ch - 'A';
+  }
+  return -1;
+}
+
+bool DecodeRawVerbsNodeMeta(const std::string& value, RawVerbsNodeMeta* meta) {
+  if (meta == nullptr) {
+    return false;
+  }
+  if (value.size() == sizeof(RawVerbsNodeMeta)) {
+    std::memcpy(meta, value.data(), sizeof(RawVerbsNodeMeta));
+    return true;
+  }
+  if (value.size() != sizeof(RawVerbsNodeMeta) * 2) {
+    return false;
+  }
+  auto* bytes = reinterpret_cast<std::uint8_t*>(meta);
+  for (std::size_t i = 0; i < sizeof(RawVerbsNodeMeta); ++i) {
+    const int high = HexValue(value[i * 2]);
+    const int low  = HexValue(value[i * 2 + 1]);
+    if (high < 0 || low < 0) {
+      return false;
+    }
+    bytes[i] = static_cast<std::uint8_t>((high << 4) | low);
+  }
+  return true;
+}
+
 } // namespace
 
 struct RawVerbsTransport::Impl {
@@ -278,8 +325,7 @@ void RawVerbsTransport::PublishAndConnect() {
                         impl_->config.local_lane,
                         node,
                         impl_->config.remote_lane),
-        std::string(reinterpret_cast<const char*>(&peer_local),
-                    sizeof(peer_local)));
+        HexEncodeBytes(&peer_local, sizeof(peer_local)));
   }
 
   impl_->metas.assign(static_cast<std::size_t>(node_count), RawVerbsNodeMeta{});
@@ -308,12 +354,11 @@ void RawVerbsTransport::PublishAndConnect() {
         &value)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    if (value.size() != sizeof(RawVerbsNodeMeta)) {
+    RawVerbsNodeMeta meta{};
+    if (!DecodeRawVerbsNodeMeta(value, &meta)) {
       throw std::runtime_error(
           "raw verbs metadata size mismatch for node " + std::to_string(node));
     }
-    RawVerbsNodeMeta meta{};
-    std::memcpy(&meta, value.data(), sizeof(meta));
     impl_->metas[static_cast<std::size_t>(node)]   = meta;
     impl_->remotes[static_cast<std::size_t>(node)] = RawVerbsRemoteMemory{
         meta.node_id,

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -256,9 +257,11 @@ inline bool TrySelectRdmaDescriptorWorkerThread(
 inline std::string
 EncodeRdmaDescriptorWorkerThreads(const std::vector<int>& thread_ids) {
   std::string payload;
-  payload.resize(thread_ids.size() * sizeof(int));
-  if (!thread_ids.empty()) {
-    std::memcpy(payload.data(), thread_ids.data(), payload.size());
+  for (std::size_t i = 0; i < thread_ids.size(); ++i) {
+    if (i != 0) {
+      payload.push_back(',');
+    }
+    payload += std::to_string(thread_ids[i]);
   }
   return payload;
 }
@@ -273,6 +276,45 @@ inline bool DecodeRdmaDescriptorWorkerThreads(
     }
     return false;
   }
+
+  bool ascii_payload = true;
+  for (char ch : payload) {
+    if ((ch < '0' || ch > '9') && ch != ',' && ch != '-' && ch != '+') {
+      ascii_payload = false;
+      break;
+    }
+  }
+  if (ascii_payload) {
+    thread_ids->clear();
+    std::size_t pos = 0;
+    while (pos < payload.size()) {
+      const std::size_t comma = payload.find(',', pos);
+      const std::size_t end =
+          comma == std::string_view::npos ? payload.size() : comma;
+      if (end == pos) {
+        if (error != nullptr) {
+          *error = "empty descriptor worker thread token";
+        }
+        return false;
+      }
+      const std::string token(payload.substr(pos, end - pos));
+      char* parse_end  = nullptr;
+      const long value = std::strtol(token.c_str(), &parse_end, 10);
+      if (parse_end == token.c_str() || *parse_end != '\0') {
+        if (error != nullptr) {
+          *error = "invalid descriptor worker thread token";
+        }
+        return false;
+      }
+      thread_ids->push_back(static_cast<int>(value));
+      if (comma == std::string_view::npos) {
+        break;
+      }
+      pos = comma + 1;
+    }
+    return true;
+  }
+
   if (payload.size() % sizeof(int) != 0) {
     if (error != nullptr) {
       *error = "descriptor worker thread payload size mismatch";
