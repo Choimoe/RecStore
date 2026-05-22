@@ -336,7 +336,11 @@ private:
       std::uint64_t wr_id,
       int thread_id) {
     if (!request.descriptor_doorbell) {
-      dsm_->write(buffer, gaddr, size, signal, wr_id);
+      if (signal) {
+        dsm_->write_sync(buffer, gaddr, size);
+      } else {
+        dsm_->write(buffer, gaddr, size, signal, wr_id);
+      }
       return;
     }
 

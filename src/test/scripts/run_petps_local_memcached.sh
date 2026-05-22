@@ -66,7 +66,7 @@ start_memcached() {
 init_memcached_keys() {
   require_cmd nc
   log "initializing Mayfly coordination keys"
-  printf 'set serverNum 0 0 1\r\n0\r\nset clientNum 0 0 1\r\n0\r\nset xmh-consistent-dsm 0 0 1\r\n1\r\nquit\r\n' \
+  printf 'set serverNum 0 0 1\r\n0\r\nset clientNum 0 0 1\r\n0\r\nset xmh-consistent-dsm 0 0 1\r\n0\r\nquit\r\n' \
     | nc -w 1 "${MEMCACHED_HOST}" "${MEMCACHED_PORT}"
 }
 

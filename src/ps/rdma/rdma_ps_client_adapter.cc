@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 #include <thread>
 #include <utility>
 
@@ -29,7 +30,17 @@ DECLARE_int32(rdma_wait_timeout_ms);
 namespace recstore {
 
 namespace {
-constexpr float kRdmaUpdateLearningRate = 0.01f;
+constexpr float kRdmaUpdateLearningRate     = 0.01f;
+constexpr std::size_t kRawMessageMaxGetKeys = 400;
+
+struct ThreadLocalGetBuffer {
+  float* data       = nullptr;
+  std::size_t bytes = 0;
+};
+
+thread_local std::vector<ThreadLocalGetBuffer> tls_raw_split_get_buffers;
+thread_local std::unordered_map<const RDMAPSClientAdapter*, bool>
+    tls_initialized_adapters;
 
 void SetIntFlagFromEnv(const char* env_name, int* flag) {
   if (const char* value = std::getenv(env_name)) {
@@ -166,9 +177,13 @@ void RDMAPSClientAdapter::EnsureClientInitialized() {
 
 void RDMAPSClientAdapter::EnsureThreadInitialized() {
   EnsureClientInitialized();
-  const std::thread::id tid = std::this_thread::get_id();
+  if (tls_initialized_adapters[this]) {
+    return;
+  }
+
   std::lock_guard<std::mutex> guard(thread_init_mu_);
-  if (initialized_threads_.find(tid) != initialized_threads_.end()) {
+  std::unique_lock<std::shared_mutex> runtime_guard(runtime_mu_);
+  if (tls_initialized_adapters[this]) {
     return;
   }
 
@@ -178,7 +193,7 @@ void RDMAPSClientAdapter::EnsureThreadInitialized() {
     client_->InitThread();
   }
 
-  initialized_threads_.insert(tid);
+  tls_initialized_adapters[this] = true;
 }
 
 void RDMAPSClientAdapter::EnsureTableReady(const std::string& table_name,
@@ -227,6 +242,56 @@ int RDMAPSClientAdapter::GetParameter(const base::ConstArray<uint64_t>& keys,
   if (keys.Size() == 0) {
     return 0;
   }
+  std::lock_guard<std::mutex> operation_guard(operation_mu_);
+  std::shared_lock<std::shared_mutex> runtime_guard(runtime_mu_);
+
+  if (FLAGS_rdma_transport_mode == "raw_message" &&
+      static_cast<std::size_t>(keys.Size()) > kRawMessageMaxGetKeys) {
+    std::vector<uint64_t> key_vec = keys.ToVector();
+    const std::size_t chunk_count =
+        (key_vec.size() + kRawMessageMaxGetKeys - 1) / kRawMessageMaxGetKeys;
+    if (tls_raw_split_get_buffers.size() < chunk_count) {
+      tls_raw_split_get_buffers.resize(chunk_count);
+    }
+    for (std::size_t offset = 0; offset < key_vec.size();
+         offset += kRawMessageMaxGetKeys) {
+      const std::size_t chunk_index = offset / kRawMessageMaxGetKeys;
+      const std::size_t chunk_keys =
+          std::min(kRawMessageMaxGetKeys, key_vec.size() - offset);
+      const std::size_t chunk_response_bytes =
+          petps::FixedSlotResponseBytes(chunk_keys, FLAGS_value_size);
+      auto& chunk_buffer = tls_raw_split_get_buffers[chunk_index];
+      if (chunk_buffer.data == nullptr ||
+          chunk_buffer.bytes < chunk_response_bytes) {
+        chunk_buffer.data = static_cast<float*>(
+            client_->GetReceiveBuffer(chunk_response_bytes));
+        chunk_buffer.bytes = chunk_response_bytes;
+      }
+      std::memset(chunk_buffer.data, 0, chunk_response_bytes);
+      const int rc = client_->GetParameter(
+          base::ConstArray<uint64_t>(
+              key_vec.data() + offset, static_cast<int>(chunk_keys)),
+          chunk_buffer.data,
+          false,
+          0);
+      if (rc >= 0) {
+        client_->RevokeRPCResource(rc);
+      }
+      if (rc < 0) {
+        return rc;
+      }
+      const auto* status_word = reinterpret_cast<const std::int32_t*>(
+          reinterpret_cast<const char*>(chunk_buffer.data) +
+          chunk_keys * static_cast<std::size_t>(FLAGS_value_size));
+      if (*status_word != static_cast<std::int32_t>(petps::RpcStatus::kOk)) {
+        return -1;
+      }
+      std::memcpy(reinterpret_cast<char*>(values) + offset * FLAGS_value_size,
+                  chunk_buffer.data,
+                  chunk_keys * static_cast<std::size_t>(FLAGS_value_size));
+    }
+    return 0;
+  }
 
   const std::size_t response_bytes =
       petps::FixedSlotResponseBytes(keys.Size(), FLAGS_value_size);
@@ -267,6 +332,30 @@ int RDMAPSClientAdapter::PutParameter(
   EnsureThreadInitialized();
   if (client_ == nullptr) {
     return -1;
+  }
+  if (keys.Size() != values.size()) {
+    return -1;
+  }
+  std::lock_guard<std::mutex> operation_guard(operation_mu_);
+  std::shared_lock<std::shared_mutex> runtime_guard(runtime_mu_);
+  const std::size_t max_keys =
+      static_cast<std::size_t>(std::max(1, FLAGS_max_kv_num_per_request));
+  if (static_cast<std::size_t>(keys.Size()) > max_keys) {
+    std::vector<uint64_t> key_vec = keys.ToVector();
+    for (std::size_t offset = 0; offset < key_vec.size(); offset += max_keys) {
+      const std::size_t end = std::min(offset + max_keys, key_vec.size());
+      std::vector<std::vector<float>> value_slice(
+          values.begin() + static_cast<std::ptrdiff_t>(offset),
+          values.begin() + static_cast<std::ptrdiff_t>(end));
+      const int rc = client_->PutParameter(
+          std::vector<uint64_t>(
+              key_vec.begin() + offset, key_vec.begin() + end),
+          value_slice);
+      if (rc != 0) {
+        return rc;
+      }
+    }
+    return 0;
   }
   return client_->PutParameter(keys.ToVector(), values);
 }
@@ -363,8 +452,47 @@ RDMAPSClientAdapter::PrefetchParameter(const base::ConstArray<uint64_t>& keys) {
   if (keys.Size() == 0) {
     throw std::invalid_argument("RDMA prefetch requires at least one key");
   }
+  std::shared_lock<std::shared_mutex> runtime_guard(runtime_mu_);
 
   const int64_t embedding_dim = DefaultEmbeddingDimOrThrow();
+  if (FLAGS_rdma_transport_mode == "raw_message" &&
+      static_cast<std::size_t>(keys.Size()) > kRawMessageMaxGetKeys) {
+    std::vector<uint64_t> key_vec = keys.ToVector();
+    PrefetchState state;
+    state.key_count     = static_cast<int64_t>(key_vec.size());
+    state.embedding_dim = embedding_dim;
+    state.chunks.reserve(
+        (key_vec.size() + kRawMessageMaxGetKeys - 1) / kRawMessageMaxGetKeys);
+
+    for (std::size_t offset = 0; offset < key_vec.size();
+         offset += kRawMessageMaxGetKeys) {
+      const std::size_t chunk_keys =
+          std::min(kRawMessageMaxGetKeys, key_vec.size() - offset);
+      const std::size_t response_bytes =
+          petps::FixedSlotResponseBytes(chunk_keys, FLAGS_value_size);
+      auto* buffer =
+          static_cast<float*>(client_->GetReceiveBuffer(response_bytes));
+      std::memset(buffer, 0, response_bytes);
+      const int rpc_id = client_->GetParameter(
+          base::ConstArray<uint64_t>(
+              key_vec.data() + offset, static_cast<int>(chunk_keys)),
+          buffer,
+          true,
+          0);
+      state.chunks.push_back(PrefetchChunk{
+          buffer,
+          rpc_id,
+          static_cast<int64_t>(chunk_keys),
+          offset,
+      });
+    }
+
+    std::lock_guard<std::mutex> guard(state_mu_);
+    const uint64_t prefetch_id = next_prefetch_id_++;
+    prefetches_.emplace(prefetch_id, std::move(state));
+    return prefetch_id;
+  }
+
   const std::size_t response_bytes =
       petps::FixedSlotResponseBytes(keys.Size(), FLAGS_value_size);
   auto* buffer = static_cast<float*>(client_->GetReceiveBuffer(response_bytes));
@@ -390,7 +518,16 @@ bool RDMAPSClientAdapter::IsPrefetchDone(uint64_t prefetch_id) {
   if (client_ == nullptr) {
     return false;
   }
+  std::shared_lock<std::shared_mutex> runtime_guard(runtime_mu_);
   const PrefetchState state = GetPrefetchState(prefetch_id);
+  if (!state.chunks.empty()) {
+    for (const auto& chunk : state.chunks) {
+      if (!client_->QueryRPCFinished(chunk.rpc_id)) {
+        return false;
+      }
+    }
+    return true;
+  }
   return client_->QueryRPCFinished(state.rpc_id);
 }
 
@@ -399,11 +536,24 @@ void RDMAPSClientAdapter::WaitForPrefetch(uint64_t prefetch_id) {
   if (client_ == nullptr) {
     throw std::runtime_error("RDMA adapter has no initialized client");
   }
+  std::shared_lock<std::shared_mutex> runtime_guard(runtime_mu_);
   const PrefetchState state = GetPrefetchState(prefetch_id);
   try {
+    if (!state.chunks.empty()) {
+      for (const auto& chunk : state.chunks) {
+        client_->WaitRPCFinish(chunk.rpc_id);
+      }
+      return;
+    }
     client_->WaitRPCFinish(state.rpc_id);
   } catch (...) {
-    client_->RevokeRPCResource(state.rpc_id);
+    if (!state.chunks.empty()) {
+      for (const auto& chunk : state.chunks) {
+        client_->RevokeRPCResource(chunk.rpc_id);
+      }
+    } else {
+      client_->RevokeRPCResource(state.rpc_id);
+    }
     MarkPrefetchConsumed(prefetch_id);
     throw;
   }
@@ -449,6 +599,37 @@ bool RDMAPSClientAdapter::GetPrefetchResultFlat(
   }
 
   WaitForPrefetch(prefetch_id);
+  if (!state.chunks.empty()) {
+    values->assign(static_cast<std::size_t>(state.key_count) *
+                       static_cast<std::size_t>(state.embedding_dim),
+                   0.0f);
+    for (const auto& chunk : state.chunks) {
+      const auto* status_word = reinterpret_cast<const std::int32_t*>(
+          reinterpret_cast<const char*>(chunk.buffer) +
+          static_cast<std::size_t>(chunk.key_count) *
+              static_cast<std::size_t>(FLAGS_value_size));
+      if (*status_word != static_cast<std::int32_t>(petps::RpcStatus::kOk)) {
+        for (const auto& revoke_chunk : state.chunks) {
+          client_->RevokeRPCResource(revoke_chunk.rpc_id);
+        }
+        MarkPrefetchConsumed(prefetch_id);
+        return false;
+      }
+      std::memcpy(
+          values->data() + chunk.output_offset *
+                               static_cast<std::size_t>(state.embedding_dim),
+          chunk.buffer,
+          static_cast<std::size_t>(chunk.key_count) *
+              static_cast<std::size_t>(FLAGS_value_size));
+    }
+    *num_rows = state.key_count;
+    for (const auto& chunk : state.chunks) {
+      client_->RevokeRPCResource(chunk.rpc_id);
+    }
+    MarkPrefetchConsumed(prefetch_id);
+    return true;
+  }
+
   const auto* status_word = reinterpret_cast<const std::int32_t*>(
       reinterpret_cast<const char*>(state.buffer) +
       static_cast<std::size_t>(state.key_count) *

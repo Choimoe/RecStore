@@ -181,6 +181,11 @@ RdmaGetClientTraceStats& DescriptorGetClientTraceStats() {
   return stats;
 }
 
+std::mutex& RawPutV2ReadSendWindowMutex() {
+  static std::mutex mu;
+  return mu;
+}
+
 int MaxPutKeysPerRpc(int value_size_bytes) {
   const std::size_t usable_payload =
       MESSAGE_SIZE - 40 - sizeof(RawMessage) - sizeof(std::uint32_t);
@@ -335,8 +340,9 @@ void PetPSClient::Init() {
 
 void PetPSClient::InitDescriptorTransports() {
   CHECK(transport_mode_ == RdmaTransportMode::kDescriptorDoorbell);
-  CHECK(!serverThreadIdsRoutedTo_.empty());
-  for (int server_thread_id : serverThreadIdsRoutedTo_) {
+  const std::vector<int> thread_ids = GetCurrentThreadServerThreadIDs();
+  CHECK(!thread_ids.empty());
+  for (int server_thread_id : thread_ids) {
     RawVerbsConfig raw_config;
     raw_config.global_id          = XPostoffice::GetInstance()->GlobalID();
     raw_config.local_lane         = server_thread_id;
@@ -367,6 +373,21 @@ void PetPSClient::InitDescriptorTransports() {
     }
   }
   InitDescriptorSlots();
+}
+
+void PetPSClient::SetCurrentThreadServerThreadIDs(std::vector<int> thread_ids) {
+  CHECK(!thread_ids.empty());
+  std::lock_guard<std::mutex> guard(routing_mu_);
+  server_thread_ids_by_thread_[std::this_thread::get_id()] =
+      std::move(thread_ids);
+}
+
+std::vector<int> PetPSClient::GetCurrentThreadServerThreadIDs() const {
+  std::lock_guard<std::mutex> guard(routing_mu_);
+  const auto it = server_thread_ids_by_thread_.find(std::this_thread::get_id());
+  CHECK(it != server_thread_ids_by_thread_.end())
+      << "RDMA client thread was not initialized";
+  return it->second;
 }
 
 void PetPSClient::InitDescriptorSlots() {
@@ -505,10 +526,13 @@ std::vector<int> PetPSClient::GetServerThreadIDs() {
   m->node_id = dsm_->getMyNodeID();
   m->t_id    = dsm_->getMyThreadID();
   m->type    = GET_SERVER_THREADIDS;
+  const auto deadline =
+      std::chrono::steady_clock::now() +
+      std::chrono::seconds(FLAGS_rdma_server_ready_timeout_sec);
   // RPC to the server ID <shard_>
   dsm_->rpc_call(m, shard_, 0);
   uint64_t wr_id;
-  while (1) {
+  while (std::chrono::steady_clock::now() < deadline) {
     auto recv = dsm_->rpc_fast_wait(&wr_id);
     // RECSTORE_LOG_EVERY_MS(WARNING, 5000)
     //     << "client wait the result of GetServerThreadIDs";
@@ -526,16 +550,43 @@ std::vector<int> PetPSClient::GetServerThreadIDs() {
           cores.Debug());
       return cores.ToVector();
     }
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(FLAGS_rdma_server_ready_poll_ms));
   }
-  LOG(FATAL) << "not reach here";
-  return std::vector<int>();
+  throw std::runtime_error(
+      "Timed out waiting for RDMA server thread ids: shard=" +
+      std::to_string(shard_) + " node_id=" + std::to_string(m->node_id) +
+      " thread_id=" + std::to_string(m->t_id));
+}
+
+std::vector<int> PetPSClient::GetRawServerThreadIDsForCurrentThread() {
+  std::call_once(raw_server_thread_ids_once_, [this]() {
+    raw_server_thread_ids_ = GetServerThreadIDs();
+    CHECK(!raw_server_thread_ids_.empty())
+        << "raw server thread list is empty for shard=" << shard_;
+    raw_server_thread_ids_.resize(1);
+  });
+
+  std::vector<int> thread_ids = raw_server_thread_ids_;
+  if (!thread_ids.empty()) {
+    const std::uint64_t rotate_seed =
+        (static_cast<std::uint64_t>(dsm_->getMyNodeID()) << 16) ^
+        static_cast<std::uint64_t>(dsm_->getMyThreadID());
+    std::rotate(
+        thread_ids.begin(),
+        thread_ids.begin() +
+            static_cast<std::ptrdiff_t>(rotate_seed % thread_ids.size()),
+        thread_ids.end());
+  }
+  return thread_ids;
 }
 
 int PetPSClient::SelectServerThreadID() const {
-  CHECK(!serverThreadIdsRoutedTo_.empty());
-  const uint32_t slot = round_robin_.fetch_add(1, std::memory_order_relaxed) %
-                        serverThreadIdsRoutedTo_.size();
-  int ret = serverThreadIdsRoutedTo_[slot];
+  const std::vector<int> thread_ids = GetCurrentThreadServerThreadIDs();
+  CHECK(!thread_ids.empty());
+  const uint32_t slot =
+      round_robin_.fetch_add(1, std::memory_order_relaxed) % thread_ids.size();
+  int ret = thread_ids[slot];
   return ret;
 }
 
@@ -595,6 +646,7 @@ int PetPSClient::GetParameter(base::ConstArray<uint64_t> keys,
                               float* values,
                               bool isAsync,
                               int async_req_id) {
+  std::lock_guard<std::mutex> get_guard(get_mu_);
   const bool trace_get   = ShouldTraceRdmaGet();
   const auto trace_start = trace_get ? std::chrono::steady_clock::now()
                                      : std::chrono::steady_clock::time_point{};
@@ -902,6 +954,7 @@ int PetPSClient::PutParameterDescriptor(
   char* push_payload_buffer = nullptr;
   GlobalAddress push_payload_gaddr;
   std::size_t push_payload_bytes = 0;
+  std::unique_lock<std::mutex> read_send_window_guard;
   if (FLAGS_rdma_put_protocol_version == 2) {
     const std::uint32_t transfer_mode = [&]() -> std::uint32_t {
       if (FLAGS_rdma_put_v2_transfer_mode == "read") {
@@ -928,6 +981,8 @@ int PetPSClient::PutParameterDescriptor(
     char* payload_buf = nullptr;
     GlobalAddress payload_gaddr;
     if (transfer_mode == kPutV2TransferModeRead) {
+      read_send_window_guard =
+          std::unique_lock<std::mutex>(RawPutV2ReadSendWindowMutex());
       try {
         payload_buf = static_cast<char*>(GetSendBuffer(payload_bytes));
       } catch (const std::exception& ex) {
@@ -1136,7 +1191,10 @@ int PetPSClient::PutParameter(const std::vector<uint64_t>& keys,
     }
 
     char* payload_buf = nullptr;
+    std::unique_lock<std::mutex> read_send_window_guard;
     if (transfer_mode == kPutV2TransferModeRead) {
+      read_send_window_guard =
+          std::unique_lock<std::mutex>(RawPutV2ReadSendWindowMutex());
       try {
         payload_buf = static_cast<char*>(GetSendBuffer(payload_bytes));
       } catch (const std::exception& ex) {

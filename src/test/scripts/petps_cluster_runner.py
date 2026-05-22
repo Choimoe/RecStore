@@ -389,7 +389,7 @@ class PetPSClusterRunner:
                 f"set {client_num_key} 0 0 1",
                 "0",
                 f"set {dsm_key} 0 0 1",
-                "1",
+                "0",
                 f"get {server_num_key}",
                 f"get {client_num_key}",
                 f"get {dsm_key}",
@@ -419,7 +419,7 @@ class PetPSClusterRunner:
                 not in response
                 or f"VALUE {client_num_key} 0 1\r\n0\r\n".encode("ascii")
                 not in response
-                or f"VALUE {dsm_key} 0 1\r\n1\r\n".encode("ascii")
+                or f"VALUE {dsm_key} 0 1\r\n0\r\n".encode("ascii")
                 not in response
             ):
                 raise RuntimeError(
@@ -558,6 +558,8 @@ class PetPSClusterRunner:
                     cmd,
                     cwd=str(REPO_ROOT),
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     capture_output=True,
                     check=False,
                     env=env,
@@ -585,6 +587,8 @@ class PetPSClusterRunner:
             cmd,
             cwd=str(REPO_ROOT),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=1,

@@ -178,7 +178,7 @@ class TestPetPSClusterRunner(unittest.TestCase):
                 b"STORED\r\nSTORED\r\nSTORED\r\n"
                 b"VALUE serverNum 0 1\r\n0\r\nEND\r\n"
                 b"VALUE clientNum 0 1\r\n0\r\nEND\r\n"
-                b"VALUE xmh-consistent-dsm 0 1\r\n1\r\nEND\r\n"
+                b"VALUE xmh-consistent-dsm 0 1\r\n0\r\nEND\r\n"
             ),
             b"",
         ]
@@ -204,7 +204,7 @@ class TestPetPSClusterRunner(unittest.TestCase):
                 b"STORED\r\nSTORED\r\nSTORED\r\n"
                 b"VALUE bench-1:serverNum 0 1\r\n0\r\nEND\r\n"
                 b"VALUE bench-1:clientNum 0 1\r\n0\r\nEND\r\n"
-                b"VALUE bench-1:xmh-consistent-dsm 0 1\r\n1\r\nEND\r\n"
+                b"VALUE bench-1:xmh-consistent-dsm 0 1\r\n0\r\nEND\r\n"
             ),
             b"",
         ]
@@ -216,7 +216,7 @@ class TestPetPSClusterRunner(unittest.TestCase):
         self.assertNotIn(b"flush_all\r\n", sent)
         self.assertIn(b"set bench-1:serverNum 0 0 1\r\n0\r\n", sent)
         self.assertIn(b"set bench-1:clientNum 0 0 1\r\n0\r\n", sent)
-        self.assertIn(b"set bench-1:xmh-consistent-dsm 0 0 1\r\n1\r\n", sent)
+        self.assertIn(b"set bench-1:xmh-consistent-dsm 0 0 1\r\n0\r\n", sent)
 
     def test_auto_memcached_reuses_requested_port_when_reset_fails(self):
         runner = PetPSClusterRunner(use_local_memcached="auto")

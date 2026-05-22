@@ -46,6 +46,11 @@ static std::pair<std::string, std::string> ResolveMemcachedEndpoint() {
   return {trim(addr), trim(port)};
 }
 
+static std::mutex& MemcachedOpMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
 XPostoffice::XPostoffice() {
   num_servers_ = FLAGS_num_server_processes;
   num_clients_ = FLAGS_num_client_processes;
@@ -80,6 +85,7 @@ XPostoffice::XPostoffice() {
 }
 
 std::string XPostoffice::MemCachedGet(const std::string& key) {
+  std::lock_guard<std::mutex> guard(MemcachedOpMutex());
   const std::string namespaced = NamespacedKey(key);
   size_t l;
   uint32_t flags;
@@ -99,6 +105,7 @@ std::string XPostoffice::MemCachedGet(const std::string& key) {
 }
 
 bool XPostoffice::MemCachedTryGet(const std::string& key, std::string* value) {
+  std::lock_guard<std::mutex> guard(MemcachedOpMutex());
   const std::string namespaced = NamespacedKey(key);
   size_t l;
   uint32_t flags;
@@ -117,6 +124,7 @@ bool XPostoffice::MemCachedTryGet(const std::string& key, std::string* value) {
 
 void XPostoffice::MemCachedSet(const std::string& key,
                                const std::string& value) {
+  std::lock_guard<std::mutex> guard(MemcachedOpMutex());
   const std::string namespaced = NamespacedKey(key);
   memcached_return rc;
   while (true) {

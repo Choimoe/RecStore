@@ -2,10 +2,10 @@
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "base/json.h"
@@ -54,11 +54,19 @@ private:
     EmbeddingTableConfig config;
   };
 
+  struct PrefetchChunk {
+    float* buffer             = nullptr;
+    int rpc_id                = -1;
+    int64_t key_count         = 0;
+    std::size_t output_offset = 0;
+  };
+
   struct PrefetchState {
     float* buffer         = nullptr;
     int rpc_id            = -1;
     int64_t key_count     = 0;
     int64_t embedding_dim = 0;
+    std::vector<PrefetchChunk> chunks;
   };
 
   void EnsureClientInitialized();
@@ -71,9 +79,10 @@ private:
   json config_;
   std::mutex init_mu_;
   std::mutex thread_init_mu_;
+  std::mutex operation_mu_;
+  std::shared_mutex runtime_mu_;
   std::mutex state_mu_;
   bool initialized_ = false;
-  std::unordered_set<std::thread::id> initialized_threads_;
   std::vector<std::unique_ptr<petps::PetPSClient>> shard_clients_;
   std::unique_ptr<AllShardsParameterClientWrapper> multi_client_;
   BaseParameterClient* client_ = nullptr;

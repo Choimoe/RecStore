@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -34,12 +35,12 @@ public:
     LOG(INFO) << "dsm_->registerThread()";
     dsm_->registerThread();
     if (transport_mode_ == RdmaTransportMode::kDescriptorDoorbell) {
-      serverThreadIdsRoutedTo_ = GetServerThreadIDs();
+      SetCurrentThreadServerThreadIDs(GetServerThreadIDs());
       InitDescriptorTransports();
-      WaitForServerReady();
+      std::call_once(server_ready_once_, [this]() { WaitForServerReady(); });
     } else {
-      WaitForServerReady();
-      serverThreadIdsRoutedTo_ = GetServerThreadIDs();
+      std::call_once(server_ready_once_, [this]() { WaitForServerReady(); });
+      SetCurrentThreadServerThreadIDs(GetRawServerThreadIDsForCurrentThread());
     }
   }
 
@@ -73,6 +74,9 @@ public:
 private:
   void WaitForServerReady();
   std::vector<int> GetServerThreadIDs();
+  std::vector<int> GetRawServerThreadIDsForCurrentThread();
+  void SetCurrentThreadServerThreadIDs(std::vector<int> thread_ids);
+  std::vector<int> GetCurrentThreadServerThreadIDs() const;
   int SelectServerThreadID() const;
   std::atomic<int32_t>* GetPollSlot(uint64_t rpc_id) const;
   void Init();
@@ -90,11 +94,17 @@ private:
   DSM* dsm_;
 
   mutable std::mutex rpc_mu_;
+  mutable std::mutex get_mu_;
   mutable std::mutex put_mu_;
+  mutable std::mutex routing_mu_;
+  std::once_flag server_ready_once_;
+  std::once_flag raw_server_thread_ids_once_;
   std::atomic<uint64_t> rpcIDAcc_{0};
   mutable std::atomic<uint32_t> round_robin_{0};
 
-  std::vector<int> serverThreadIdsRoutedTo_;
+  std::vector<int> raw_server_thread_ids_;
+  std::unordered_map<std::thread::id, std::vector<int>>
+      server_thread_ids_by_thread_;
   std::unordered_map<uint64_t, std::atomic<int32_t>*> rpcId2PollMap_;
   RdmaTransportMode transport_mode_ = RdmaTransportMode::kRawMessage;
   std::shared_ptr<RawVerbsTransport> raw_transport_;
