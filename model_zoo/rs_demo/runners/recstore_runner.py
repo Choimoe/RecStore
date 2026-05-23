@@ -522,6 +522,8 @@ class RecStoreRunner(BenchmarkRunner):
             str(cfg.embedding_dim),
             "--fuse-k",
             str(cfg.fuse_k),
+            "--recstore-index-type",
+            str(cfg.recstore_index_type),
             "--dense-arch-layer-sizes",
             str(cfg.dense_arch_layer_sizes),
             "--over-arch-layer-sizes",

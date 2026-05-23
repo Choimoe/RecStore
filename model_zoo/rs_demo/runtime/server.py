@@ -114,6 +114,7 @@ def build_runtime_config(
     kv_capacity: int | None = None,
     value_size_bytes: int | None = None,
     max_keys_per_request: int | None = None,
+    index_type: str = "DRAM_EXTENDIBLE_HASH",
 ) -> dict:
     cfg = copy.deepcopy(base_cfg)
     cfg.setdefault("cache_ps", {})
@@ -164,13 +165,13 @@ def build_runtime_config(
     if value_size_bytes is not None:
         value["default_value_size_hint"] = int(value_size_bytes)
     value_size_hint = int(value.get("default_value_size_hint", value_size_bytes or 512))
-    base_kv["index"] = {"type": "DRAM_EXTENDIBLE_HASH"}
+    base_kv["index"] = {"type": index_type}
     value["type"] = "DRAM_VALUE_STORE"
     dram_allocator = value.setdefault("dram_allocator", {})
     dram_allocator["type"] = normalize_allocator_type(allocator)
     dram_allocator["capacity_bytes"] = max(
         int(dram_allocator.get("capacity_bytes", 0)),
-        capacity * value_size_hint,
+        capacity * value_size_hint * 2,
     )
     return cfg
 
@@ -242,6 +243,7 @@ def make_runtime_dir(
     kv_capacity: int | None = None,
     value_size_bytes: int | None = None,
     max_keys_per_request: int | None = None,
+    index_type: str = "DRAM_EXTENDIBLE_HASH",
 ) -> tuple[Path, Path]:
     unique_tag = f"{time.time_ns()}_{uuid.uuid4().hex[:8]}"
     runtime_cfg = build_runtime_config(
@@ -257,6 +259,7 @@ def make_runtime_dir(
         kv_capacity=kv_capacity,
         value_size_bytes=value_size_bytes,
         max_keys_per_request=max_keys_per_request,
+        index_type=index_type,
     )
     runtime_dir = Path(output_root) / "runtime" / run_id / unique_tag
     runtime_dir.mkdir(parents=True, exist_ok=True)

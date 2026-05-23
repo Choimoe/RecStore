@@ -14,6 +14,7 @@ from run_ps_dram_transport_benchmark import (  # noqa: E402
     TRANSPORT_SPECS,
     build_benchmark_cmd,
     build_runtime_config,
+    collect_case_rows,
     collect_ps_result_rows,
     collect_summary_rows,
     is_port_open,
@@ -48,8 +49,12 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
         cache_ps = config["cache_ps"]
         self.assertEqual(cache_ps["ps_type"], "BRPC")
         self.assertEqual(cache_ps["num_shards"], 2)
-        self.assertEqual(cache_ps["base_kv_config"]["index"]["type"], "DRAM_PET_HASH")
-        self.assertEqual(cache_ps["base_kv_config"]["value"]["type"], "DRAM_VALUE_STORE")
+        self.assertEqual(
+            cache_ps["base_kv_config"]["index"]["type"], "DRAM_PET_HASH"
+        )
+        self.assertEqual(
+            cache_ps["base_kv_config"]["value"]["type"], "DRAM_VALUE_STORE"
+        )
         self.assertEqual(config["client"]["port"], 25000)
         self.assertEqual(config["distributed_client"]["servers"][1]["shard"], 1)
         self.assertNotIn("local_shm", config)
@@ -81,6 +86,30 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
         value_path = config["cache_ps"]["base_kv_config"]["value"]["path"]
         self.assertTrue(value_path.startswith("/dev/shm/recstore_ps_dram_bench/"))
         self.assertIn("/rdma_dram_extendible_hash/value", value_path)
+
+    def test_build_runtime_config_keeps_benchmark_base_port_for_single_shard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = build_runtime_config(
+                transport="BRPC",
+                index_type="DRAM_PET_HASH",
+                runtime_dir=Path(tmpdir),
+                num_shards=1,
+                base_port=25000,
+                capacity=4096,
+                value_size=128,
+                max_keys_per_request=256,
+                num_threads=8,
+                dram_allocator="PERSIST_LOOP_SLAB",
+                local_shm_region="unused",
+                local_shm_slot_count=64,
+                local_shm_ready_queue_count=1,
+                local_shm_ready_queue_burst_limit=8,
+                local_shm_slot_buffer_bytes=4096,
+                local_shm_client_timeout_ms=1000,
+                dram_capacity_multiplier=2.0,
+            )
+        self.assertEqual(config["client"]["port"], 25000)
+        self.assertEqual(config["cache_ps"]["servers"][0]["port"], 25000)
 
     def test_rdma_transport_spec_uses_petps_server(self):
         self.assertEqual(TRANSPORT_SPECS["RDMA"].server_binary, "petps_server")
@@ -132,7 +161,7 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
                 "run_ps_dram_transport_benchmark.PetPSClusterRunner",
                 return_value=runner,
             ) as runner_cls:
-                stdout, stderr = run_one_case(
+                outputs = run_one_case(
                     repo_root=Path("/repo"),
                     server_binary=Path("/tmp/petps_server"),
                     benchmark_binary=Path("/tmp/ps_transport_benchmark"),
@@ -170,8 +199,11 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
                     rdma_put_v2_push_slots_per_client=0,
                     rdma_put_v2_push_region_offset=0,
                     show_runner_logs=False,
+                    client_processes=1,
                 )
 
+        self.assertEqual(len(outputs), 1)
+        _, stdout, stderr = outputs[0]
         self.assertIn("transport=RDMA", stdout)
         self.assertEqual(stderr, "")
         _, kwargs = runner_cls.call_args
@@ -186,6 +218,7 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
         self.assertEqual(kwargs["rdma_per_thread_response_limit_bytes"], 1048576)
         self.assertTrue(kwargs["rdma_use_dram"])
         client_cmd = runner.run_client.call_args.args[0]
+        self.assertEqual(runner.run_client.call_args.kwargs["client_index"], 0)
         self.assertIn("--transport=rdma", client_cmd)
         self.assertIn("--num_shards=2", client_cmd)
         self.assertIn(f"--config_path={config_path}", client_cmd)
@@ -350,6 +383,41 @@ class TestRunPSDramTransportBenchmark(unittest.TestCase):
         self.assertEqual(rows[0]["transport"], "BRPC")
         self.assertEqual(rows[0]["threads"], 16)
         self.assertEqual(rows[0]["throughput_keys_sec"], 2048.0)
+
+    def test_collect_case_rows_adds_process_metadata_and_aggregate(self):
+        outputs = [
+            (
+                0,
+                "PS_BENCHMARK_RESULT phase=run transport=BRPC mode=fetch "
+                "distribution=uniform zipfian_alpha=0.9 threads=16 batch_size=1024 "
+                "records=1000000 runtime_s=5.0 batches=10 key_ops=10240 "
+                "throughput_batches_sec=2 throughput_keys_sec=2048\n",
+            ),
+            (
+                1,
+                "PS_BENCHMARK_RESULT phase=run transport=BRPC mode=fetch "
+                "distribution=uniform zipfian_alpha=0.9 threads=16 batch_size=1024 "
+                "records=1000000 runtime_s=5.0 batches=20 key_ops=20480 "
+                "throughput_batches_sec=4 throughput_keys_sec=4096\n",
+            ),
+        ]
+        rows = collect_case_rows(
+            outputs,
+            index_type="DRAM_PET_HASH",
+            value_size=512,
+            capacity=1000000,
+            read_ratio=100,
+            client_processes=2,
+        )
+        per_process = [row for row in rows if row["aggregate"] == "false"]
+        aggregate = [row for row in rows if row["aggregate"] == "true"]
+        self.assertEqual(len(per_process), 2)
+        self.assertEqual(len(aggregate), 1)
+        self.assertEqual(per_process[1]["process_id"], 1)
+        self.assertEqual(aggregate[0]["process_id"], "all")
+        self.assertEqual(aggregate[0]["threads"], 32)
+        self.assertEqual(aggregate[0]["client_processes"], 2)
+        self.assertEqual(aggregate[0]["throughput_keys_sec"], 6144.0)
 
     def test_is_port_open_returns_false_for_unused_port(self):
         self.assertFalse(is_port_open("127.0.0.1", 1, timeout_s=0.01))

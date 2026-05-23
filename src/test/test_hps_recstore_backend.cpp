@@ -66,6 +66,44 @@ void AssertInsertFetchAndMiss(
   EXPECT_FLOAT_EQ(out[5], 1.5f);
 }
 
+void AssertIndirectFetchAndMiss(
+    recstore::storage::HpsRecStoreBackend<long long>* backend) {
+  const std::string table = "model.indirect_table";
+  const long long keys[]  = {10, 20, 30};
+  const float values[]    = {10.0f, 10.5f, 20.0f, 20.5f, 30.0f, 30.5f};
+
+  EXPECT_EQ(backend->insert(table,
+                            3,
+                            keys,
+                            reinterpret_cast<const char*>(values),
+                            sizeof(float) * 2,
+                            sizeof(float) * 2),
+            3);
+
+  const long long query[] = {10, 40, 20, 50, 30};
+  const size_t indices[]  = {4, 1, 2};
+  float out[10]           = {};
+  std::vector<size_t> miss;
+  const size_t hits = backend->fetch(
+      table,
+      3,
+      indices,
+      query,
+      reinterpret_cast<char*>(out),
+      sizeof(float) * 2,
+      [&](size_t index) { miss.push_back(index); },
+      std::chrono::nanoseconds::zero());
+
+  EXPECT_EQ(hits, 2);
+  ASSERT_EQ(miss, std::vector<size_t>({1}));
+  EXPECT_FLOAT_EQ(out[8], 30.0f);
+  EXPECT_FLOAT_EQ(out[9], 30.5f);
+  EXPECT_FLOAT_EQ(out[2], 0.0f);
+  EXPECT_FLOAT_EQ(out[3], 0.0f);
+  EXPECT_FLOAT_EQ(out[4], 20.0f);
+  EXPECT_FLOAT_EQ(out[5], 20.5f);
+}
+
 } // namespace
 
 TEST(HpsRecStoreBackendTest, InsertFetchAndMissCallback) {
@@ -75,6 +113,7 @@ TEST(HpsRecStoreBackendTest, InsertFetchAndMissCallback) {
 
   recstore::storage::HpsRecStoreBackend<long long> backend(MakeParams(path));
   AssertInsertFetchAndMiss(&backend);
+  AssertIndirectFetchAndMiss(&backend);
 
   std::filesystem::remove_all(path);
 }

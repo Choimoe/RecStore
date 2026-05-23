@@ -87,7 +87,7 @@ public:
 
     Key_t hash_key = key;
     Value_t read_value;
-    hash_table_->Get(hash_key, read_value, tid);
+    HashGet(hash_key, read_value, tid);
 
     if (read_value == NONE) {
       value = std::string();
@@ -200,7 +200,7 @@ public:
       base::PetKVData shmkv_data;
       Key_t hash_key = k;
       Value_t read_value;
-      hash_table_->Get(hash_key, read_value, tid);
+      HashGet(hash_key, read_value, tid);
 
       if (read_value == NONE) {
         (*values)[i] = base::ConstArray<float>();
@@ -255,7 +255,7 @@ public:
       std::shared_lock<std::shared_mutex> lk(KeyMutex(key));
       Key_t hash_key = key;
       Value_t read_value;
-      hash_table_->Get(hash_key, read_value, tid);
+      HashGet(hash_key, read_value, tid);
 
       if (read_value == NONE) {
         std::memset(row_ptr, 0, row_bytes);
@@ -324,7 +324,7 @@ public:
       Value_t read_value;
       {
         std::shared_lock<std::shared_mutex> lk(KeyMutex(key));
-        hash_table_->Get(hash_key, read_value, tid);
+        HashGet(hash_key, read_value, tid);
 
         if (read_value != NONE) {
           base::PetKVData shmkv_data;
@@ -355,7 +355,7 @@ public:
       }
 
       std::unique_lock<std::shared_mutex> lk(KeyMutex(key));
-      hash_table_->Get(hash_key, read_value, tid);
+      HashGet(hash_key, read_value, tid);
       if (read_value != NONE) {
         base::PetKVData shmkv_data;
         shmkv_data.data_value = read_value;
@@ -393,7 +393,7 @@ public:
       base::PetKVData shmkv_data;
       shmkv_data.SetShmMallocOffset(shm_malloc_->GetMallocOffset(data));
       EmitFence();
-      hash_table_->Put(hash_key, shmkv_data.data_value, tid);
+      HashPut(hash_key, shmkv_data.data_value, tid);
     }
 
     if (!ok.load(std::memory_order_relaxed)) {
@@ -437,7 +437,7 @@ private:
     std::unique_lock<std::shared_mutex> lk(KeyMutex(key));
     Key_t hash_key = key;
     Value_t old_val;
-    hash_table_->Get(hash_key, old_val, tid);
+    HashGet(hash_key, old_val, tid);
     if (old_val != NONE) {
       base::PetKVData old_shm_data;
       old_shm_data.data_value = old_val;
@@ -479,11 +479,21 @@ private:
       shm_malloc_->Free(
           shm_malloc_->GetMallocData(old_shm_data.shm_malloc_offset()));
     }
-    hash_table_->Put(hash_key, shmkv_data.data_value, tid);
+    HashPut(hash_key, shmkv_data.data_value, tid);
   }
 
   std::shared_mutex& KeyMutex(uint64_t key) {
     return key_mutexes_[key & (kLockStripeNum - 1)];
+  }
+
+  void HashGet(Key_t key, Value_t& value, unsigned tid) {
+    std::shared_lock<std::shared_mutex> lk(hash_table_mutex_);
+    hash_table_->Get(key, value, tid);
+  }
+
+  void HashPut(Key_t key, Value_t value, unsigned tid) {
+    std::unique_lock<std::shared_mutex> lk(hash_table_mutex_);
+    hash_table_->Put(key, value, tid);
   }
 
   ExtendibleHash* hash_table_;
@@ -492,6 +502,7 @@ private:
   std::unique_ptr<base::MallocApi> shm_malloc_;
   base::ShmFile valid_shm_file_;
   std::array<std::shared_mutex, kLockStripeNum> key_mutexes_;
+  std::shared_mutex hash_table_mutex_;
   std::atomic<uint64_t> fence_count_{0};
 };
 

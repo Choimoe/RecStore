@@ -139,19 +139,35 @@ public:
     if (num_pairs == 0) {
       return 0;
     }
-    std::vector<uint64_t> u64_keys(num_pairs);
-    std::vector<std::vector<float>> rows(num_pairs);
-    std::vector<base::ConstArray<float>> row_views;
-    row_views.reserve(num_pairs);
-    for (size_t i = 0; i < num_pairs; ++i) {
-      u64_keys[i]         = static_cast<uint64_t>(keys[i]);
-      const char* src     = values + i * value_stride;
-      const size_t floats = (value_size + sizeof(float) - 1) / sizeof(float);
-      rows[i].assign(floats, 0.0f);
-      std::memcpy(rows[i].data(), src, value_size);
-      row_views.emplace_back(rows[i].data(), rows[i].size());
+    if (value_size > value_stride) {
+      throw std::invalid_argument(
+          "HpsRecStoreBackend insert requires value_size <= value_stride");
     }
-    kv_->BatchPut(base::ConstArray<uint64_t>(u64_keys), &row_views, 0);
+    auto& scratch = Scratch::Get();
+    scratch.keys.resize(num_pairs);
+    const size_t floats_per_value =
+        (static_cast<size_t>(value_size) + sizeof(float) - 1) / sizeof(float);
+    scratch.row_views.clear();
+    scratch.row_views.reserve(num_pairs);
+    if (value_size % sizeof(float) == 0) {
+      scratch.insert_values.clear();
+      for (size_t i = 0; i < num_pairs; ++i) {
+        scratch.keys[i] = static_cast<uint64_t>(keys[i]);
+        scratch.row_views.emplace_back(
+            reinterpret_cast<const float*>(values + i * value_stride),
+            floats_per_value);
+      }
+    } else {
+      scratch.insert_values.assign(num_pairs * floats_per_value, 0.0f);
+      for (size_t i = 0; i < num_pairs; ++i) {
+        scratch.keys[i] = static_cast<uint64_t>(keys[i]);
+        float* row      = scratch.insert_values.data() + i * floats_per_value;
+        std::memcpy(row, values + i * value_stride, value_size);
+        scratch.row_views.emplace_back(row, floats_per_value);
+      }
+    }
+    kv_->BatchPut(
+        base::ConstArray<uint64_t>(scratch.keys), &scratch.row_views, 0);
     {
       std::lock_guard<std::mutex> lock(table_sizes_mu_);
       table_sizes_[table_name] += num_pairs;
@@ -168,29 +184,17 @@ public:
                const std::chrono::nanoseconds& time_budget) override {
     (void)table_name;
     (void)time_budget;
-    std::vector<uint64_t> u64_keys(num_keys);
+    auto& scratch = Scratch::Get();
+    scratch.keys.resize(num_keys);
     for (size_t i = 0; i < num_keys; ++i) {
-      u64_keys[i] = static_cast<uint64_t>(keys[i]);
+      scratch.keys[i] = static_cast<uint64_t>(keys[i]);
     }
-    std::vector<base::ConstArray<float>> rows;
-    kv_->BatchGet(base::ConstArray<uint64_t>(u64_keys), &rows, 0);
+    scratch.fetched_rows.clear();
+    kv_->BatchGet(
+        base::ConstArray<uint64_t>(scratch.keys), &scratch.fetched_rows, 0);
 
-    size_t hits = 0;
-    for (size_t i = 0; i < num_keys; ++i) {
-      if (i < rows.size() && rows[i].Data() != nullptr && rows[i].Size() > 0) {
-        const size_t bytes =
-            std::min(value_stride, rows[i].Size() * sizeof(float));
-        std::memcpy(values + i * value_stride, rows[i].Data(), bytes);
-        if (bytes < value_stride) {
-          std::memset(
-              values + i * value_stride + bytes, 0, value_stride - bytes);
-        }
-        ++hits;
-      } else {
-        on_miss(i);
-      }
-    }
-    return hits;
+    return CopyRowsToOutput(
+        scratch.fetched_rows, num_keys, values, value_stride, on_miss);
   }
 
   size_t
@@ -202,19 +206,33 @@ public:
         size_t value_stride,
         const HugeCTR::DatabaseMissCallback& on_miss,
         const std::chrono::nanoseconds& time_budget) override {
+    (void)table_name;
     (void)time_budget;
+    if (num_indices == 0) {
+      return 0;
+    }
+    auto& scratch = Scratch::Get();
+    scratch.keys.resize(num_indices);
+    for (size_t i = 0; i < num_indices; ++i) {
+      scratch.keys[i] = static_cast<uint64_t>(keys[indices[i]]);
+    }
+    scratch.fetched_rows.clear();
+    kv_->BatchGet(
+        base::ConstArray<uint64_t>(scratch.keys), &scratch.fetched_rows, 0);
+
     size_t hits = 0;
     for (size_t i = 0; i < num_indices; ++i) {
-      const size_t index = indices[i];
-      const Key key      = keys[index];
-      hits += fetch(
-          table_name,
-          1,
-          &key,
-          values + index * value_stride,
-          value_stride,
-          [&](size_t) { on_miss(index); },
-          std::chrono::nanoseconds::zero());
+      const size_t output_index = indices[i];
+      if (i < scratch.fetched_rows.size() &&
+          scratch.fetched_rows[i].Data() != nullptr &&
+          scratch.fetched_rows[i].Size() > 0) {
+        CopyOneRow(scratch.fetched_rows[i],
+                   values + output_index * value_stride,
+                   value_stride);
+        ++hits;
+      } else {
+        on_miss(output_index);
+      }
     }
     return hits;
   }
@@ -261,6 +279,48 @@ public:
 #endif
 
 private:
+  struct Scratch {
+    std::vector<uint64_t> keys;
+    std::vector<float> insert_values;
+    std::vector<base::ConstArray<float>> row_views;
+    std::vector<base::ConstArray<float>> fetched_rows;
+
+    static Scratch& Get() {
+      thread_local Scratch scratch;
+      return scratch;
+    }
+  };
+
+  static void CopyOneRow(
+      const base::ConstArray<float>& row, char* dst, size_t value_stride) {
+    const size_t bytes =
+        std::min(value_stride, static_cast<size_t>(row.Size()) * sizeof(float));
+    if (bytes > 0) {
+      std::memcpy(dst, row.Data(), bytes);
+    }
+    if (bytes < value_stride) {
+      std::memset(dst + bytes, 0, value_stride - bytes);
+    }
+  }
+
+  static size_t CopyRowsToOutput(
+      const std::vector<base::ConstArray<float>>& rows,
+      size_t num_keys,
+      char* values,
+      size_t value_stride,
+      const HugeCTR::DatabaseMissCallback& on_miss) {
+    size_t hits = 0;
+    for (size_t i = 0; i < num_keys; ++i) {
+      if (i < rows.size() && rows[i].Data() != nullptr && rows[i].Size() > 0) {
+        CopyOneRow(rows[i], values + i * value_stride, value_stride);
+        ++hits;
+      } else {
+        on_miss(i);
+      }
+    }
+    return hits;
+  }
+
   static uint64_t SsdSlotSize(uint64_t value_size) {
     const uint64_t needed = value_size + 8;
     uint64_t slot         = 128;

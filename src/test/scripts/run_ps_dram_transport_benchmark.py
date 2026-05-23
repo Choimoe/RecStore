@@ -225,10 +225,67 @@ def collect_ps_result_rows(text: str) -> list[dict[str, str | int | float]]:
     return rows
 
 
+def collect_case_rows(
+    process_outputs: list[tuple[int, str]],
+    index_type: str,
+    value_size: int,
+    capacity: int,
+    read_ratio: int,
+    client_processes: int,
+) -> list[dict[str, str | int | float]]:
+    rows: list[dict[str, str | int | float]] = []
+    for process_id, stdout in process_outputs:
+        for row in collect_ps_result_rows(stdout):
+            row["index_type"] = index_type
+            row["value_store_type"] = "DRAM_VALUE_STORE"
+            row["value_size"] = value_size
+            row["capacity"] = capacity
+            row["read_ratio"] = read_ratio
+            row["client_processes"] = client_processes
+            row["process_id"] = process_id
+            row["aggregate"] = "false"
+            rows.append(row)
+
+    aggregate_groups: dict[tuple[str, str, str, str], list[dict[str, str | int | float]]] = {}
+    for row in rows:
+        key = (
+            str(row.get("phase", "")),
+            str(row.get("transport", "")),
+            str(row.get("mode", "")),
+            str(row.get("distribution", "")),
+        )
+        aggregate_groups.setdefault(key, []).append(row)
+
+    for group_rows in aggregate_groups.values():
+        if len(group_rows) <= 1:
+            continue
+        first = group_rows[0]
+        aggregate = dict(first)
+        aggregate["process_id"] = "all"
+        aggregate["aggregate"] = "true"
+        aggregate["threads"] = sum(int(row["threads"]) for row in group_rows)
+        aggregate["client_processes"] = len(group_rows)
+        aggregate["runtime_s"] = max(float(row["runtime_s"]) for row in group_rows)
+        aggregate["batches"] = sum(int(row["batches"]) for row in group_rows)
+        aggregate["key_ops"] = sum(int(row["key_ops"]) for row in group_rows)
+        aggregate["throughput_batches_sec"] = sum(
+            float(row["throughput_batches_sec"]) for row in group_rows
+        )
+        aggregate["throughput_keys_sec"] = sum(
+            float(row["throughput_keys_sec"]) for row in group_rows
+        )
+        rows.append(aggregate)
+
+    return rows
+
+
 def is_port_open(host: str, port: int, timeout_s: float = 0.2) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout_s)
-        return sock.connect_ex((host, port)) == 0
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout_s)
+            return sock.connect_ex((host, port)) == 0
+    except OSError:
+        return False
 
 
 def wait_process_ready(process: subprocess.Popen[str], delay_s: float) -> None:
@@ -294,7 +351,8 @@ def run_one_case(
     rdma_put_v2_push_slots_per_client: int,
     rdma_put_v2_push_region_offset: int,
     show_runner_logs: bool,
-) -> tuple[str, str]:
+    client_processes: int,
+) -> list[tuple[int, str, str]]:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     client = config["client"]
     cmd = build_benchmark_cmd(
@@ -321,7 +379,7 @@ def run_one_case(
             server_path=server_binary,
             config_path=config_path,
             num_servers=num_shards,
-            num_clients=1,
+            num_clients=client_processes,
             thread_num=rdma_thread_num,
             value_size=value_size,
             max_kv_num_per_request=max(
@@ -355,25 +413,35 @@ def run_one_case(
         with server_log_path.open("w", encoding="utf-8") as server_log:
             server_log.write(" ".join(runner.build_server_cmd(0)) + "\n")
             server_log.write(" ".join(cmd) + "\n")
+        outputs: list[tuple[int, str, str]] = []
         with runner.run():
-            completed = runner.run_client(
-                cmd,
-                stream_output=show_runner_logs,
-                timeout=(client_timeout_s if client_timeout_s > 0 else None),
-            )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                "benchmark command failed\n"
-                f"cmd={' '.join(cmd)}\n"
-                f"stdout:\n{completed.stdout}\n"
-                f"stderr:\n{completed.stderr}\n"
-                f"server_log={server_log_path}"
-            )
-        return completed.stdout, completed.stderr
+            for process_id in range(client_processes):
+                completed = runner.run_client(
+                    cmd,
+                    client_index=process_id,
+                    stream_output=show_runner_logs,
+                    timeout=(client_timeout_s if client_timeout_s > 0 else None),
+                )
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        "benchmark command failed\n"
+                        f"process_id={process_id}\n"
+                        f"cmd={' '.join(cmd)}\n"
+                        f"stdout:\n{completed.stdout}\n"
+                        f"stderr:\n{completed.stderr}\n"
+                        f"server_log={server_log_path}"
+                    )
+                outputs.append((process_id, completed.stdout, completed.stderr))
+        return outputs
 
     with server_log_path.open("w", encoding="utf-8") as server_log:
+        server_cmd = [str(server_binary), f"--config_path={config_path}"]
+        if transport.upper() == "BRPC" and num_shards == 1:
+            server_cmd.append(
+                f"--brpc_server_port={int(config['cache_ps']['servers'][0]['port'])}"
+            )
         server = subprocess.Popen(
-            [str(server_binary), f"--config_path={config_path}"],
+            server_cmd,
             cwd=str(repo_root),
             stdout=server_log,
             stderr=subprocess.STDOUT,
@@ -388,23 +456,44 @@ def run_one_case(
                     config["cache_ps"]["servers"],
                     timeout_s=max(startup_delay, 1.0) + 30.0,
                 )
-            completed = subprocess.run(
-                cmd,
-                cwd=str(repo_root),
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=(client_timeout_s if client_timeout_s > 0 else None),
-            )
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    "benchmark command failed\n"
-                    f"cmd={' '.join(cmd)}\n"
-                    f"stdout:\n{completed.stdout}\n"
-                    f"stderr:\n{completed.stderr}\n"
-                    f"server_log={server_log_path}"
+            processes = [
+                subprocess.Popen(
+                    cmd,
+                    cwd=str(repo_root),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                 )
-            return completed.stdout, completed.stderr
+                for _ in range(client_processes)
+            ]
+            deadline = (
+                time.time() + client_timeout_s if client_timeout_s > 0 else None
+            )
+            outputs: list[tuple[int, str, str]] = []
+            for process_id, process in enumerate(processes):
+                timeout = None
+                if deadline is not None:
+                    timeout = max(0.1, deadline - time.time())
+                try:
+                    stdout, stderr = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    for pending in processes:
+                        if pending.poll() is None:
+                            pending.kill()
+                    for pending in processes:
+                        pending.wait()
+                    raise
+                if process.returncode != 0:
+                    raise RuntimeError(
+                        "benchmark command failed\n"
+                        f"process_id={process_id}\n"
+                        f"cmd={' '.join(cmd)}\n"
+                        f"stdout:\n{stdout}\n"
+                        f"stderr:\n{stderr}\n"
+                        f"server_log={server_log_path}"
+                    )
+                outputs.append((process_id, stdout, stderr))
+            return outputs
         finally:
             server.terminate()
             try:
@@ -425,6 +514,9 @@ def print_summary_table(rows: list[dict[str, str | int | float]]) -> None:
         "mode",
         "phase",
         "threads",
+        "client_processes",
+        "process_id",
+        "aggregate",
         "batch_size",
         "records",
         "M keys/s",
@@ -433,6 +525,8 @@ def print_summary_table(rows: list[dict[str, str | int | float]]) -> None:
     for row in rows:
         if str(row.get("phase")) != "run":
             continue
+        if str(row.get("aggregate", "true")) == "false":
+            continue
         table.append(
             [
                 str(row["index_type"]),
@@ -440,6 +534,9 @@ def print_summary_table(rows: list[dict[str, str | int | float]]) -> None:
                 str(row["mode"]),
                 str(row["phase"]),
                 str(row["threads"]),
+                str(row.get("client_processes", 1)),
+                str(row.get("process_id", "all")),
+                str(row.get("aggregate", "true")),
                 str(row["batch_size"]),
                 str(row["records"]),
                 f"{float(row['throughput_keys_sec']) / 1e6:,.3f}",
@@ -475,6 +572,9 @@ def write_csv(rows: list[dict[str, str | int | float]], csv_path: Path) -> None:
         "mode",
         "read_ratio",
         "threads",
+        "client_processes",
+        "process_id",
+        "aggregate",
         "batch_size",
         "records",
         "distribution",
@@ -515,6 +615,7 @@ def main() -> int:
     parser.add_argument("--runtime-seconds", type=int, default=5)
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--load-threads", type=int, default=0)
+    parser.add_argument("--client-processes", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--value-size", type=int, default=512)
     parser.add_argument("--capacity", type=int, default=1000000)
@@ -525,6 +626,8 @@ def main() -> int:
     )
     parser.add_argument("--zipfian-alpha", type=float, default=0.9)
     parser.add_argument("--num-shards", type=int, default=2)
+    parser.add_argument("--grpc-base-port", type=int, default=15000)
+    parser.add_argument("--brpc-base-port", type=int, default=25000)
     parser.add_argument("--max-keys-per-request", type=int, default=500)
     parser.add_argument("--num-threads", type=int, default=32)
     parser.add_argument("--dram-allocator", default="PERSIST_LOOP_SLAB")
@@ -594,6 +697,8 @@ def main() -> int:
     server_bin_dir = Path(args.server_bin_dir).resolve()
     if not benchmark_binary.exists():
         raise FileNotFoundError(f"benchmark binary not found: {benchmark_binary}")
+    if args.client_processes <= 0:
+        raise ValueError("--client-processes must be positive")
 
     transports = parse_csv_list(args.transports)
     index_types = parse_csv_list(args.index_types)
@@ -608,104 +713,125 @@ def main() -> int:
         runtime_dir = Path(tempfile.mkdtemp(prefix="recstore_ps_dram_bench_"))
 
     rows = []
-    for index_type in index_types:
-        for transport in transports:
-            spec = TRANSPORT_SPECS[transport]
-            server_binary = server_bin_dir / spec.server_binary
-            if not server_binary.exists():
-                raise FileNotFoundError(f"server binary not found: {server_binary}")
-            base_port = spec.base_port
-            case_num_shards = 1 if transport == "LOCAL_SHM" else args.num_shards
-            if transport in ("GRPC", "BRPC") and case_num_shards == 1:
-                base_port = 15000
-            config = build_runtime_config(
-                transport=transport,
-                index_type=index_type,
-                runtime_dir=runtime_dir,
-                num_shards=case_num_shards,
-                base_port=base_port,
-                capacity=args.capacity,
-                value_size=args.value_size,
-                max_keys_per_request=args.max_keys_per_request,
-                num_threads=args.num_threads,
-                dram_allocator=args.dram_allocator,
-                local_shm_region=args.local_shm_region,
-                local_shm_slot_count=args.local_shm_slot_count,
-                local_shm_ready_queue_count=args.local_shm_ready_queue_count,
-                local_shm_ready_queue_burst_limit=args.local_shm_ready_queue_burst_limit,
-                local_shm_slot_buffer_bytes=args.local_shm_slot_buffer_bytes,
-                local_shm_client_timeout_ms=args.local_shm_client_timeout_ms,
-                dram_capacity_multiplier=args.dram_capacity_multiplier,
-            )
-            case_slug = f"{index_type.lower()}_{transport.lower()}"
-            config_path = runtime_dir / f"{case_slug}.json"
-            log_path = runtime_dir / f"{case_slug}_server.log"
-            config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-            print(
-                f"[case] index={index_type} transport={transport} "
-                f"config={config_path}"
-            )
-            stdout, stderr = run_one_case(
-                repo_root=repo_root,
-                server_binary=server_binary,
-                benchmark_binary=benchmark_binary,
-                config_path=config_path,
-                server_log_path=log_path,
-                transport=transport,
-                num_shards=case_num_shards,
-                mode=args.mode,
-                record_count=args.capacity,
-                runtime_seconds=args.runtime_seconds,
-                threads=args.threads,
-                load_threads=args.load_threads,
-                batch_size=args.batch_size,
-                value_size=args.value_size,
-                distribution=args.distribution,
-                zipfian_alpha=args.zipfian_alpha,
-                read_ratio=args.read_ratio,
-                report_mode=args.report_mode,
-                startup_delay=args.startup_delay,
-                client_timeout_s=args.client_timeout_s,
-                rdma_thread_num=args.rdma_thread_num,
-                rdma_use_local_memcached=args.rdma_use_local_memcached,
-                rdma_memcached_host=args.rdma_memcached_host,
-                rdma_memcached_port=args.rdma_memcached_port,
-                rdma_transport_mode=args.rdma_transport_mode,
-                rdma_put_protocol_version=args.rdma_put_protocol_version,
-                rdma_put_v2_transfer_mode=args.rdma_put_v2_transfer_mode,
-                rdma_wait_timeout_ms=args.rdma_wait_timeout_ms,
-                rdma_server_ready_timeout_sec=args.rdma_server_ready_timeout_sec,
-                rdma_client_receive_arena_bytes=args.rdma_client_receive_arena_bytes,
-                rdma_put_client_send_arena_bytes=args.rdma_put_client_send_arena_bytes,
-                rdma_per_thread_response_limit_bytes=(
-                    args.rdma_per_thread_response_limit_bytes
-                ),
-                rdma_put_server_scratch_bytes=args.rdma_put_server_scratch_bytes,
-                rdma_put_v2_push_slot_bytes=args.rdma_put_v2_push_slot_bytes,
-                rdma_put_v2_push_slots_per_client=args.rdma_put_v2_push_slots_per_client,
-                rdma_put_v2_push_region_offset=args.rdma_put_v2_push_region_offset,
-                show_runner_logs=args.show_runner_logs,
-            )
-            print(stdout, end="" if stdout.endswith("\n") else "\n")
-            if stderr:
-                print(stderr, end="" if stderr.endswith("\n") else "\n")
-            for row in collect_ps_result_rows(stdout):
-                row["index_type"] = index_type
-                row["value_store_type"] = "DRAM_VALUE_STORE"
-                row["value_size"] = args.value_size
-                row["capacity"] = args.capacity
-                row["read_ratio"] = args.read_ratio
-                rows.append(row)
+    try:
+        for index_type in index_types:
+            for transport in transports:
+                spec = TRANSPORT_SPECS[transport]
+                server_binary = server_bin_dir / spec.server_binary
+                if not server_binary.exists():
+                    raise FileNotFoundError(f"server binary not found: {server_binary}")
+                base_port = (
+                    args.grpc_base_port
+                    if transport == "GRPC"
+                    else args.brpc_base_port
+                    if transport == "BRPC"
+                    else spec.base_port
+                )
+                case_num_shards = 1 if transport == "LOCAL_SHM" else args.num_shards
+                config = build_runtime_config(
+                    transport=transport,
+                    index_type=index_type,
+                    runtime_dir=runtime_dir,
+                    num_shards=case_num_shards,
+                    base_port=base_port,
+                    capacity=args.capacity,
+                    value_size=args.value_size,
+                    max_keys_per_request=args.max_keys_per_request,
+                    num_threads=args.num_threads,
+                    dram_allocator=args.dram_allocator,
+                    local_shm_region=args.local_shm_region,
+                    local_shm_slot_count=args.local_shm_slot_count,
+                    local_shm_ready_queue_count=args.local_shm_ready_queue_count,
+                    local_shm_ready_queue_burst_limit=args.local_shm_ready_queue_burst_limit,
+                    local_shm_slot_buffer_bytes=args.local_shm_slot_buffer_bytes,
+                    local_shm_client_timeout_ms=args.local_shm_client_timeout_ms,
+                    dram_capacity_multiplier=args.dram_capacity_multiplier,
+                )
+                case_slug = f"{index_type.lower()}_{transport.lower()}"
+                config_path = runtime_dir / f"{case_slug}.json"
+                log_path = runtime_dir / f"{case_slug}_server.log"
+                config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+                print(
+                    f"[case] index={index_type} transport={transport} "
+                    f"config={config_path}"
+                )
+                outputs = run_one_case(
+                    repo_root=repo_root,
+                    server_binary=server_binary,
+                    benchmark_binary=benchmark_binary,
+                    config_path=config_path,
+                    server_log_path=log_path,
+                    transport=transport,
+                    num_shards=case_num_shards,
+                    mode=args.mode,
+                    record_count=args.capacity,
+                    runtime_seconds=args.runtime_seconds,
+                    threads=args.threads,
+                    load_threads=args.load_threads,
+                    batch_size=args.batch_size,
+                    value_size=args.value_size,
+                    distribution=args.distribution,
+                    zipfian_alpha=args.zipfian_alpha,
+                    read_ratio=args.read_ratio,
+                    report_mode=args.report_mode,
+                    startup_delay=args.startup_delay,
+                    client_timeout_s=args.client_timeout_s,
+                    rdma_thread_num=args.rdma_thread_num,
+                    rdma_use_local_memcached=args.rdma_use_local_memcached,
+                    rdma_memcached_host=args.rdma_memcached_host,
+                    rdma_memcached_port=args.rdma_memcached_port,
+                    rdma_transport_mode=args.rdma_transport_mode,
+                    rdma_put_protocol_version=args.rdma_put_protocol_version,
+                    rdma_put_v2_transfer_mode=args.rdma_put_v2_transfer_mode,
+                    rdma_wait_timeout_ms=args.rdma_wait_timeout_ms,
+                    rdma_server_ready_timeout_sec=args.rdma_server_ready_timeout_sec,
+                    rdma_client_receive_arena_bytes=args.rdma_client_receive_arena_bytes,
+                    rdma_put_client_send_arena_bytes=(
+                        args.rdma_put_client_send_arena_bytes
+                    ),
+                    rdma_per_thread_response_limit_bytes=(
+                        args.rdma_per_thread_response_limit_bytes
+                    ),
+                    rdma_put_server_scratch_bytes=args.rdma_put_server_scratch_bytes,
+                    rdma_put_v2_push_slot_bytes=args.rdma_put_v2_push_slot_bytes,
+                    rdma_put_v2_push_slots_per_client=(
+                        args.rdma_put_v2_push_slots_per_client
+                    ),
+                    rdma_put_v2_push_region_offset=(
+                        args.rdma_put_v2_push_region_offset
+                    ),
+                    show_runner_logs=args.show_runner_logs,
+                    client_processes=args.client_processes,
+                )
+                process_outputs = []
+                for process_id, stdout, stderr in outputs:
+                    print(f"[client] process_id={process_id}")
+                    print(stdout, end="" if stdout.endswith("\n") else "\n")
+                    if stderr:
+                        print(stderr, end="" if stderr.endswith("\n") else "\n")
+                    process_outputs.append((process_id, stdout))
+                rows.extend(
+                    collect_case_rows(
+                        process_outputs,
+                        index_type=index_type,
+                        value_size=args.value_size,
+                        capacity=args.capacity,
+                        read_ratio=args.read_ratio,
+                        client_processes=args.client_processes,
+                    )
+                )
 
-    print_summary_table(rows)
-    csv_path = (
-        Path(args.csv_path).resolve()
-        if args.csv_path
-        else runtime_dir / "ps_dram_transport_benchmark.csv"
-    )
-    write_csv(rows, csv_path)
-    print(f"[output] csv={csv_path}")
-    print(f"[output] runtime_dir={runtime_dir}")
+        print_summary_table(rows)
+        csv_path = (
+            Path(args.csv_path).resolve()
+            if args.csv_path
+            else runtime_dir / "ps_dram_transport_benchmark.csv"
+        )
+        write_csv(rows, csv_path)
+        print(f"[output] csv={csv_path}")
+        print(f"[output] runtime_dir={runtime_dir}")
+    finally:
+        pass
     return 0
 
 

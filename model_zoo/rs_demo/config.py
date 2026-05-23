@@ -64,6 +64,7 @@ class RunConfig:
     rdzv_backend: str = "c10d"
     rdzv_id: str = ""
     ps_type: str = "BRPC"
+    recstore_index_type: str = "DRAM_EXTENDIBLE_HASH"
     torchrec_profiler: bool = False
     torchrec_dist_mode: str = "replicated"
     torchrec_memory_mode: str = "hbm"
@@ -157,6 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="BRPC",
         choices=["BRPC", "GRPC", "LOCAL_SHM", "RDMA"],
+    )
+    parser.add_argument(
+        "--recstore-index-type",
+        type=str,
+        default="DRAM_EXTENDIBLE_HASH",
+        choices=["DRAM_UNORDERED_MAP", "DRAM_EXTENDIBLE_HASH", "DRAM_PET_HASH"],
     )
     parser.add_argument("--num-embeddings", type=int, default=200000)
     parser.add_argument("--embedding-dim", type=int, default=128)
