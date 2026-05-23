@@ -12,15 +12,6 @@
 DECLARE_int32(value_size);
 DECLARE_int32(max_kv_num_per_request);
 
-namespace {
-struct ThreadLocalShardRecvBuffer {
-  void* data        = nullptr;
-  std::size_t bytes = 0;
-};
-
-thread_local std::vector<ThreadLocalShardRecvBuffer> tls_sync_recv_buffers;
-} // namespace
-
 AllShardsParameterClientWrapper::AllShardsParameterClientWrapper(
     const std::vector<BaseParameterClient*>& clients, int num_shards)
     : BaseParameterClient("", 0, 0),
@@ -147,26 +138,10 @@ int AllShardsParameterClientWrapper::GetParameter(
       keys.Size() * static_cast<std::size_t>(FLAGS_value_size));
   *batch_status_word = static_cast<std::int32_t>(petps::RpcStatus::kPending);
 
-  if (!isAsync &&
-      tls_sync_recv_buffers.size() < static_cast<std::size_t>(num_shards_)) {
-    tls_sync_recv_buffers.resize(static_cast<std::size_t>(num_shards_));
-  }
-
   for (const auto& chunk : BuildChunks(keys)) {
     const std::size_t response_bytes =
         petps::FixedSlotResponseBytes(chunk.keys.size(), FLAGS_value_size);
-    void* recv = nullptr;
-    if (isAsync) {
-      recv = clients_[chunk.shard]->GetReceiveBuffer(response_bytes);
-    } else {
-      auto& buffer =
-          tls_sync_recv_buffers[static_cast<std::size_t>(chunk.shard)];
-      if (buffer.data == nullptr || buffer.bytes < response_bytes) {
-        buffer.data  = clients_[chunk.shard]->GetReceiveBuffer(response_bytes);
-        buffer.bytes = response_bytes;
-      }
-      recv = buffer.data;
-    }
+    void* recv = clients_[chunk.shard]->GetReceiveBuffer(response_bytes);
     std::memset(recv, 0, response_bytes);
     int rpc_id = clients_[chunk.shard]->GetParameter(
         base::ConstArray<uint64_t>(chunk.keys),
