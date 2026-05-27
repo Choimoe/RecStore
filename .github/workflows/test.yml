@@ -170,6 +170,16 @@ jobs:
             echo "Restore completed."
           '
 
+      - name: Ensure current third_party submodules
+        run: |
+          set -euo pipefail
+          docker exec "${TEST_CONTAINER}" bash -lc '
+            set -euo pipefail
+            cd /workspace
+            git submodule sync --recursive third_party/ycsb/HdrHistogram_c
+            git submodule update --init --recursive --depth 1 third_party/ycsb/HdrHistogram_c
+          '
+
       - name: Build project inside container
         run: |
           set -euo pipefail
