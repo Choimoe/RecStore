@@ -355,6 +355,17 @@ set_tests_properties(test_local_shm_ps_client PROPERTIES
     RESOURCE_LOCK local_shm_tests
 )
 
+add_executable(local_shm_consistency_worker local_shm_consistency_worker.cpp)
+target_link_libraries(local_shm_consistency_worker PUBLIC
+    base
+    local_shm_ps_client
+    Folly::folly
+    gflags
+    glog
+    pthread
+)
+target_link_options(local_shm_consistency_worker PUBLIC -Wl,--no-as-needed)
+
 add_executable(test_op_runtime_support test_op_runtime_support.cpp)
 target_sources(test_op_runtime_support PRIVATE
     ${PROJECT_SOURCE_DIR}/src/framework/common/op_runtime_support.cc
@@ -444,6 +455,19 @@ set_tests_properties(
     test_run_local_shm_multi_process_benchmark_py
     PROPERTIES
     LABELS "local_shm;python"
+)
+
+add_python_unittest(
+    test_local_shm_multi_process_consistency_py
+    src/test/scripts/test_local_shm_multi_process_consistency.py
+)
+set_tests_properties(
+    test_local_shm_multi_process_consistency_py
+    PROPERTIES
+    LABELS "local_shm;python"
+    TIMEOUT 30
+    RUN_SERIAL TRUE
+    RESOURCE_LOCK local_shm_tests
 )
 
 add_python_unittest(

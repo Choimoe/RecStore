@@ -560,6 +560,153 @@ TEST_F(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
   server_thread.join();
 }
 
+TEST_F(LocalShmPSClientTest, ConcurrentClientsInitSameTableConsistently) {
+  constexpr int kClientCount = 4;
+  constexpr int kDim         = 4;
+
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_init_consistency"),
+      kClientCount);
+  LocalShmParameterServer server;
+  server.Init(config);
+
+  std::thread server_thread([&]() { server.Run(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  std::vector<std::unique_ptr<LocalShmPSClient>> clients;
+  clients.reserve(kClientCount);
+  for (int client_id = 0; client_id < kClientCount; ++client_id) {
+    json client_config                 = config["local_shm"];
+    client_config["ready_queue_index"] = client_id;
+    clients.emplace_back(std::make_unique<LocalShmPSClient>(client_config));
+  }
+
+  std::atomic<bool> start{false};
+  std::atomic<int> failed_init_count{0};
+  std::vector<std::thread> workers;
+  workers.reserve(kClientCount);
+  for (int client_id = 0; client_id < kClientCount; ++client_id) {
+    workers.emplace_back([&, client_id]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      if (clients[client_id]->InitEmbeddingTable(
+              "table_init_consistency", {128, kDim}) != 0) {
+        failed_init_count.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  EXPECT_EQ(failed_init_count.load(std::memory_order_relaxed), 0);
+
+  std::vector<uint64_t> keys = {41};
+  base::ConstArray<uint64_t> key_array(keys);
+  std::vector<float> grads(kDim, 1.0f);
+  ASSERT_EQ(clients[0]->UpdateParameterFlat(
+                "table_init_consistency", key_array, grads.data(), 1, kDim),
+            0);
+  std::vector<float> readback(kDim, 0.0f);
+  ASSERT_EQ(clients[0]->GetParameterFlat(key_array, readback.data(), 1, kDim),
+            0);
+  for (int col = 0; col < kDim; ++col) {
+    EXPECT_FLOAT_EQ(readback[col], -0.01f);
+  }
+
+  server.Stop();
+  server_thread.join();
+}
+
+TEST_F(LocalShmPSClientTest, ConcurrentClientsUpdateSharedRowsConsistently) {
+  constexpr int kClientCount = 4;
+  constexpr int kIterations  = 50;
+  constexpr int kRows        = 3;
+  constexpr int kDim         = 4;
+  constexpr float kLr        = 0.01f;
+
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_consistency"),
+      kClientCount);
+  LocalShmParameterServer server;
+  server.Init(config);
+
+  std::thread server_thread([&]() { server.Run(); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  std::vector<std::unique_ptr<LocalShmPSClient>> clients;
+  clients.reserve(kClientCount);
+  for (int client_id = 0; client_id < kClientCount; ++client_id) {
+    json client_config                 = config["local_shm"];
+    client_config["ready_queue_index"] = client_id;
+    clients.emplace_back(std::make_unique<LocalShmPSClient>(client_config));
+  }
+
+  ASSERT_EQ(clients[0]->InitEmbeddingTable("table_consistency", {128, kDim}),
+            0);
+
+  std::vector<uint64_t> keys             = {31, 32, 33};
+  std::vector<std::vector<float>> values = {
+      {10.0f, 11.0f, 12.0f, 13.0f},
+      {20.0f, 21.0f, 22.0f, 23.0f},
+      {30.0f, 31.0f, 32.0f, 33.0f},
+  };
+  base::ConstArray<uint64_t> key_array(keys);
+  ASSERT_EQ(clients[0]->PutParameter(key_array, values), 0);
+
+  std::atomic<bool> start{false};
+  std::vector<std::thread> workers;
+  workers.reserve(kClientCount);
+  for (int client_id = 0; client_id < kClientCount; ++client_id) {
+    workers.emplace_back([&, client_id]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+
+      std::vector<float> grads(kRows * kDim, 0.0f);
+      for (int iter = 0; iter < kIterations; ++iter) {
+        for (int row = 0; row < kRows; ++row) {
+          for (int col = 0; col < kDim; ++col) {
+            grads[row * kDim + col] =
+                static_cast<float>((client_id + 1) * (row + 1) * (col + 1));
+          }
+        }
+        EXPECT_EQ(
+            clients[client_id]->UpdateParameterFlat(
+                "table_consistency", key_array, grads.data(), kRows, kDim),
+            0);
+      }
+    });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto& worker : workers) {
+    worker.join();
+  }
+
+  std::vector<float> readback(kRows * kDim, 0.0f);
+  ASSERT_EQ(
+      clients[0]->GetParameterFlat(key_array, readback.data(), kRows, kDim), 0);
+
+  const float client_factor_sum =
+      static_cast<float>(kClientCount * (kClientCount + 1) / 2);
+  for (int row = 0; row < kRows; ++row) {
+    for (int col = 0; col < kDim; ++col) {
+      const float total_grad =
+          static_cast<float>(kIterations) * client_factor_sum *
+          static_cast<float>((row + 1) * (col + 1));
+      const float expected = values[row][col] - kLr * total_grad;
+      EXPECT_NEAR(readback[row * kDim + col], expected, 1e-4f)
+          << "row=" << row << " col=" << col;
+    }
+  }
+
+  server.Stop();
+  server_thread.join();
+}
+
 TEST_F(LocalShmPSClientTest, LocalRankEnvironmentSelectsReadyQueue) {
   auto config = MakeLocalShmConfig(
       MakeUniqueRegionName("recstore_local_shm_ps_client_env"), 2);
