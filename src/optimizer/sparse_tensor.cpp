@@ -41,6 +41,17 @@ void SparseTensor::BatchGet(const std::vector<uint64_t>& keys,
   kv->BatchGet(base::ConstArray<uint64_t>(hashed_keys), values, tid);
 }
 
+void SparseTensor::BatchPut(const std::vector<uint64_t>& keys,
+                            std::vector<base::ConstArray<float>>* values,
+                            unsigned tid) {
+  std::vector<uint64_t> hashed_keys;
+  hashed_keys.reserve(keys.size());
+  for (auto k : keys) {
+    hashed_keys.push_back(concatKeyAndTag(k, tag));
+  }
+  kv->BatchPut(base::ConstArray<uint64_t>(hashed_keys), values, tid);
+}
+
 int64_t SparseTensor::EmbeddingDim() const {
   if (shape.size() < 2) {
     return 0;

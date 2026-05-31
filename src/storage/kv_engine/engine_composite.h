@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <stdexcept>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -46,9 +47,7 @@ public:
 
   void Get(const uint64_t key, std::string& value, unsigned tid) override {
     (void)tid;
-    std::shared_lock<std::shared_mutex> read_lock(
-        sgd_update_locks_[key % kSgdUpdateLockCount]);
-    GetUnlocked(key, value);
+    GetOptimistic(key, value);
   }
 
   void GetUnlocked(const uint64_t key, std::string& value) {
@@ -71,8 +70,6 @@ public:
 
   bool Exists(const uint64_t key, unsigned tid) override {
     (void)tid;
-    std::shared_lock<std::shared_mutex> read_lock(
-        sgd_update_locks_[key % kSgdUpdateLockCount]);
     Value_t handle = kValueHandleNone;
     index_->Get(key, handle);
     return handle != kValueHandleNone;
@@ -81,9 +78,19 @@ public:
   void Put(const uint64_t key,
            const std::string_view& value,
            unsigned tid) override {
-    std::unique_lock<std::shared_mutex> write_lock(
-        sgd_update_locks_[key % kSgdUpdateLockCount]);
-    PutInternalUnlocked(key, value.data(), value.size(), tid, true);
+    const size_t stripe = StripeFor(key);
+    std::lock_guard<std::mutex> write_lock(stripe_write_locks_[stripe]);
+    if (TryOverwriteExistingUnlocked(key, value.data(), value.size(), tid)) {
+      return;
+    }
+    Value_t new_handle =
+        value_store_->AllocAndWrite(value.data(), value.size());
+    if (new_handle == kValueHandleNone) {
+      LOG(FATAL) << "KVEngine value allocation failed, key=" << key
+                 << " size=" << value.size();
+      return;
+    }
+    PublishHandleUnlocked(key, new_handle, tid);
   }
 
   void BatchPut(base::ConstArray<uint64_t> keys,
@@ -109,14 +116,10 @@ public:
     if (has_duplicate_key) {
       for (int i = 0; i < keys.Size(); ++i) {
         const auto& item = (*values)[i];
-        std::unique_lock<std::shared_mutex> write_lock(
-            sgd_update_locks_[keys[i] % kSgdUpdateLockCount]);
-        PutInternalUnlocked(
-            keys[i],
-            item.Data(),
-            static_cast<size_t>(item.Size()) * sizeof(float),
-            tid,
-            false);
+        Put(keys[i],
+            std::string_view(reinterpret_cast<const char*>(item.Data()),
+                             static_cast<size_t>(item.Size()) * sizeof(float)),
+            tid);
       }
       return;
     }
@@ -135,29 +138,20 @@ public:
       items.push_back(PutItem{keys[i], ValueStore::WriteSpec{data, size}});
     }
 
-    std::vector<ValueStore::WriteSpec> specs;
-    specs.reserve(items.size());
-    for (const auto& item : items) {
-      specs.push_back(item.spec);
-    }
-    const auto new_handles = value_store_->BatchAllocAndWrite(specs);
-    if (new_handles.size() != items.size()) {
-      LOG(FATAL) << "KVEngine::BatchPut allocation result size mismatch";
-    }
     for (size_t i = 0; i < items.size(); ++i) {
-      if (new_handles[i] == kValueHandleNone) {
-        LOG(FATAL) << "KVEngine batch value allocation failed, key="
-                   << items[i].key << " size=" << items[i].spec.size;
+      const size_t stripe = StripeFor(items[i].key);
+      std::lock_guard<std::mutex> write_lock(stripe_write_locks_[stripe]);
+      if (TryOverwriteExistingUnlocked(
+              items[i].key, items[i].spec.data, items[i].spec.size, tid)) {
+        continue;
       }
-    }
-
-    for (size_t i = 0; i < items.size(); ++i) {
-      std::unique_lock<std::shared_mutex> write_lock(
-          sgd_update_locks_[items[i].key % kSgdUpdateLockCount]);
-      Value_t old_handle = index_->Put(items[i].key, new_handles[i], tid);
-      if (old_handle != kValueHandleNone) {
-        value_store_->Retire(old_handle);
+      Value_t new_handle =
+          value_store_->AllocAndWrite(items[i].spec.data, items[i].spec.size);
+      if (new_handle == kValueHandleNone) {
+        LOG(FATAL) << "KVEngine value allocation failed, key=" << items[i].key
+                   << " size=" << items[i].spec.size;
       }
+      PublishHandleUnlocked(items[i].key, new_handle, tid);
     }
   }
 
@@ -165,55 +159,24 @@ public:
                 std::vector<base::ConstArray<float>>* values,
                 unsigned tid) override {
     (void)tid;
-    std::vector<std::shared_lock<std::shared_mutex>> read_locks;
-    LockReadStripes(keys, &read_locks);
     values->resize(keys.Size());
-    thread_local std::vector<Value_t> handles;
     thread_local std::vector<std::vector<float>> buffers;
-    handles.assign(keys.Size(), kValueHandleNone);
     buffers.clear();
     buffers.resize(keys.Size());
 
-    if (keys.Size() > 0) {
-      index_->BatchGet(keys, handles.data(), tid);
-    }
-    std::vector<uint64_t> batch_handles;
-    std::vector<size_t> batch_indices;
-    batch_handles.reserve(static_cast<size_t>(keys.Size()));
-    batch_indices.reserve(static_cast<size_t>(keys.Size()));
     for (int i = 0; i < keys.Size(); ++i) {
-      if (handles[i] == kValueHandleNone) {
+      std::string row;
+      GetOptimistic(keys[i], row);
+      if (row.empty()) {
         (*values)[i] = base::ConstArray<float>();
         continue;
       }
-      if (const char* ptr = value_store_->DirectPtr(handles[i])) {
-        const size_t bytes = value_store_->SlotCapacity(handles[i]);
-        (*values)[i]       = base::ConstArray<float>(
-            reinterpret_cast<float*>(const_cast<char*>(ptr)),
-            bytes / sizeof(float));
-        continue;
+      auto& buffer = buffers[static_cast<size_t>(i)];
+      buffer.resize(row.size() / sizeof(float));
+      if (!row.empty()) {
+        std::memcpy(buffer.data(), row.data(), row.size());
       }
-      batch_handles.push_back(handles[i]);
-      batch_indices.push_back(static_cast<size_t>(i));
-    }
-
-    std::vector<ValueStore::ReadResult> batch_results;
-    if (!batch_handles.empty()) {
-      value_store_->BatchRead(batch_handles, batch_results);
-      if (batch_results.size() != batch_indices.size()) {
-        LOG(FATAL) << "KVEngine::BatchGet read result size mismatch";
-      }
-      for (size_t i = 0; i < batch_indices.size(); ++i) {
-        const size_t idx   = batch_indices[i];
-        const auto& result = batch_results[i];
-        buffers[idx].resize(result.data.size() / sizeof(float));
-        if (!result.data.empty()) {
-          std::memcpy(
-              buffers[idx].data(), result.data.data(), result.data.size());
-        }
-        (*values)[idx] =
-            base::ConstArray<float>(buffers[idx].data(), buffers[idx].size());
-      }
+      (*values)[i] = base::ConstArray<float>(buffer.data(), buffer.size());
     }
   }
 
@@ -227,70 +190,60 @@ public:
         keys.Size() != static_cast<size_t>(num_rows)) {
       return false;
     }
-    std::vector<std::shared_lock<std::shared_mutex>> read_locks;
-    LockReadStripes(keys, &read_locks);
-
     thread_local std::vector<Value_t> handles;
     handles.assign(keys.Size(), kValueHandleNone);
-    if (keys.Size() > 0) {
-      index_->BatchGet(keys, handles.data(), tid);
-    }
-
-    int64_t local_missing_rows = 0;
-    const size_t expected_bytes =
-        static_cast<size_t>(embedding_dim) * sizeof(float);
-    std::vector<uint64_t> batch_handles;
-    std::vector<size_t> batch_indices;
-    batch_handles.reserve(static_cast<size_t>(keys.Size()));
-    batch_indices.reserve(static_cast<size_t>(keys.Size()));
-
-    for (int64_t row = 0; row < num_rows; ++row) {
-      const Value_t handle = handles[static_cast<size_t>(row)];
-      float* dst           = values + row * embedding_dim;
-      if (handle == kValueHandleNone) {
-        std::fill_n(dst, static_cast<size_t>(embedding_dim), 0.0f);
-        ++local_missing_rows;
-        continue;
+    std::vector<size_t> stripes;
+    std::vector<uint64_t> versions;
+    for (;;) {
+      BeginBatchRead(keys, &stripes, &versions);
+      if (keys.Size() > 0) {
+        index_->BatchGet(keys, handles.data(), tid);
       }
-      const size_t bytes = value_store_->SlotCapacity(handle);
-      if (bytes != expected_bytes) {
-        LOG(ERROR) << "KVEngine::BatchGetFlat embedding_dim mismatch at row="
-                   << row << " key=" << keys[static_cast<size_t>(row)]
-                   << " expected_bytes=" << expected_bytes
-                   << " actual_bytes=" << bytes;
+      int64_t local_missing_rows = 0;
+      const size_t expected_bytes =
+          static_cast<size_t>(embedding_dim) * sizeof(float);
+      bool ok = true;
+      for (int64_t row = 0; row < num_rows; ++row) {
+        const Value_t handle = handles[static_cast<size_t>(row)];
+        float* dst           = values + row * embedding_dim;
+        if (handle == kValueHandleNone) {
+          std::fill_n(dst, static_cast<size_t>(embedding_dim), 0.0f);
+          ++local_missing_rows;
+          continue;
+        }
+        const size_t bytes = value_store_->SlotCapacity(handle);
+        if (bytes != expected_bytes) {
+          LOG(ERROR) << "KVEngine::BatchGetFlat embedding_dim mismatch at row="
+                     << row << " key=" << keys[static_cast<size_t>(row)]
+                     << " expected_bytes=" << expected_bytes
+                     << " actual_bytes=" << bytes;
+          ok = false;
+          break;
+        }
+        if (const char* ptr = value_store_->DirectPtr(handle)) {
+          std::memcpy(dst, ptr, bytes);
+        } else {
+          const size_t actual = value_store_->Read(handle, dst, bytes);
+          if (actual != bytes) {
+            LOG(ERROR) << "KVEngine::BatchGetFlat read size mismatch at row="
+                       << row << " expected_bytes=" << bytes
+                       << " actual_bytes=" << actual;
+            ok = false;
+            break;
+          }
+        }
+      }
+      const bool stable = EndBatchReadAndValidate(stripes, versions);
+      if (!ok) {
         return false;
       }
-      if (const char* ptr = value_store_->DirectPtr(handle)) {
-        std::memcpy(dst, ptr, bytes);
-        continue;
-      }
-      batch_handles.push_back(handle);
-      batch_indices.push_back(static_cast<size_t>(row));
-    }
-
-    if (!batch_handles.empty()) {
-      std::vector<ValueStore::ReadResult> batch_results;
-      value_store_->BatchRead(batch_handles, batch_results);
-      if (batch_results.size() != batch_indices.size()) {
-        LOG(FATAL) << "KVEngine::BatchGetFlat read result size mismatch";
-      }
-      for (size_t i = 0; i < batch_indices.size(); ++i) {
-        const auto& data = batch_results[i].data;
-        if (data.size() != expected_bytes) {
-          LOG(ERROR) << "KVEngine::BatchGetFlat read size mismatch at row="
-                     << batch_indices[i] << " expected_bytes=" << expected_bytes
-                     << " actual_bytes=" << data.size();
-          return false;
+      if (stable) {
+        if (missing_rows != nullptr) {
+          *missing_rows = local_missing_rows;
         }
-        std::memcpy(values + batch_indices[i] * embedding_dim,
-                    data.data(),
-                    data.size());
+        return true;
       }
     }
-    if (missing_rows != nullptr) {
-      *missing_rows = local_missing_rows;
-    }
-    return true;
   }
 
   bool ApplySgdUpdateFlat(
@@ -313,20 +266,47 @@ public:
     for (int64_t r = 0; r < num_rows; ++r) {
       const uint64_t key = (static_cast<uint64_t>(tag) << shift) |
                            (keys[static_cast<size_t>(r)] & key_mask);
-      std::unique_lock<std::shared_mutex> update_lock(
-          sgd_update_locks_[key % kSgdUpdateLockCount]);
-      std::string current;
-      GetUnlocked(key, current);
-      if (current.size() == row_bytes) {
-        std::memcpy(row.data(), current.data(), row_bytes);
+      const size_t stripe = StripeFor(key);
+      std::lock_guard<std::mutex> update_lock(stripe_write_locks_[stripe]);
+      Value_t handle = kValueHandleNone;
+      index_->Get(key, handle);
+      const float* grad = grads + r * embedding_dim;
+      if (handle != kValueHandleNone &&
+          value_store_->SlotCapacity(handle) == row_bytes) {
+        if (const char* ptr = value_store_->DirectPtr(handle)) {
+          BeginStripeWrite(stripe);
+          WaitForStripeReaders(stripe);
+          float* direct = reinterpret_cast<float*>(const_cast<char*>(ptr));
+          for (int64_t c = 0; c < embedding_dim; ++c) {
+            direct[c] -= learning_rate * grad[c];
+          }
+          EndStripeWrite(stripe);
+          continue;
+        }
+        const size_t actual = value_store_->Read(handle, row.data(), row_bytes);
+        if (actual == row_bytes) {
+          for (int64_t c = 0; c < embedding_dim; ++c) {
+            row[c] -= learning_rate * grad[c];
+          }
+        } else {
+          std::fill(row.begin(), row.end(), 0.0f);
+          for (int64_t c = 0; c < embedding_dim; ++c) {
+            row[c] -= learning_rate * grad[c];
+          }
+        }
       } else {
         std::fill(row.begin(), row.end(), 0.0f);
+        for (int64_t c = 0; c < embedding_dim; ++c) {
+          row[c] -= learning_rate * grad[c];
+        }
       }
-      const float* grad = grads + r * embedding_dim;
-      for (int64_t c = 0; c < embedding_dim; ++c) {
-        row[c] -= learning_rate * grad[c];
+      Value_t new_handle = value_store_->AllocAndWrite(row.data(), row_bytes);
+      if (new_handle == kValueHandleNone) {
+        LOG(FATAL) << "KVEngine value allocation failed, key=" << key
+                   << " size=" << row_bytes;
+        return false;
       }
-      PutInternalUnlocked(key, row.data(), row_bytes, tid, false);
+      PublishHandleUnlocked(key, new_handle, tid);
     }
     return true;
   }
@@ -374,47 +354,206 @@ public:
   }
 
 private:
-  void
-  LockReadStripes(base::ConstArray<uint64_t> keys,
-                  std::vector<std::shared_lock<std::shared_mutex>>* locks) {
-    locks->clear();
-    locks->reserve(static_cast<size_t>(keys.Size()));
-    std::array<bool, kSgdUpdateLockCount> locked_stripes{};
-    for (int i = 0; i < keys.Size(); ++i) {
-      const size_t stripe = keys[i] % kSgdUpdateLockCount;
-      if (!locked_stripes[stripe]) {
-        locks->emplace_back(sgd_update_locks_[stripe]);
-        locked_stripes[stripe] = true;
+  static size_t StripeFor(uint64_t key) { return key % kStripeCount; }
+
+  uint64_t BeginStripeRead(size_t stripe) {
+    for (;;) {
+      const uint64_t version =
+          stripe_versions_[stripe].load(std::memory_order_acquire);
+      if ((version & 1U) != 0) {
+        std::this_thread::yield();
+        continue;
+      }
+      stripe_readers_[stripe].fetch_add(1, std::memory_order_acq_rel);
+      const uint64_t confirmed =
+          stripe_versions_[stripe].load(std::memory_order_acquire);
+      if (version == confirmed && (confirmed & 1U) == 0) {
+        return version;
+      }
+      stripe_readers_[stripe].fetch_sub(1, std::memory_order_acq_rel);
+    }
+  }
+
+  bool EndStripeReadAndValidate(size_t stripe, uint64_t version) {
+    stripe_readers_[stripe].fetch_sub(1, std::memory_order_acq_rel);
+    return stripe_versions_[stripe].load(std::memory_order_acquire) == version;
+  }
+
+  void BeginBatchRead(base::ConstArray<uint64_t> keys,
+                      std::vector<size_t>* stripes,
+                      std::vector<uint64_t>* versions) {
+    for (;;) {
+      stripes->clear();
+      stripes->reserve(static_cast<size_t>(keys.Size()));
+      std::array<bool, kStripeCount> seen{};
+      for (int i = 0; i < keys.Size(); ++i) {
+        const size_t stripe = StripeFor(keys[i]);
+        if (!seen[stripe]) {
+          seen[stripe] = true;
+          stripes->push_back(stripe);
+        }
+      }
+      versions->clear();
+      versions->reserve(stripes->size());
+      bool stable = true;
+      for (size_t stripe : *stripes) {
+        const uint64_t version =
+            stripe_versions_[stripe].load(std::memory_order_acquire);
+        if ((version & 1U) != 0) {
+          stable = false;
+          break;
+        }
+        stripe_readers_[stripe].fetch_add(1, std::memory_order_acq_rel);
+        versions->push_back(version);
+        const uint64_t confirmed =
+            stripe_versions_[stripe].load(std::memory_order_acquire);
+        if (confirmed != version || (confirmed & 1U) != 0) {
+          stable = false;
+          break;
+        }
+      }
+      if (stable && versions->size() == stripes->size()) {
+        return;
+      }
+      for (size_t i = 0; i < versions->size(); ++i) {
+        stripe_readers_[(*stripes)[i]].fetch_sub(1, std::memory_order_acq_rel);
+      }
+      std::this_thread::yield();
+    }
+  }
+
+  bool EndBatchReadAndValidate(const std::vector<size_t>& stripes,
+                               const std::vector<uint64_t>& versions) {
+    bool stable = true;
+    for (size_t i = 0; i < stripes.size(); ++i) {
+      const size_t stripe = stripes[i];
+      stripe_readers_[stripe].fetch_sub(1, std::memory_order_acq_rel);
+      if (stripe_versions_[stripe].load(std::memory_order_acquire) !=
+          versions[i]) {
+        stable = false;
+      }
+    }
+    return stable;
+  }
+
+  void BeginStripeWrite(size_t stripe) {
+    const uint64_t previous =
+        stripe_versions_[stripe].fetch_add(1, std::memory_order_acq_rel);
+    if ((previous & 1U) != 0) {
+      LOG(FATAL) << "KVEngine stripe write version already odd";
+    }
+  }
+
+  void WaitForStripeReaders(size_t stripe) {
+    while (stripe_readers_[stripe].load(std::memory_order_acquire) != 0) {
+      std::this_thread::yield();
+    }
+  }
+
+  void EndStripeWrite(size_t stripe) {
+    const uint64_t previous =
+        stripe_versions_[stripe].fetch_add(1, std::memory_order_release);
+    if ((previous & 1U) == 0) {
+      LOG(FATAL) << "KVEngine stripe write version already even";
+    }
+  }
+
+  void PublishHandleUnlocked(uint64_t key, Value_t new_handle, unsigned tid) {
+    const size_t stripe = StripeFor(key);
+    BeginStripeWrite(stripe);
+    Value_t old_handle = index_->Put(key, new_handle, tid);
+    WaitForStripeReaders(stripe);
+    if (old_handle != kValueHandleNone) {
+      value_store_->Retire(old_handle);
+    }
+    EndStripeWrite(stripe);
+  }
+
+  bool TryOverwriteExistingUnlocked(
+      uint64_t key, const void* data, size_t size, unsigned tid) {
+    (void)tid;
+    const size_t stripe = StripeFor(key);
+    Value_t handle      = kValueHandleNone;
+    index_->Get(key, handle);
+    if (handle == kValueHandleNone ||
+        value_store_->SlotCapacity(handle) != size) {
+      return false;
+    }
+    const char* ptr = value_store_->DirectPtr(handle);
+    if (ptr == nullptr) {
+      return false;
+    }
+    BeginStripeWrite(stripe);
+    WaitForStripeReaders(stripe);
+    std::memcpy(const_cast<char*>(ptr), data, size);
+    EndStripeWrite(stripe);
+    return true;
+  }
+
+  void GetOptimistic(uint64_t key, std::string& value) {
+    const size_t stripe = StripeFor(key);
+    for (;;) {
+      const uint64_t version = BeginStripeRead(stripe);
+      GetUnlocked(key, value);
+      if (EndStripeReadAndValidate(stripe, version)) {
+        return;
       }
     }
   }
 
-  void PutInternalUnlocked(
+  bool ReadFlatRowOptimistic(
       uint64_t key,
-      const void* data,
-      size_t size,
-      unsigned tid,
-      bool emit_fence) {
-    (void)tid;
-    (void)emit_fence;
-    Value_t new_handle = value_store_->AllocAndWrite(data, size);
-    if (new_handle == kValueHandleNone) {
-      LOG(FATAL) << "KVEngine value allocation failed, key=" << key
-                 << " size=" << size;
-      return;
-    }
-    Value_t old_handle = index_->Put(key, new_handle, tid);
-    if (old_handle != kValueHandleNone) {
-      value_store_->Retire(old_handle);
+      float* dst,
+      size_t expected_bytes,
+      int64_t embedding_dim,
+      bool* missing) {
+    const size_t stripe = StripeFor(key);
+    for (;;) {
+      const uint64_t version = BeginStripeRead(stripe);
+      Value_t handle         = kValueHandleNone;
+      index_->Get(key, handle);
+      bool ok  = true;
+      *missing = false;
+      if (handle == kValueHandleNone) {
+        std::fill_n(dst, static_cast<size_t>(embedding_dim), 0.0f);
+        *missing = true;
+      } else {
+        const size_t bytes = value_store_->SlotCapacity(handle);
+        if (bytes != expected_bytes) {
+          LOG(ERROR) << "KVEngine::BatchGetFlat embedding_dim mismatch key="
+                     << key << " expected_bytes=" << expected_bytes
+                     << " actual_bytes=" << bytes;
+          ok = false;
+        } else if (const char* ptr = value_store_->DirectPtr(handle)) {
+          std::memcpy(dst, ptr, bytes);
+        } else {
+          const size_t actual = value_store_->Read(handle, dst, bytes);
+          if (actual != bytes) {
+            LOG(ERROR) << "KVEngine::BatchGetFlat read size mismatch key="
+                       << key << " expected_bytes=" << bytes
+                       << " actual_bytes=" << actual;
+            ok = false;
+          }
+        }
+      }
+      const bool stable = EndStripeReadAndValidate(stripe, version);
+      if (!ok) {
+        return false;
+      }
+      if (stable) {
+        return true;
+      }
     }
   }
 
   BaseKVConfig config_;
   std::unique_ptr<Index> index_;
   std::unique_ptr<ValueStore> value_store_;
-  int num_threads_                            = 0;
-  static constexpr size_t kSgdUpdateLockCount = 4096;
-  std::array<std::shared_mutex, kSgdUpdateLockCount> sgd_update_locks_;
+  int num_threads_                     = 0;
+  static constexpr size_t kStripeCount = 4096;
+  std::array<std::mutex, kStripeCount> stripe_write_locks_;
+  std::array<std::atomic<uint64_t>, kStripeCount> stripe_versions_{};
+  std::array<std::atomic<uint32_t>, kStripeCount> stripe_readers_{};
 };
 
 FACTORY_REGISTER(

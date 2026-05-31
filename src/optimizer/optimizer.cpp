@@ -29,6 +29,20 @@ void ValidateFlatUpdateArgs(const base::ConstArray<uint64_t>& keys,
   }
 }
 
+std::vector<std::vector<float>>
+CopyRows(const std::vector<base::ConstArray<float>>& rows) {
+  std::vector<std::vector<float>> copies;
+  copies.reserve(rows.size());
+  for (const auto& row : rows) {
+    if (row.Size() == 0 || row.Data() == nullptr) {
+      copies.emplace_back();
+      continue;
+    }
+    copies.emplace_back(row.Data(), row.Data() + row.Size());
+  }
+  return copies;
+}
+
 } // namespace
 
 void SGD::Init(const std::vector<std::string> table_name,
@@ -62,6 +76,11 @@ void SGD::Update(
 
   std::vector<base::ConstArray<float>> current_values;
   it->second->BatchGet(keys, &current_values, tid);
+  auto mutable_values = CopyRows(current_values);
+  std::vector<uint64_t> dirty_keys;
+  std::vector<base::ConstArray<float>> dirty_values;
+  dirty_keys.reserve(static_cast<size_t>(size));
+  dirty_values.reserve(static_cast<size_t>(size));
 
   for (int i = 0; i < size; ++i) {
     const auto* item = reader->item(i);
@@ -77,13 +96,21 @@ void SGD::Update(
       continue;
     }
 
-    float* data = const_cast<float*>(current_values[i].Data());
-    int dim     = std::min(current_values[i].Size(), item->dim);
+    float* data = mutable_values[static_cast<size_t>(i)].data();
+    int dim     = std::min(
+        static_cast<int>(mutable_values[static_cast<size_t>(i)].size()),
+        item->dim);
 
 #pragma omp simd
     for (int j = 0; j < dim; ++j) {
       data[j] -= learning_rate_ * item->data()[j];
     }
+    dirty_keys.push_back(item->key);
+    dirty_values.emplace_back(
+        data, static_cast<int>(mutable_values[static_cast<size_t>(i)].size()));
+  }
+  if (!dirty_keys.empty()) {
+    it->second->BatchPut(dirty_keys, &dirty_values, tid);
   }
 }
 
@@ -119,11 +146,16 @@ void SGD::UpdateFlat(
   const auto batch_get_start = std::chrono::steady_clock::now();
   std::vector<base::ConstArray<float>> current_values;
   it->second->BatchGet(key_vec, &current_values, tid);
+  auto mutable_values = CopyRows(current_values);
   recstore::ReportLocalShmStageMetric(
       "sgd_update_batch_get_us", recstore::LocalShmElapsedUs(batch_get_start));
 
   const auto apply_start = std::chrono::steady_clock::now();
   int64_t missing_rows   = 0;
+  std::vector<uint64_t> dirty_keys;
+  std::vector<base::ConstArray<float>> dirty_values;
+  dirty_keys.reserve(static_cast<size_t>(num_rows));
+  dirty_values.reserve(static_cast<size_t>(num_rows));
   for (int64_t row = 0; row < num_rows; ++row) {
     const float* row_grad = grads + row * embedding_dim;
     const auto& current   = current_values[static_cast<size_t>(row)];
@@ -143,11 +175,17 @@ void SGD::UpdateFlat(
           "SGD::UpdateFlat embedding_dim mismatch for table " + table);
     }
 
-    float* data = const_cast<float*>(current.Data());
+    auto& mutable_row = mutable_values[static_cast<size_t>(row)];
+    float* data       = mutable_row.data();
 #pragma omp simd
     for (int64_t col = 0; col < embedding_dim; ++col) {
       data[col] -= learning_rate_ * row_grad[col];
     }
+    dirty_keys.push_back(keys[static_cast<size_t>(row)]);
+    dirty_values.emplace_back(data, static_cast<int>(mutable_row.size()));
+  }
+  if (!dirty_keys.empty()) {
+    it->second->BatchPut(dirty_keys, &dirty_values, tid);
   }
   recstore::ReportLocalShmStageMetric(
       "sgd_update_apply_us", recstore::LocalShmElapsedUs(apply_start));
@@ -198,7 +236,15 @@ void AdaGrad::Update(
   std::vector<base::ConstArray<float>> current_values;
   std::vector<base::ConstArray<float>> acc_values;
   param_it->second->BatchGet(keys, &current_values, tid);
+  auto mutable_param_values = CopyRows(current_values);
   acc_it->second->BatchGet(keys, &acc_values, tid);
+  auto mutable_acc_values = CopyRows(acc_values);
+  std::vector<uint64_t> dirty_keys;
+  std::vector<base::ConstArray<float>> dirty_param_values;
+  std::vector<base::ConstArray<float>> dirty_acc_values;
+  dirty_keys.reserve(static_cast<size_t>(size));
+  dirty_param_values.reserve(static_cast<size_t>(size));
+  dirty_acc_values.reserve(static_cast<size_t>(size));
 
   for (int i = 0; i < size; ++i) {
     const auto* item = reader->item(i);
@@ -208,9 +254,11 @@ void AdaGrad::Update(
       continue;
     }
 
-    float* param_data = const_cast<float*>(current_values[i].Data());
-    float* acc_data   = const_cast<float*>(acc_values[i].Data());
-    int dim           = std::min(current_values[i].Size(), item->dim);
+    float* param_data = mutable_param_values[static_cast<size_t>(i)].data();
+    float* acc_data   = mutable_acc_values[static_cast<size_t>(i)].data();
+    int dim           = std::min(
+        static_cast<int>(mutable_param_values[static_cast<size_t>(i)].size()),
+        item->dim);
 
 #pragma omp simd
     for (int j = 0; j < dim; ++j) {
@@ -218,6 +266,17 @@ void AdaGrad::Update(
       float adaptive_lr = learning_rate_ / (std::sqrt(acc_data[j]) + epsilon_);
       param_data[j] -= adaptive_lr * item->data()[j];
     }
+    dirty_keys.push_back(item->key);
+    dirty_param_values.emplace_back(
+        param_data,
+        static_cast<int>(mutable_param_values[static_cast<size_t>(i)].size()));
+    dirty_acc_values.emplace_back(
+        acc_data,
+        static_cast<int>(mutable_acc_values[static_cast<size_t>(i)].size()));
+  }
+  if (!dirty_keys.empty()) {
+    param_it->second->BatchPut(dirty_keys, &dirty_param_values, tid);
+    acc_it->second->BatchPut(dirty_keys, &dirty_acc_values, tid);
   }
 }
 
@@ -246,7 +305,15 @@ void AdaGrad::UpdateFlat(
   std::vector<base::ConstArray<float>> current_values;
   std::vector<base::ConstArray<float>> acc_values;
   param_it->second->BatchGet(key_vec, &current_values, tid);
+  auto mutable_param_values = CopyRows(current_values);
   acc_it->second->BatchGet(key_vec, &acc_values, tid);
+  auto mutable_acc_values = CopyRows(acc_values);
+  std::vector<uint64_t> dirty_keys;
+  std::vector<base::ConstArray<float>> dirty_param_values;
+  std::vector<base::ConstArray<float>> dirty_acc_values;
+  dirty_keys.reserve(static_cast<size_t>(num_rows));
+  dirty_param_values.reserve(static_cast<size_t>(num_rows));
+  dirty_acc_values.reserve(static_cast<size_t>(num_rows));
 
   for (int64_t row = 0; row < num_rows; ++row) {
     const auto& current = current_values[static_cast<size_t>(row)];
@@ -260,9 +327,11 @@ void AdaGrad::UpdateFlat(
           "AdaGrad::UpdateFlat embedding_dim mismatch for table " + table);
     }
 
-    const float* row_grad = grads + row * embedding_dim;
-    float* param_data     = const_cast<float*>(current.Data());
-    float* acc_data       = const_cast<float*>(acc.Data());
+    const float* row_grad   = grads + row * embedding_dim;
+    auto& mutable_param_row = mutable_param_values[static_cast<size_t>(row)];
+    auto& mutable_acc_row   = mutable_acc_values[static_cast<size_t>(row)];
+    float* param_data       = mutable_param_row.data();
+    float* acc_data         = mutable_acc_row.data();
 #pragma omp simd
     for (int64_t col = 0; col < embedding_dim; ++col) {
       acc_data[col] += row_grad[col] * row_grad[col];
@@ -270,6 +339,15 @@ void AdaGrad::UpdateFlat(
           learning_rate_ / (std::sqrt(acc_data[col]) + epsilon_);
       param_data[col] -= adaptive_lr * row_grad[col];
     }
+    dirty_keys.push_back(keys[static_cast<size_t>(row)]);
+    dirty_param_values.emplace_back(
+        param_data, static_cast<int>(mutable_param_row.size()));
+    dirty_acc_values.emplace_back(
+        acc_data, static_cast<int>(mutable_acc_row.size()));
+  }
+  if (!dirty_keys.empty()) {
+    param_it->second->BatchPut(dirty_keys, &dirty_param_values, tid);
+    acc_it->second->BatchPut(dirty_keys, &dirty_acc_values, tid);
   }
 }
 
@@ -318,7 +396,15 @@ void RowWiseAdaGrad::Update(
   std::vector<base::ConstArray<float>> current_values;
   std::vector<base::ConstArray<float>> acc_values;
   param_it->second->BatchGet(keys, &current_values, tid);
+  auto mutable_param_values = CopyRows(current_values);
   acc_it->second->BatchGet(keys, &acc_values, tid);
+  auto mutable_acc_values = CopyRows(acc_values);
+  std::vector<uint64_t> dirty_keys;
+  std::vector<base::ConstArray<float>> dirty_param_values;
+  std::vector<base::ConstArray<float>> dirty_acc_values;
+  dirty_keys.reserve(static_cast<size_t>(size));
+  dirty_param_values.reserve(static_cast<size_t>(size));
+  dirty_acc_values.reserve(static_cast<size_t>(size));
 
   for (int i = 0; i < size; ++i) {
     const auto* item = reader->item(i);
@@ -326,9 +412,11 @@ void RowWiseAdaGrad::Update(
       continue;
     }
 
-    float* param_data = const_cast<float*>(current_values[i].Data());
-    float* acc_data   = const_cast<float*>(acc_values[i].Data());
-    int dim           = std::min(current_values[i].Size(), item->dim);
+    float* param_data = mutable_param_values[static_cast<size_t>(i)].data();
+    float* acc_data   = mutable_acc_values[static_cast<size_t>(i)].data();
+    int dim           = std::min(
+        static_cast<int>(mutable_param_values[static_cast<size_t>(i)].size()),
+        item->dim);
 
     float grad_square_mean = 0.0;
 #pragma omp simd reduction(+ : grad_square_mean)
@@ -344,6 +432,17 @@ void RowWiseAdaGrad::Update(
     for (int j = 0; j < dim; ++j) {
       param_data[j] -= adaptive_lr * item->data()[j];
     }
+    dirty_keys.push_back(item->key);
+    dirty_param_values.emplace_back(
+        param_data,
+        static_cast<int>(mutable_param_values[static_cast<size_t>(i)].size()));
+    dirty_acc_values.emplace_back(
+        acc_data,
+        static_cast<int>(mutable_acc_values[static_cast<size_t>(i)].size()));
+  }
+  if (!dirty_keys.empty()) {
+    param_it->second->BatchPut(dirty_keys, &dirty_param_values, tid);
+    acc_it->second->BatchPut(dirty_keys, &dirty_acc_values, tid);
   }
 }
 
@@ -372,7 +471,15 @@ void RowWiseAdaGrad::UpdateFlat(
   std::vector<base::ConstArray<float>> current_values;
   std::vector<base::ConstArray<float>> acc_values;
   param_it->second->BatchGet(key_vec, &current_values, tid);
+  auto mutable_param_values = CopyRows(current_values);
   acc_it->second->BatchGet(key_vec, &acc_values, tid);
+  auto mutable_acc_values = CopyRows(acc_values);
+  std::vector<uint64_t> dirty_keys;
+  std::vector<base::ConstArray<float>> dirty_param_values;
+  std::vector<base::ConstArray<float>> dirty_acc_values;
+  dirty_keys.reserve(static_cast<size_t>(num_rows));
+  dirty_param_values.reserve(static_cast<size_t>(num_rows));
+  dirty_acc_values.reserve(static_cast<size_t>(num_rows));
 
   for (int64_t row = 0; row < num_rows; ++row) {
     const auto& current = current_values[static_cast<size_t>(row)];
@@ -387,9 +494,11 @@ void RowWiseAdaGrad::UpdateFlat(
           table);
     }
 
-    const float* row_grad = grads + row * embedding_dim;
-    float* param_data     = const_cast<float*>(current.Data());
-    float* acc_data       = const_cast<float*>(acc.Data());
+    const float* row_grad   = grads + row * embedding_dim;
+    auto& mutable_param_row = mutable_param_values[static_cast<size_t>(row)];
+    auto& mutable_acc_row   = mutable_acc_values[static_cast<size_t>(row)];
+    float* param_data       = mutable_param_row.data();
+    float* acc_data         = mutable_acc_row.data();
 
     float grad_square_mean = 0.0f;
 #pragma omp simd reduction(+ : grad_square_mean)
@@ -404,5 +513,14 @@ void RowWiseAdaGrad::UpdateFlat(
     for (int64_t col = 0; col < embedding_dim; ++col) {
       param_data[col] -= adaptive_lr * row_grad[col];
     }
+    dirty_keys.push_back(keys[static_cast<size_t>(row)]);
+    dirty_param_values.emplace_back(
+        param_data, static_cast<int>(mutable_param_row.size()));
+    dirty_acc_values.emplace_back(
+        acc_data, static_cast<int>(mutable_acc_row.size()));
+  }
+  if (!dirty_keys.empty()) {
+    param_it->second->BatchPut(dirty_keys, &dirty_param_values, tid);
+    acc_it->second->BatchPut(dirty_keys, &dirty_acc_values, tid);
   }
 }
