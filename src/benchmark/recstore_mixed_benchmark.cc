@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <numeric>
@@ -27,6 +28,7 @@ DEFINE_int32(batch_keys, 128, "number of keys per iteration");
 DEFINE_int32(embedding_dim, 128, "embedding dimension");
 DEFINE_int64(num_embeddings, 1024, "number of embeddings preloaded into table");
 DEFINE_int32(init_chunk_size, 4096, "initialization chunk size");
+DEFINE_bool(skip_init, false, "skip table initialization and preload");
 DEFINE_string(report_mode,
               "summary",
               "benchmark output mode: summary|per_round|both");
@@ -52,9 +54,15 @@ nlohmann::json BuildMixedBenchmarkConfig(
     const std::string& transport, const std::string& host, int port) {
   const auto normalized = NormalizeMixedTransport(transport);
   if (normalized == "LOCAL_SHM") {
+    std::ifstream config_file(host);
+    if (config_file.good()) {
+      nlohmann::json config;
+      config_file >> config;
+      return config;
+    }
     return {{"cache_ps", {{"ps_type", "LOCAL_SHM"}}},
             {"client", {{"host", host}, {"port", port}, {"shard", 0}}},
-            {"region_name", "recstore_local_ps"}};
+            {"local_shm", {{"region_name", "recstore_local_ps"}}}};
   }
   return BuildRpcBenchmarkConfig(normalized, host, port);
 }
@@ -212,33 +220,44 @@ int main(int argc, char** argv) {
   std::unique_ptr<recstore::BasePSClient> client(recstore::CreatePSClient(
       recstore::ResolvePSClientOptionsFromFrameworkConfig(config)));
 
-  CHECK_EQ(client->InitEmbeddingTable(
-               FLAGS_table_name,
-               recstore::EmbeddingTableConfig{
-                   static_cast<uint64_t>(FLAGS_num_embeddings),
-                   static_cast<uint64_t>(FLAGS_embedding_dim)}),
-           0)
-      << transport << " InitEmbeddingTable failed";
+  int64_t init_elapsed_us = 0;
+  if (!FLAGS_skip_init) {
+    CHECK_EQ(client->InitEmbeddingTable(
+                 FLAGS_table_name,
+                 recstore::EmbeddingTableConfig{
+                     static_cast<uint64_t>(FLAGS_num_embeddings),
+                     static_cast<uint64_t>(FLAGS_embedding_dim)}),
+             0)
+        << transport << " InitEmbeddingTable failed";
 
-  const auto init_start = std::chrono::steady_clock::now();
-  for (int64_t begin = 0; begin < FLAGS_num_embeddings;
-       begin += FLAGS_init_chunk_size) {
-    const int chunk_size = static_cast<int>(
-        std::min<int64_t>(FLAGS_init_chunk_size, FLAGS_num_embeddings - begin));
-    const auto init_keys   = MakeSequentialKeys(begin, chunk_size);
-    const auto init_values = MakeValues(init_keys, FLAGS_embedding_dim);
-    CHECK(BenchmarkWriteSucceeded(
-        transport,
-        client->PutParameter(
-            base::ConstArray<uint64_t>(init_keys), init_values)))
-        << transport
-        << " PutParameter failed during initialization at begin=" << begin;
+    const auto init_start = std::chrono::steady_clock::now();
+    for (int64_t begin = 0; begin < FLAGS_num_embeddings;
+         begin += FLAGS_init_chunk_size) {
+      const int chunk_size   = static_cast<int>(std::min<int64_t>(
+          FLAGS_init_chunk_size, FLAGS_num_embeddings - begin));
+      const auto init_keys   = MakeSequentialKeys(begin, chunk_size);
+      const auto init_values = MakeValues(init_keys, FLAGS_embedding_dim);
+      CHECK(BenchmarkWriteSucceeded(
+          transport,
+          client->PutParameter(
+              base::ConstArray<uint64_t>(init_keys), init_values)))
+          << transport
+          << " PutParameter failed during initialization at begin=" << begin;
+    }
+    const auto init_end = std::chrono::steady_clock::now();
+    init_elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            init_end - init_start)
+            .count();
+  } else {
+    CHECK_EQ(client->InitEmbeddingTable(
+                 FLAGS_table_name,
+                 recstore::EmbeddingTableConfig{
+                     static_cast<uint64_t>(FLAGS_num_embeddings),
+                     static_cast<uint64_t>(FLAGS_embedding_dim)}),
+             0)
+        << transport << " InitEmbeddingTable failed";
   }
-  const auto init_end = std::chrono::steady_clock::now();
-  const int64_t init_elapsed_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          init_end - init_start)
-          .count();
 
   std::vector<int64_t> warmup_samples_us;
   std::vector<int64_t> measure_samples_us;
@@ -295,10 +314,12 @@ int main(int argc, char** argv) {
   }
 
   if (ShouldPrintSummary(report_mode)) {
-    PrintInitSummary(transport,
-                     FLAGS_num_embeddings,
-                     FLAGS_init_chunk_size,
-                     init_elapsed_us);
+    if (!FLAGS_skip_init) {
+      PrintInitSummary(transport,
+                       FLAGS_num_embeddings,
+                       FLAGS_init_chunk_size,
+                       init_elapsed_us);
+    }
     PrintSummary(
         transport,
         "warmup",

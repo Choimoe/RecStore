@@ -113,6 +113,34 @@ def main() -> int:
             import time
 
             time.sleep(args.startup_delay)
+            preload_cmd = build_benchmark_cmd(
+                benchmark_binary=benchmark_binary,
+                iterations=1,
+                rounds=0,
+                warmup_rounds=0,
+                batch_keys=args.batch_keys,
+                embedding_dim=args.embedding_dim,
+                num_embeddings=args.num_embeddings,
+                report_mode="summary",
+                update_scale=0.001,
+                table_name="default",
+            )
+            preload_cmd.append(f"--host={config_path}")
+            run_checked = subprocess.run(
+                preload_cmd,
+                cwd=str(repo_root),
+                env=build_worker_env(0),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if run_checked.returncode != 0:
+                raise RuntimeError(
+                    "preload failed\n"
+                    f"stdout:\n{run_checked.stdout}\n"
+                    f"stderr:\n{run_checked.stderr}"
+                )
+
             workers: list[tuple[str, subprocess.Popen[str]]] = []
             for worker_rank in range(args.worker_count):
                 label = build_worker_label(worker_rank)
@@ -128,6 +156,8 @@ def main() -> int:
                     update_scale=0.001,
                     table_name="default",
                 )
+                cmd.append(f"--host={config_path}")
+                cmd.append("--skip_init=true")
                 workers.append(
                     (
                         label,
