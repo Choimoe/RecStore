@@ -41,7 +41,7 @@ legacy top-level fields such as path/index_type/value_type and nested file_path.
 
 class BaseKV {
 public:
-  virtual ~BaseKV() { }
+  virtual ~BaseKV() {}
 
   explicit BaseKV(const BaseKVConfig& config){};
 
@@ -82,6 +82,16 @@ public:
                         std::vector<base::ConstArray<float>>* values,
                         unsigned tid) {
     LOG(FATAL) << "not implemented";
+  }
+
+  virtual bool BatchGetFlat(
+      base::ConstArray<uint64_t> keys,
+      float* values,
+      int64_t num_rows,
+      int64_t embedding_dim,
+      unsigned tid,
+      int64_t* missing_rows) {
+    return false;
   }
 
   virtual bool ApplySgdUpdateFlat(

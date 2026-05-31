@@ -5,7 +5,9 @@
 #include <boost/coroutine2/all.hpp>
 #include <cstdint>
 #include <experimental/filesystem>
+#include <mutex>
 #include <random>
+#include <shared_mutex>
 #include <vector>
 
 #include "base/array.h"
@@ -248,6 +250,34 @@ public:
     }
 
     const auto batch_get_start = std::chrono::steady_clock::now();
+    int64_t flat_missing_rows  = 0;
+    if (base_kv_->BatchGetFlat(
+            keys,
+            values,
+            num_rows,
+            embedding_dim,
+            static_cast<unsigned>(tid),
+            &flat_missing_rows)) {
+      const auto batch_get_end = std::chrono::steady_clock::now();
+      if (profile != nullptr) {
+        profile->batch_get_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast< std::chrono::nanoseconds>(
+                batch_get_end - batch_get_start)
+                .count());
+        profile->row_copy_ns = profile->batch_get_ns;
+        profile->rows        = static_cast<std::uint64_t>(num_rows);
+        profile->value_bytes =
+            static_cast<std::uint64_t>(num_rows) *
+            static_cast<std::uint64_t>(embedding_dim) * sizeof(float);
+        profile->missing_rows = static_cast<std::uint64_t>(flat_missing_rows);
+      }
+      recstore::ReportLocalShmStageMetric(
+          "cache_ps_get_batch_get_us",
+          recstore::LocalShmElapsedUs(batch_get_start));
+      recstore::ReportLocalShmStageMetric("cache_ps_get_copy_us", 0.0);
+      return true;
+    }
+
     std::vector<base::ConstArray<float>> value_slices;
     base_kv_->BatchGet(keys, &value_slices, tid);
     if (profile != nullptr) {
@@ -334,6 +364,7 @@ public:
   bool InitTable(const std::string& table_name,
                  uint64_t num_embeddings,
                  uint64_t embedding_dim) {
+    std::unique_lock<std::shared_mutex> lock(optimizer_mu_);
     if (!optimizer_) {
       // TODO: optimizer type from config
       optimizer_ = std::make_unique<SGD>(0.01);
@@ -347,6 +378,7 @@ public:
   bool UpdateParameter(const std::string& table_name,
                        const ParameterCompressReader* reader,
                        unsigned tid) {
+    std::unique_lock<std::shared_mutex> lock(optimizer_mu_);
     if (!optimizer_) {
       LOG(ERROR) << "Optimizer not initialized. Please call InitTable first.";
       return false;
@@ -377,6 +409,7 @@ public:
                  << " vs " << num_rows;
       return false;
     }
+    std::shared_lock<std::shared_mutex> lock(optimizer_mu_);
     if (!optimizer_) {
       LOG(ERROR) << "Optimizer not initialized. Please call InitTable first.";
       return false;
@@ -389,5 +422,6 @@ public:
 private:
   std::unique_ptr<BaseKV> base_kv_;
   std::unique_ptr<Optimizer> optimizer_;
+  std::shared_mutex optimizer_mu_;
   std::atomic<bool> stopFlag_{false};
 };
