@@ -12,13 +12,9 @@
         <meta name="author" content="RecStore Team">
       
       
-        <link rel="canonical" href="https://Choimoe.github.io/RecStore/calc/optimizer/">
+        <link rel="canonical" href="https://Choimoe.github.io/RecStore/agent/perf/">
       
       
-        <link rel="prev" href="../embedding_modules/">
-      
-      
-        <link rel="next" href="../../parameter_server/">
       
       
         
@@ -29,7 +25,7 @@
     
     
       
-        <title>优化器与梯度更新 - RecStore Documentation</title>
+        <title>Performance Comparison Capability - RecStore Documentation</title>
       
     
     
@@ -80,7 +76,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#_1" class="md-skip">
+        <a href="#performance-comparison-capability" class="md-skip">
           跳转至
         </a>
       
@@ -114,7 +110,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              优化器与梯度更新
+              Performance Comparison Capability
             
           </span>
         </div>
@@ -265,12 +261,10 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
+      <li class="md-tabs__item">
         <a href="../../architecture/overview/" class="md-tabs__link">
           
   
@@ -680,31 +674,26 @@
       
   
   
-    
   
   
-  
     
     
     
     
-      
-        
-        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
         
           
-          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
             
   
   
@@ -722,7 +711,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_3">
             <span class="md-nav__icon md-icon"></span>
             
@@ -765,31 +754,26 @@
                 
   
   
-    
   
   
-  
     
     
     
     
       
       
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
         
           
-          
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
-      
-        
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" checked>
-        
-          
-          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="">
+          <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="0">
             
   
   
@@ -807,7 +791,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_3_2">
             <span class="md-nav__icon md-icon"></span>
             
@@ -825,7 +809,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../" class="md-nav__link">
+      <a href="../../calc/" class="md-nav__link">
         
   
   
@@ -853,14 +837,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../op_interface/" class="md-nav__link">
+      <a href="../../calc/interfaces/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    CommonOp 接口
+    接口边界
   
 
     
@@ -881,14 +865,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../kvclient/" class="md-nav__link">
+      <a href="../../calc/embedding_optimizer/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    KVClient 客户端
+    Embedding 与 Optimizer
   
 
     
@@ -897,393 +881,6 @@
   
 
       </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../pytorch_binding/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    PyTorch C++ 扩展
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../embedding_modules/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    EmbeddingBag 模块
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-    
-  
-  
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    优化器与梯度更新
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    优化器与梯度更新
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="目录">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      目录
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#_2" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        概述
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_3" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        架构
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_4" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        梯度追踪机制
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="梯度追踪机制">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#recstoreembeddingbagcollection" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        RecStoreEmbeddingBagCollection 梯度追踪
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#distembedding" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        DistEmbedding 梯度追踪
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#sparseoptimizer" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        SparseOptimizer
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="SparseOptimizer">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        接口
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_6" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        工作流程
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_7" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        后端优化器实现
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="后端优化器实现">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#kvclientopembupdate" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        KVClientOp::EmbUpdate
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_8" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        后端优化器
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_9" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        学习率配置
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="学习率配置">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_10" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        配置方式
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_11" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        梯度传输与聚合
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="梯度传输与聚合">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#python" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Python 侧梯度收集
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_12" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        批量传输
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_13" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        后端批量更新
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_14" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        优化器状态管理
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="优化器状态管理">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_15" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        状态存储位置
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_16" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        初始化流程
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1310,20 +907,17 @@
       
       
         
-          
-          
-        
       
     
     
-    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
         <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_3" >
         
           
-          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="">
+          <label class="md-nav__link" for="__nav_3_3" id="__nav_3_3_label" tabindex="0">
             
   
   
@@ -1541,20 +1135,17 @@
       
       
         
-          
-          
-        
       
     
     
-    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
         
         <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
         
           
-          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="">
+          <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="0">
             
   
   
@@ -1597,35 +1188,7 @@
   <span class="md-ellipsis">
     
   
-    架构总览
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../storage/cacheps/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    CachePS 层
+    存储层总览
   
 
     
@@ -1653,7 +1216,7 @@
   <span class="md-ellipsis">
     
   
-    BaseKV 抽象
+    BaseKV 与 Engine
   
 
     
@@ -1674,42 +1237,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../storage/kv_engines/" class="md-nav__link">
+      <a href="../../storage/composite_kvengine/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    KV 引擎实现
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../storage/memory/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    内存管理
+    KVEngineComposite
   
 
     
@@ -2312,10 +1847,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#_2" class="md-nav__link">
+  <a href="#1-scope" class="md-nav__link">
     <span class="md-ellipsis">
       
-        概述
+        1. Scope
       
     </span>
   </a>
@@ -2323,33 +1858,22 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#_3" class="md-nav__link">
+  <a href="#2-layer-boundaries" class="md-nav__link">
     <span class="md-ellipsis">
       
-        架构
+        2. Layer Boundaries
       
     </span>
   </a>
   
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_4" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        梯度追踪机制
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="梯度追踪机制">
+    <nav class="md-nav" aria-label="2. Layer Boundaries">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#recstoreembeddingbagcollection" class="md-nav__link">
+  <a href="#storage-only" class="md-nav__link">
     <span class="md-ellipsis">
       
-        RecStoreEmbeddingBagCollection 梯度追踪
+        Storage-only
       
     </span>
   </a>
@@ -2357,10 +1881,21 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#distembedding" class="md-nav__link">
+  <a href="#psnetwork" class="md-nav__link">
     <span class="md-ellipsis">
       
-        DistEmbedding 梯度追踪
+        PS/network
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pytorchmodel" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PyTorch/model
       
     </span>
   </a>
@@ -2373,197 +1908,68 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#sparseoptimizer" class="md-nav__link">
+  <a href="#3-default-matrix" class="md-nav__link">
     <span class="md-ellipsis">
       
-        SparseOptimizer
+        3. Default Matrix
       
     </span>
   </a>
-  
-    <nav class="md-nav" aria-label="SparseOptimizer">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        接口
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_6" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        工作流程
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#_7" class="md-nav__link">
+  <a href="#4-workflow" class="md-nav__link">
     <span class="md-ellipsis">
       
-        后端优化器实现
+        4. Workflow
       
     </span>
   </a>
-  
-    <nav class="md-nav" aria-label="后端优化器实现">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#kvclientopembupdate" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        KVClientOp::EmbUpdate
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_8" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        后端优化器
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#_9" class="md-nav__link">
+  <a href="#5-required-records" class="md-nav__link">
     <span class="md-ellipsis">
       
-        学习率配置
+        5. Required Records
       
     </span>
   </a>
-  
-    <nav class="md-nav" aria-label="学习率配置">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_10" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        配置方式
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#_11" class="md-nav__link">
+  <a href="#6-aggregation" class="md-nav__link">
     <span class="md-ellipsis">
       
-        梯度传输与聚合
+        6. Aggregation
       
     </span>
   </a>
-  
-    <nav class="md-nav" aria-label="梯度传输与聚合">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#python" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Python 侧梯度收集
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_12" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        批量传输
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_13" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        后端批量更新
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#_14" class="md-nav__link">
+  <a href="#7-fairness-checks-before-concluding" class="md-nav__link">
     <span class="md-ellipsis">
       
-        优化器状态管理
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="优化器状态管理">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_15" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        状态存储位置
+        7. Fairness Checks Before Concluding
       
     </span>
   </a>
   
 </li>
-        
-          <li class="md-nav__item">
-  <a href="#_16" class="md-nav__link">
+      
+        <li class="md-nav__item">
+  <a href="#8-interpretation-rules" class="md-nav__link">
     <span class="md-ellipsis">
       
-        初始化流程
+        8. Interpretation Rules
       
     </span>
   </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
@@ -2584,7 +1990,7 @@
 
 
   
-    <a href="https://github.com/RecStore/RecStore/edit/main/docs/calc/optimizer.md" title="编辑此页" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/RecStore/RecStore/edit/main/docs/agent/perf.md" title="编辑此页" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2592,461 +1998,134 @@
   
 
 
-<h1 id="_1">优化器与梯度更新<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h1>
-<h2 id="_2">概述<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
-<p>RecStore 采用后端优化架构：<strong>所有优化器逻辑（SGD、AdaGrad、RowWiseAdaGrad）在参数服务器后端实现</strong>。Python 侧仅负责梯度收集与传输，通过 <code>KVClientOp::EmbUpdate</code> 将梯度发送到 PS，由后端在存储层完成参数更新。</p>
-<h2 id="_3">架构<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>阶段</th>
-<th>模块</th>
-<th>文件路径</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1</td>
-<td>前向传播</td>
-<td><code>src/python/pytorch/torchrec/EmbeddingBag.py</code></td>
-<td>接收特征，调用 forward()</td>
-</tr>
-<tr>
-<td>2</td>
-<td>EmbeddingBag</td>
-<td><code>RecStoreEmbeddingBagCollection.forward()</code></td>
-<td>执行 _RecStoreEBCFunction.forward</td>
-</tr>
-<tr>
-<td>3</td>
-<td>梯度计算</td>
-<td><code>loss.backward()</code></td>
-<td>PyTorch 自动求导，触发 backward</td>
-</tr>
-<tr>
-<td>4</td>
-<td>梯度追踪</td>
-<td><code>_DistEmbFunction.backward()</code></td>
-<td>收集 (ID, grad) 对到 <code>_trace</code></td>
-</tr>
-<tr>
-<td>5</td>
-<td>梯度发送</td>
-<td><code>SparseOptimizer.step()</code></td>
-<td>遍历 _trace，调用 KVClient.update</td>
-</tr>
-<tr>
-<td>6</td>
-<td>后端更新</td>
-<td><code>KVClientOp.EmbUpdate()</code></td>
-<td>将梯度发送到 PS</td>
-</tr>
-<tr>
-<td>7</td>
-<td>优化器应用</td>
-<td><code>src/optimizer/optimizer.cpp</code></td>
-<td>PS 后端执行 SGD/AdaGrad 等更新</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_4">梯度追踪机制<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
-<h3 id="recstoreembeddingbagcollection">RecStoreEmbeddingBagCollection 梯度追踪<a class="headerlink" href="#recstoreembeddingbagcollection" title="Permanent link">&para;</a></h3>
-<p>反向传播时，_RecStoreEBCFunction.backward 将梯度追踪到模块的 _trace：</p>
-<p><strong>追踪流程</strong></p>
-<table>
-<thead>
-<tr>
-<th>步骤</th>
-<th>操作</th>
-<th>输出</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1</td>
-<td><code>for i, key in enumerate(feature_keys)</code></td>
-<td>遍历每个特征</td>
-</tr>
-<tr>
-<td>2</td>
-<td><code>config_name = module._config_names[key]</code></td>
-<td>获取嵌入表名</td>
-</tr>
-<tr>
-<td>3</td>
-<td><code>ids_to_update = values_cpu[start:end]</code></td>
-<td>提取该特征的 ID</td>
-</tr>
-<tr>
-<td>4</td>
-<td><code>grad_for_bag = grad_output_reshaped[sample_idx, i]</code></td>
-<td>提取该特征的梯度</td>
-</tr>
-<tr>
-<td>5</td>
-<td><code>module._trace.append((config_name, ids, grads))</code></td>
-<td>追踪到 _trace</td>
-</tr>
-</tbody>
-</table>
-<p><strong>追踪内容</strong></p>
-<table>
-<thead>
-<tr>
-<th>字段</th>
-<th>类型</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>config_name</td>
-<td>str</td>
-<td>嵌入表名称</td>
-</tr>
-<tr>
-<td>ids_to_update</td>
-<td>Tensor</td>
-<td>int64, [N] 的 ID</td>
-</tr>
-<tr>
-<td>grads_to_trace</td>
-<td>Tensor</td>
-<td>float32, [N, D] 的梯度</td>
-</tr>
-</tbody>
-</table>
-<h3 id="distembedding">DistEmbedding 梯度追踪<a class="headerlink" href="#distembedding" title="Permanent link">&para;</a></h3>
-<p>_DistEmbFunction.backward 对重复 ID 的梯度进行合并：</p>
-<p><strong>梯度合并流程</strong></p>
-<table>
-<thead>
-<tr>
-<th>步骤</th>
-<th>代码</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1</td>
-<td><code>unique_ids, inverse = torch.unique(ids_cpu, return_inverse=True)</code></td>
-<td>对 ID 去重，保留逆映射</td>
-</tr>
-<tr>
-<td>2</td>
-<td><code>grad_sum = torch.zeros((unique_ids.size(0), grad_cpu.size(1)))</code></td>
-<td>创建去重后的梯度容器</td>
-</tr>
-<tr>
-<td>3</td>
-<td><code>grad_sum.index_add_(0, inverse, grad_cpu)</code></td>
-<td>相同 ID 的梯度累加</td>
-</tr>
-<tr>
-<td>4</td>
-<td><code>module_instance._trace.append((unique_ids, grad_sum))</code></td>
-<td>追踪合并后的梯度</td>
-</tr>
-</tbody>
-</table>
-<h2 id="sparseoptimizer">SparseOptimizer<a class="headerlink" href="#sparseoptimizer" title="Permanent link">&para;</a></h2>
-<p><strong>Python 侧梯度收集与传输组件</strong>（不执行参数更新）</p>
-<h3 id="_5">接口<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">SparseOptimizer</span><span class="p">:</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">modules</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">torch</span><span class="o">.</span><span class="n">nn</span><span class="o">.</span><span class="n">Module</span><span class="p">]):</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;处理所有模块的梯度追踪&quot;&quot;&quot;</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>        <span class="k">for</span> <span class="n">module</span> <span class="ow">in</span> <span class="n">modules</span><span class="p">:</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>            <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">module</span><span class="p">,</span> <span class="s1">&#39;_trace&#39;</span><span class="p">):</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>                <span class="bp">self</span><span class="o">.</span><span class="n">_apply_gradients</span><span class="p">(</span><span class="n">module</span><span class="p">)</span>
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_apply_gradients</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">module</span><span class="p">):</span>
-<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">        </span><span class="sd">&quot;&quot;&quot;应用模块内记录的梯度&quot;&quot;&quot;</span>
+<h1 id="performance-comparison-capability">Performance Comparison Capability<a class="headerlink" href="#performance-comparison-capability" title="Permanent link">&para;</a></h1>
+<h2 id="1-scope">1. Scope<a class="headerlink" href="#1-scope" title="Permanent link">&para;</a></h2>
+<p>Use this guide when comparing:</p>
+<ul>
+<li>storage backends, index types, value stores, or memory placements</li>
+<li>BRPC, GRPC, LOCAL_SHM, RDMA, or other RecStore transports</li>
+<li>storage-only vs PS/network performance</li>
+<li>PS/network vs PyTorch/model performance</li>
+<li>RecStore vs third-party engines such as HPS, RocksDB, or HierarchicalKV</li>
+<li>a new optimization vs an existing baseline</li>
+</ul>
+<p>Do not turn one benchmark lane into an architecture-level claim.</p>
+<h2 id="2-layer-boundaries">2. Layer Boundaries<a class="headerlink" href="#2-layer-boundaries" title="Permanent link">&para;</a></h2>
+<p>Always label every result with one of these layers.</p>
+<h3 id="storage-only">Storage-only<a class="headerlink" href="#storage-only" title="Permanent link">&para;</a></h3>
+<p>Direct backend benchmark. This measures storage engine behavior without PS
+transport overhead.</p>
+<p>Use this layer for RecStore native backends and third-party engines unless those
+engines are explicitly integrated into PS and PyTorch paths.</p>
+<h3 id="psnetwork">PS/network<a class="headerlink" href="#psnetwork" title="Permanent link">&para;</a></h3>
+<p>Client/server benchmark through RecStore PS. This measures client routing,
+transport, server dispatch, serialization, and copy overhead.</p>
+<p>Do not use this layer to claim storage-engine superiority by itself.</p>
+<h3 id="pytorchmodel">PyTorch/model<a class="headerlink" href="#pytorchmodel" title="Permanent link">&para;</a></h3>
+<p>Model integration benchmark, usually through <code>model_zoo/rs_demo</code>.</p>
+<p>This layer includes ID preparation, lookup wait, EmbeddingBag pooling, sparse
+update scheduling, backward, and Python runner overhead.</p>
+<h2 id="3-default-matrix">3. Default Matrix<a class="headerlink" href="#3-default-matrix" title="Permanent link">&para;</a></h2>
+<p>Default DRAM backends:</p>
+<ul>
+<li><code>DRAM_UNORDERED_MAP + DRAM_VALUE_STORE</code></li>
+<li><code>DRAM_EXTENDIBLE_HASH + DRAM_VALUE_STORE</code></li>
+<li><code>DRAM_PET_HASH + DRAM_VALUE_STORE</code></li>
+<li>third-party backends only at integrated layers</li>
+</ul>
+<p>Baseline parameters:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>value_size = 512
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>record_count = 1,000,000
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>batch_size = 1024
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>threads = 16
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>distribution = uniform
 </code></pre></div>
-<h3 id="_6">工作流程<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>步骤</th>
-<th>代码位置</th>
-<th>代码</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1</td>
-<td>用户代码</td>
-<td><code>optimizer = SparseOptimizer(kv_client, lr=0.01)</code></td>
-<td>初始化优化器</td>
-</tr>
-<tr>
-<td>2</td>
-<td>模型</td>
-<td><code>output = emb_module(features)</code></td>
-<td>前向传播，执行嵌入查询</td>
-</tr>
-<tr>
-<td>3</td>
-<td>用户代码</td>
-<td><code>loss.backward()</code></td>
-<td>反向传播，收集梯度到 _trace</td>
-</tr>
-<tr>
-<td>4</td>
-<td><code>src/python/pytorch/recstore/optimizer.py</code></td>
-<td><code>optimizer.step([emb_module])</code></td>
-<td>遍历 _trace，调用 EmbUpdate 发送梯度</td>
-</tr>
-<tr>
-<td>5</td>
-<td><code>src/optimizer/optimizer.cpp</code></td>
-<td><code>SGD::Update() / AdaGrad::Update()</code></td>
-<td>PS 后端执行实际参数更新</td>
-</tr>
-<tr>
-<td>6</td>
-<td><code>src/python/pytorch/recstore/optimizer.py</code></td>
-<td><code>emb_module.reset_trace()</code></td>
-<td>清理追踪，为下一个 batch 做准备</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_7">后端优化器实现<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h2>
-<h3 id="kvclientopembupdate">KVClientOp::EmbUpdate<a class="headerlink" href="#kvclientopembupdate" title="Permanent link">&para;</a></h3>
-<p><strong>梯度传输接口</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">EmbUpdate</span><span class="p">(</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">keys</span><span class="p">,</span><span class="w"> </span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">grads</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<p>For paper reproduction, use the paper parameters instead of this baseline.</p>
+<h2 id="4-workflow">4. Workflow<a class="headerlink" href="#4-workflow" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Check branch, dirty files, and stale benchmark binaries.</li>
+<li>Run storage-only benchmarks first if measuring degradation.</li>
+<li>Run PS/network benchmarks with matching value size, key count, operation, and
+   backend where possible.</li>
+<li>Run PyTorch/model benchmarks after lower layers are understood.</li>
+<li>Aggregate raw results into CSV files.</li>
+<li>Report ratios only when numerator and denominator use compatible operation
+   and layer semantics.</li>
+</ol>
+<h2 id="5-required-records">5. Required Records<a class="headerlink" href="#5-required-records" title="Permanent link">&para;</a></h2>
+<p>Every comparison must record:</p>
+<ul>
+<li>goal</li>
+<li>branch and relevant commits</li>
+<li>compared objects and their layers</li>
+<li>exact commands, runner scripts, or raw output paths</li>
+<li>value size, capacity/record count, batch size, thread/process count</li>
+<li>distribution and operation mode</li>
+<li>repeat policy</li>
+<li>aggregate CSV paths</li>
+<li>warnings, startup failures, timeouts, OOMs, or allocator substitutions</li>
+</ul>
+<p>If a path fails before steady-state measurement, report it as startup,
+reachability, configuration, timeout, or OOM failure. Do not convert it into a
+throughput result.</p>
+<h2 id="6-aggregation">6. Aggregation<a class="headerlink" href="#6-aggregation" title="Permanent link">&para;</a></h2>
+<p>Use consistent units:</p>
+<ul>
+<li>storage-only: <code>M keys/s</code></li>
+<li>PS/network: <code>M keys/s</code></li>
+<li>PyTorch/model: <code>M rows/s</code> plus <code>ms</code></li>
+</ul>
+<p>Storage and PS:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>M keys/s = throughput_keys_sec / 1e6
 </code></pre></div>
-<table>
-<thead>
-<tr>
-<th>参数</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>keys</td>
-<td>uint64 张量 [N]</td>
-</tr>
-<tr>
-<td>grads</td>
-<td>float32 张量 [N, D]</td>
-</tr>
-</tbody>
-</table>
-<p><strong>功能</strong>: 将梯度通过 RPC 发送到参数服务器，不在客户端执行参数更新</p>
-<h3 id="_8">后端优化器<a class="headerlink" href="#_8" title="Permanent link">&para;</a></h3>
-<p><strong>实现位置</strong>: <code>src/optimizer/optimizer.cpp</code></p>
-<p><strong>支持的优化器</strong></p>
-<table>
-<thead>
-<tr>
-<th>优化器</th>
-<th>类名</th>
-<th>更新公式</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>SGD</td>
-<td><code>SGD::Update()</code></td>
-<td><code>emb -= lr * grad</code></td>
-<td>标准随机梯度下降</td>
-</tr>
-<tr>
-<td>AdaGrad</td>
-<td><code>AdaGrad::Update()</code></td>
-<td><code>sum_sq += grad^2</code><br><code>emb -= lr * grad / sqrt(sum_sq + eps)</code></td>
-<td>自适应学习率，每个参数独立累积</td>
-</tr>
-<tr>
-<td>RowWiseAdaGrad</td>
-<td><code>RowWiseAdaGrad::Update()</code></td>
-<td><code>sum_sq_row += sum(grad^2)</code><br><code>emb -= lr * grad / sqrt(sum_sq_row + eps)</code></td>
-<td>行级自适应，每行共享累积量</td>
-</tr>
-</tbody>
-</table>
-<p><strong>更新流程</strong></p>
-<table>
-<thead>
-<tr>
-<th>步骤</th>
-<th>代码位置</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1</td>
-<td><code>src/ps/base/base_ps_server.cpp</code></td>
-<td>PS 接收 UpdateParameter RPC</td>
-</tr>
-<tr>
-<td>2</td>
-<td><code>src/optimizer/optimizer.cpp:SGD::Update()</code></td>
-<td>从 BaseKV 读取当前参数</td>
-</tr>
-<tr>
-<td>3</td>
-<td>同上</td>
-<td>应用优化器公式更新参数</td>
-</tr>
-<tr>
-<td>4</td>
-<td>同上</td>
-<td>将更新后的参数写回 BaseKV</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_9">学习率配置<a class="headerlink" href="#_9" title="Permanent link">&para;</a></h2>
-<p>学习率在初始化嵌入表时通过配置传递给后端优化器</p>
-<h3 id="_10">配置方式<a class="headerlink" href="#_10" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>方式</th>
-<th>代码位置</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>配置文件</td>
-<td><code>recstore_config.json</code></td>
-<td>在 <code>embedding_tables</code> 中指定 <code>learning_rate</code></td>
-</tr>
-<tr>
-<td>初始化</td>
-<td><code>KVClient.init_embedding_table()</code></td>
-<td>通过 <code>EmbeddingTableConfig</code> 传递学习率</td>
-</tr>
-<tr>
-<td>后端存储</td>
-<td><code>src/optimizer/optimizer.cpp:Init()</code></td>
-<td>优化器初始化时保存每个表的学习率</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_11">梯度传输与聚合<a class="headerlink" href="#_11" title="Permanent link">&para;</a></h2>
-<h3 id="python">Python 侧梯度收集<a class="headerlink" href="#python" title="Permanent link">&para;</a></h3>
-<p>梯度追踪在 Python 内存中进行，不涉及参数更新</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">_trace</span> <span class="o">=</span> <span class="p">[</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="p">(</span><span class="n">table_name</span><span class="p">,</span> <span class="n">ids</span><span class="p">,</span> <span class="n">grads</span><span class="p">),</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="p">(</span><span class="n">table_name</span><span class="p">,</span> <span class="n">ids</span><span class="p">,</span> <span class="n">grads</span><span class="p">),</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="o">...</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">]</span>
+<p>PyTorch EmbeddingBag:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>rows_per_step = batch_size * sparse_features_per_sample
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>read M rows/s = rows_per_step / (embed_lookup_local_ms / 1000) / 1e6
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>write M rows/s = rows_per_step / (sparse_update_ms / 1000) / 1e6
 </code></pre></div>
-<h3 id="_12">批量传输<a class="headerlink" href="#_12" title="Permanent link">&para;</a></h3>
-<p>SparseOptimizer 逐条处理 _trace，每个 (ids, grads) 通过 <code>KVClientOp.EmbUpdate</code> 发送到 PS</p>
-<table>
-<thead>
-<tr>
-<th>步骤</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1</td>
-<td><code>SparseOptimizer.step()</code> 遍历 <code>_trace</code></td>
-</tr>
-<tr>
-<td>2</td>
-<td>调用 <code>kv_client.update(table_name, ids, grads)</code></td>
-</tr>
-<tr>
-<td>3</td>
-<td><code>KVClientOp::EmbUpdate</code> 通过 gRPC/BRPC 发送到 PS</td>
-</tr>
-<tr>
-<td>4</td>
-<td>PS 后端优化器执行参数更新</td>
-</tr>
-</tbody>
-</table>
-<h3 id="_13">后端批量更新<a class="headerlink" href="#_13" title="Permanent link">&para;</a></h3>
-<p>PS 接收到梯度后，<code>src/optimizer/optimizer.cpp</code> 批量处理：</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kt">void</span><span class="w"> </span><span class="nf">SGD::Update</span><span class="p">(</span><span class="n">string</span><span class="w"> </span><span class="n">table</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint64_t</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">keys</span><span class="p">,</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">                 </span><span class="k">const</span><span class="w"> </span><span class="n">vector</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">float</span><span class="o">&gt;&gt;&amp;</span><span class="w"> </span><span class="n">grads</span><span class="p">,</span><span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">tid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">    </span><span class="n">vector</span><span class="o">&lt;</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">float</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="n">current_values</span><span class="p">(</span><span class="n">keys</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="n">base_kv_</span><span class="o">-&gt;</span><span class="n">Get</span><span class="p">(</span><span class="n">keys</span><span class="p">,</span><span class="w"> </span><span class="n">current_values</span><span class="p">);</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">keys</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">grads</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">            </span><span class="n">current_values</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="n">j</span><span class="p">]</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">learning_rate_</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">grads</span><span class="p">[</span><span class="n">i</span><span class="p">][</span><span class="n">j</span><span class="p">];</span>
-<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">        </span><span class="p">}</span>
-<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">    </span><span class="p">}</span>
-<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>
-<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">    </span><span class="n">base_kv_</span><span class="o">-&gt;</span><span class="n">Put</span><span class="p">(</span><span class="n">keys</span><span class="p">,</span><span class="w"> </span><span class="n">current_values</span><span class="p">);</span>
-<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="p">}</span>
+<p>Layer retention:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>PS retention = PS M keys/s / storage-only M keys/s
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>PyTorch retention = PyTorch M rows/s / PS M keys/s
 </code></pre></div>
-<h2 id="_14">优化器状态管理<a class="headerlink" href="#_14" title="Permanent link">&para;</a></h2>
-<h3 id="_15">状态存储位置<a class="headerlink" href="#_15" title="Permanent link">&para;</a></h3>
-<p><strong>AdaGrad/RowWiseAdaGrad 的累积梯度平方和存储在后端</strong></p>
-<table>
-<thead>
-<tr>
-<th>优化器</th>
-<th>状态</th>
-<th>存储位置</th>
-<th>数据结构</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>SGD</td>
-<td>无</td>
-<td>-</td>
-<td>仅存储参数本身</td>
-</tr>
-<tr>
-<td>AdaGrad</td>
-<td><code>sum_squared_gradients</code></td>
-<td><code>src/optimizer/optimizer.cpp</code></td>
-<td><code>unordered_map&lt;uint64_t, vector&lt;float&gt;&gt;</code></td>
-</tr>
-<tr>
-<td>RowWiseAdaGrad</td>
-<td><code>sum_squared_gradients_row</code></td>
-<td>同上</td>
-<td><code>unordered_map&lt;uint64_t, float&gt;</code></td>
-</tr>
-</tbody>
-</table>
-<h3 id="_16">初始化流程<a class="headerlink" href="#_16" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>步骤</th>
-<th>代码位置</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1</td>
-<td><code>src/ps/base/base_ps_server.cpp</code></td>
-<td>接收 InitEmbeddingTable RPC</td>
-</tr>
-<tr>
-<td>2</td>
-<td><code>src/optimizer/optimizer.cpp:Init()</code></td>
-<td>为嵌入表分配优化器状态存储</td>
-</tr>
-<tr>
-<td>3</td>
-<td>同上</td>
-<td>初始化学习率、epsilon 等超参数</td>
-</tr>
-</tbody>
-</table>
+<p>Call ratios "retention" or "remaining throughput", not speedup. If retention is
+above <code>1.0</code>, explain timing-boundary mismatch instead of claiming the higher
+layer is faster.</p>
+<h2 id="7-fairness-checks-before-concluding">7. Fairness Checks Before Concluding<a class="headerlink" href="#7-fairness-checks-before-concluding" title="Permanent link">&para;</a></h2>
+<p>Before concluding, confirm:</p>
+<ul>
+<li>same value size, operation mode, and distribution, or differences explained</li>
+<li>same key/row scale, or capacity policy stated</li>
+<li>PyTorch warmup rows excluded</li>
+<li>third-party engines compared only at integrated layers</li>
+<li>GPU/HBM assumptions stated for TorchRec or GPU paths</li>
+<li>shared-memory and RPC results not collapsed into one generic conclusion</li>
+<li>CPU affinity, readiness, timeout, and allocator warnings recorded</li>
+</ul>
+<h2 id="8-interpretation-rules">8. Interpretation Rules<a class="headerlink" href="#8-interpretation-rules" title="Permanent link">&para;</a></h2>
+<p>Good conclusions:</p>
+<ul>
+<li>"At storage-only layer, <code>DRAM_PET_HASH</code> has higher read throughput under this
+  uniform workload."</li>
+<li>"After PS/network, read throughput converges, suggesting transport and
+  client/server overhead dominate this setting."</li>
+</ul>
+<p>Bad conclusions:</p>
+<ul>
+<li>"<code>DRAM_PET_HASH</code> is always better."</li>
+<li>"LOCAL_SHM must be fastest because it uses shared memory."</li>
+<li>"PyTorch is faster than PS because converted rows/s is larger."</li>
+</ul>
+<p>Common caveats:</p>
+<ul>
+<li>LOCAL_SHM can be slower than RPC if queue, slot, synchronization, or copy cost
+  dominates.</li>
+<li><code>DRAM_UNORDERED_MAP</code> may lose less after PS because PS overhead hides faster
+  storage engines' advantage.</li>
+<li>Third-party storage-only numbers do not belong in PS/network or PyTorch tables
+  until those integrations exist.</li>
+<li><code>PersistLoopShmMalloc</code> is acceptable for local bring-up when <code>R2ShmMalloc</code> is
+  unstable, but the report must say so.</li>
+</ul>
 
 
 

@@ -12,13 +12,13 @@
         <meta name="author" content="RecStore Team">
       
       
-        <link rel="canonical" href="https://Choimoe.github.io/RecStore/storage/cacheps/">
+        <link rel="canonical" href="https://Choimoe.github.io/RecStore/calc/interfaces/">
       
       
         <link rel="prev" href="../">
       
       
-        <link rel="next" href="../basekv/">
+        <link rel="next" href="../embedding_optimizer/">
       
       
         
@@ -29,7 +29,7 @@
     
     
       
-        <title>CachePS 层 - RecStore Documentation</title>
+        <title>接口边界 - RecStore Documentation</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#cacheps" class="md-skip">
+        <a href="#_1" class="md-skip">
           跳转至
         </a>
       
@@ -114,7 +114,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              CachePS 层
+              接口边界
             
           </span>
         </div>
@@ -765,6 +765,8 @@
                 
   
   
+    
+  
   
   
     
@@ -780,11 +782,11 @@
       
     
     
-    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" >
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_2" checked>
         
           
           <label class="md-nav__link" for="__nav_3_2" id="__nav_3_2_label" tabindex="">
@@ -805,7 +807,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_2_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_3_2">
             <span class="md-nav__icon md-icon"></span>
             
@@ -823,7 +825,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../calc/" class="md-nav__link">
+      <a href="../" class="md-nav__link">
         
   
   
@@ -848,17 +850,44 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../calc/op_interface/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    接口边界
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
   <span class="md-ellipsis">
     
   
-    CommonOp 接口
+    接口边界
   
 
     
@@ -867,6 +896,59 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="目录">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      目录
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#python-client" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Python client
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pytorch-op" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        PyTorch op
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#commonop-kvclientop" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CommonOp / KVClientOp
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -879,98 +961,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../../calc/kvclient/" class="md-nav__link">
+      <a href="../embedding_optimizer/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    KVClient 客户端
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../calc/pytorch_binding/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    PyTorch C++ 扩展
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../calc/embedding_modules/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    EmbeddingBag 模块
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../calc/optimizer/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    优化器与梯度更新
+    Embedding 与 Optimizer
   
 
     
@@ -1227,8 +1225,6 @@
                 
   
   
-    
-  
   
   
     
@@ -1244,11 +1240,11 @@
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" checked>
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3_4" >
         
           
           <label class="md-nav__link" for="__nav_3_4" id="__nav_3_4_label" tabindex="">
@@ -1269,7 +1265,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_3_4_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_3_4">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1287,239 +1283,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../" class="md-nav__link">
+      <a href="../../storage/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    架构总览
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-    
-  
-  
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    CachePS 层
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    CachePS 层
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="目录">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      目录
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#_1" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        概述
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_2" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        类定义
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_3" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        核心功能
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="核心功能">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_4" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        初始化
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        参数操作
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_6" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        数据结构
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="数据结构">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#taskelement" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        TaskElement
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#parameterpack" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        ParameterPack
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#basekv" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        与 BaseKV 的交互
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_7" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        成员变量
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../basekv/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    BaseKV 抽象
+    存储层总览
   
 
     
@@ -1540,14 +1311,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../kv_engines/" class="md-nav__link">
+      <a href="../../storage/basekv/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    KV 引擎实现
+    BaseKV 与 Engine
   
 
     
@@ -1568,14 +1339,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../memory/" class="md-nav__link">
+      <a href="../../storage/composite_kvengine/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    内存管理
+    KVEngineComposite
   
 
     
@@ -2178,10 +1949,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#_1" class="md-nav__link">
+  <a href="#python-client" class="md-nav__link">
     <span class="md-ellipsis">
       
-        概述
+        Python client
       
     </span>
   </a>
@@ -2189,10 +1960,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#_2" class="md-nav__link">
+  <a href="#pytorch-op" class="md-nav__link">
     <span class="md-ellipsis">
       
-        类定义
+        PyTorch op
       
     </span>
   </a>
@@ -2200,99 +1971,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#_3" class="md-nav__link">
+  <a href="#commonop-kvclientop" class="md-nav__link">
     <span class="md-ellipsis">
       
-        核心功能
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="核心功能">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_4" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        初始化
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        参数操作
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_6" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        数据结构
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="数据结构">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#taskelement" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        TaskElement
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#parameterpack" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        ParameterPack
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#basekv" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        与 BaseKV 的交互
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_7" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        成员变量
+        CommonOp / KVClientOp
       
     </span>
   </a>
@@ -2316,7 +1998,7 @@
 
 
   
-    <a href="https://github.com/RecStore/RecStore/edit/main/docs/storage/cacheps.md" title="编辑此页" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/RecStore/RecStore/edit/main/docs/calc/interfaces.md" title="编辑此页" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2324,192 +2006,151 @@
   
 
 
-<h1 id="cacheps">CachePS 层<a class="headerlink" href="#cacheps" title="Permanent link">&para;</a></h1>
-<h2 id="_1">概述<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
-<p>CachePS 是参数服务器与存储引擎之间的接口层，位于 <code>ps/base/cache_ps_impl.h</code>，负责将参数服务器的参数操作转换为 BaseKV 的 KV 存储操作。</p>
-<h2 id="_2">类定义<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">CachePS</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="k">using</span><span class="w"> </span><span class="kt">key_t</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">uint64_t</span><span class="p">;</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="n">CachePS</span><span class="p">(</span><span class="n">json</span><span class="w"> </span><span class="n">config</span><span class="p">);</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="nf">Initialize</span><span class="p">(</span><span class="n">model_config_path</span><span class="p">,</span><span class="w"> </span><span class="n">emb_file_path</span><span class="p">);</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">PutParameter</span><span class="p">(</span><span class="n">reader</span><span class="p">,</span><span class="w"> </span><span class="n">tid</span><span class="p">);</span>
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">GetParameter</span><span class="p">(</span><span class="n">keys</span><span class="p">,</span><span class="w"> </span><span class="n">output</span><span class="p">);</span>
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">Clear</span><span class="p">();</span>
-<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="p">};</span>
+<h1 id="_1">计算层接口<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h1>
+<p>这一页记录计算层的边界接口：Python client、PyTorch op、C++ facade。模型代码通常只用 <code>RecStoreClient</code> 或 embedding 模块，不直接碰 <code>KVClientOp</code>。</p>
+<h2 id="python-client">Python client<a class="headerlink" href="#python-client" title="Permanent link">&para;</a></h2>
+<p>文件：<code>src/python/pytorch/recstore/KVClient.py</code></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">recstore.KVClient</span><span class="w"> </span><span class="kn">import</span> <span class="n">RecStoreClient</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">client</span> <span class="o">=</span> <span class="n">RecStoreClient</span><span class="p">(</span><span class="n">library_path</span><span class="o">=</span><span class="s2">&quot;/path/to/lib_recstore_ops.so&quot;</span><span class="p">)</span>
 </code></pre></div>
-<h2 id="_3">核心功能<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
-<h3 id="_4">初始化<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h3>
-<p>CachePS 根据配置创建 BaseKV 实例：</p>
+<p><code>RecStoreClient</code> 按 role 缓存实例。未传 <code>library_path</code> 时，代码按构建目录约定查找 <code>lib_recstore_ops.so</code>。</p>
 <table>
 <thead>
 <tr>
-<th>步骤</th>
-<th>操作</th>
+<th>API</th>
+<th>作用</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>1</td>
-<td>解析 JSON 配置</td>
+<td><code>init_data(name, shape, dtype, init_func=None)</code></td>
+<td>初始化后端表，记录本地元数据，写入初始值。</td>
 </tr>
 <tr>
-<td>2</td>
-<td>构造 BaseKVConfig</td>
+<td><code>pull(name, ids)</code></td>
+<td>读取 <code>[N, D]</code> embedding。</td>
 </tr>
 <tr>
-<td>3</td>
-<td>调用 ResolveEngine 推导引擎类型</td>
+<td><code>push(name, ids, data)</code></td>
+<td>写入 <code>[N, D]</code> embedding。</td>
 </tr>
 <tr>
-<td>4</td>
-<td>使用工厂创建 BaseKV 实例</td>
+<td><code>prefetch(ids)</code> / <code>wait_for_prefetch(handle)</code></td>
+<td>异步预取。</td>
+</tr>
+<tr>
+<td><code>update(name, ids, grads)</code></td>
+<td>发送 sparse gradients。</td>
+</tr>
+<tr>
+<td><code>set_ps_config(host, port)</code></td>
+<td>重建底层 PS client。</td>
+</tr>
+<tr>
+<td><code>set_ps_backend(backend)</code></td>
+<td>切换 RPC、本地共享内存或 HierKV 路径。</td>
 </tr>
 </tbody>
 </table>
-<p>配置结构：</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="nt">&quot;num_threads&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">16</span><span class="p">,</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="nt">&quot;base_kv_config&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/data/recstore&quot;</span><span class="p">,</span>
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="nt">&quot;index_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DRAM&quot;</span><span class="p">,</span>
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="nt">&quot;value_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SSD&quot;</span><span class="p">,</span>
-<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="nt">&quot;capacity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span><span class="p">,</span>
-<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">    </span><span class="nt">&quot;value_size&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">128</span>
-<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">  </span><span class="p">}</span>
-<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="p">}</span>
-</code></pre></div>
-<h3 id="_5">参数操作<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h3>
-<p><strong>PutParameter</strong> - 批量写入参数</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kt">void</span><span class="w"> </span><span class="n">PutParameter</span><span class="p">(</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="n">coroutine</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">&gt;::</span><span class="n">push_type</span><span class="o">&amp;</span><span class="w"> </span><span class="n">sink</span><span class="p">,</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">ParameterCompressReader</span><span class="o">*</span><span class="w"> </span><span class="n">reader</span><span class="p">,</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">tid</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">)</span>
-</code></pre></div>
-<p>工作流程：
-1. 从 reader 解压参数数据
-2. 提取 keys 和 values
-3. 调用 BaseKV.BatchPut
-4. 通过协程支持大批量数据</p>
-<p><strong>GetParameter</strong> - 批量读取参数</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kt">void</span><span class="w"> </span><span class="n">GetParameter</span><span class="p">(</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="n">base</span><span class="o">::</span><span class="n">ConstArray</span><span class="o">&lt;</span><span class="kt">key_t</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">keys</span><span class="p">,</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="n">base</span><span class="o">::</span><span class="n">MutableArray</span><span class="o">&lt;</span><span class="n">ParameterPack</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">packs</span><span class="p">,</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">tid</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="p">)</span>
-</code></pre></div>
-<p>工作流程：
-1. 准备输出缓冲区
-2. 调用 BaseKV.BatchGet
-3. 将结果打包到 ParameterPack</p>
-<p><strong>PutSingleParameter</strong> - 单个参数写入</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kt">void</span><span class="w"> </span><span class="n">PutSingleParameter</span><span class="p">(</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">key</span><span class="p">,</span><span class="w"> </span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">dim</span><span class="p">,</span><span class="w"> </span>
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">tid</span>
-<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="p">)</span>
-</code></pre></div>
-<p>直接调用 BaseKV.Put，适用于单个参数的更新。</p>
-<h2 id="_6">数据结构<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h2>
-<h3 id="taskelement">TaskElement<a class="headerlink" href="#taskelement" title="Permanent link">&para;</a></h3>
-<p>用于异步任务队列的元素：</p>
+<details class="warning">
+<summary>delete_data 的边界</summary>
+<p><code>delete_data</code> 只清理 Python 本地元数据，不删除后端数据。不要把它当成存储清理接口。</p>
+</details>
+<h2 id="pytorch-op">PyTorch op<a class="headerlink" href="#pytorch-op" title="Permanent link">&para;</a></h2>
+<p>文件：<code>src/framework/pytorch/op_torch.cc</code></p>
 <table>
 <thead>
 <tr>
-<th>字段</th>
-<th>类型</th>
-<th>说明</th>
+<th>op</th>
+<th>作用</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>keys</td>
-<td>ConstArray<key_t></td>
-<td>参数键数组</td>
+<td><code>emb_read(keys, embedding_dim)</code></td>
+<td>同步读取，返回 <code>[N, D]</code>。</td>
 </tr>
 <tr>
-<td>packs</td>
-<td>MutableArray<ParameterPack></td>
-<td>输出打包数组</td>
+<td><code>emb_write(keys, values)</code></td>
+<td>同步写入。</td>
 </tr>
 <tr>
-<td>promise</td>
-<td>atomic_bool*</td>
-<td>完成标志</td>
+<td><code>emb_update_table(table, keys, grads)</code></td>
+<td>带表名更新。</td>
+</tr>
+<tr>
+<td><code>init_embedding_table(name, num_embeddings, embedding_dim)</code></td>
+<td>创建后端表。</td>
+</tr>
+<tr>
+<td><code>emb_prefetch(keys)</code> / <code>emb_wait_result(handle, embedding_dim)</code></td>
+<td>预取。</td>
+</tr>
+<tr>
+<td><code>set_ps_config(host, port)</code> / <code>set_ps_backend(backend)</code></td>
+<td>连接与后端选择。</td>
+</tr>
+<tr>
+<td><code>local_lookup_flat(keys, embedding_dim)</code></td>
+<td>本地快路径读取。</td>
+</tr>
+<tr>
+<td><code>local_update_flat(table, keys, grads)</code></td>
+<td>本地快路径更新。</td>
 </tr>
 </tbody>
 </table>
-<h3 id="parameterpack">ParameterPack<a class="headerlink" href="#parameterpack" title="Permanent link">&para;</a></h3>
-<p>参数压缩打包格式：</p>
+<p>张量要求：</p>
 <table>
 <thead>
 <tr>
-<th>字段</th>
-<th>说明</th>
+<th>参数</th>
+<th>要求</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>key</td>
-<td>参数键</td>
+<td><code>keys</code></td>
+<td>int64，1D，contiguous。</td>
 </tr>
 <tr>
-<td>dim</td>
-<td>参数维度</td>
+<td><code>values</code></td>
+<td>float32，2D，contiguous，行数等于 <code>keys.numel()</code>。</td>
 </tr>
 <tr>
-<td>emb_data</td>
-<td>浮点数据指针</td>
+<td><code>grads</code></td>
+<td>float32，2D，contiguous。</td>
+</tr>
+<tr>
+<td><code>embedding_dim</code></td>
+<td>大于 0。</td>
 </tr>
 </tbody>
 </table>
-<h2 id="basekv">与 BaseKV 的交互<a class="headerlink" href="#basekv" title="Permanent link">&para;</a></h2>
-<p>CachePS 通过以下接口与 BaseKV 交互：</p>
-<table>
-<thead>
-<tr>
-<th>CachePS 方法</th>
-<th>BaseKV 方法</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>PutParameter</td>
-<td>BatchPut</td>
-<td>批量写入</td>
-</tr>
-<tr>
-<td>GetParameter</td>
-<td>BatchGet</td>
-<td>批量读取</td>
-</tr>
-<tr>
-<td>PutSingleParameter</td>
-<td>Put</td>
-<td>单个写入</td>
-</tr>
-</tbody>
-</table>
-<h2 id="_7">成员变量<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>成员</th>
-<th>类型</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>base_kv_</td>
-<td>unique_ptr<BaseKV></td>
-<td>KV 引擎实例</td>
-</tr>
-</tbody>
-</table>
+<p>CUDA tensor 会复制到 CPU 后调用 <code>CommonOp</code>。读取结果按输入设备返回。</p>
+<h2 id="commonop-kvclientop">CommonOp / KVClientOp<a class="headerlink" href="#commonop-kvclientop" title="Permanent link">&para;</a></h2>
+<p>文件：<code>src/framework/op.h</code>、<code>src/framework/op.cc</code></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">CommonOp</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w"> </span><span class="k">public</span><span class="o">:</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">EmbRead</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">keys</span><span class="p">,</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">values</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">EmbWrite</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">keys</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">values</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="nf">EmbUpdate</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">table_name</span><span class="p">,</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">                         </span><span class="k">const</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">keys</span><span class="p">,</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">                         </span><span class="k">const</span><span class="w"> </span><span class="n">RecTensor</span><span class="o">&amp;</span><span class="w"> </span><span class="n">grads</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="nf">InitEmbeddingTable</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">table_name</span><span class="p">,</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">                                  </span><span class="k">const</span><span class="w"> </span><span class="n">EmbeddingTableConfig</span><span class="o">&amp;</span><span class="w"> </span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="p">};</span>
+</code></pre></div>
+<p><code>KVClientOp</code> 是默认实现。它根据配置选择远程 PS client 或本地 HierKV runtime。</p>
+<details class="note">
+<summary>新增接口时要改哪些文件</summary>
+<p>至少同步修改 <code>op.h</code>、<code>op.cc</code>、<code>op_torch.cc</code>。mock 路径也要补齐，否则 Python 单测可能只覆盖假实现。</p>
+</details>
+<details class="warning">
+<summary>占位接口</summary>
+<p><code>EmbWriteAsync</code>、<code>IsWriteDone</code>、<code>WaitForWrite</code>、<code>SaveToFile</code>、<code>LoadFromFile</code> 仍是占位接口。不要写成可用能力。</p>
+</details>
 
 
 

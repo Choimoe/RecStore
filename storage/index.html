@@ -18,7 +18,7 @@
         <link rel="prev" href="../parameter_server/rdma/">
       
       
-        <link rel="next" href="cacheps/">
+        <link rel="next" href="basekv/">
       
       
         
@@ -29,7 +29,7 @@
     
     
       
-        <title>架构总览 - RecStore Documentation</title>
+        <title>存储层总览 - RecStore Documentation</title>
       
     
     
@@ -114,7 +114,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              架构总览
+              存储层总览
             
           </span>
         </div>
@@ -851,14 +851,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../calc/op_interface/" class="md-nav__link">
+      <a href="../calc/interfaces/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    CommonOp 接口
+    接口边界
   
 
     
@@ -879,98 +879,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../calc/kvclient/" class="md-nav__link">
+      <a href="../calc/embedding_optimizer/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    KVClient 客户端
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../calc/pytorch_binding/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    PyTorch C++ 扩展
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../calc/embedding_modules/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    EmbeddingBag 模块
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../calc/optimizer/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    优化器与梯度更新
+    Embedding 与 Optimizer
   
 
     
@@ -1303,7 +1219,7 @@
   <span class="md-ellipsis">
     
   
-    架构总览
+    存储层总览
   
 
     
@@ -1321,7 +1237,7 @@
   <span class="md-ellipsis">
     
   
-    架构总览
+    存储层总览
   
 
     
@@ -1350,7 +1266,7 @@
   <a href="#_1" class="md-nav__link">
     <span class="md-ellipsis">
       
-        概述
+        在系统中的位置
       
     </span>
   </a>
@@ -1361,7 +1277,29 @@
   <a href="#_2" class="md-nav__link">
     <span class="md-ellipsis">
       
-        架构分层
+        代码目录
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cacheps-basekv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CachePS 与 BaseKV
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#kvenginecomposite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        KVEngineComposite 读写路径（默认）
       
     </span>
   </a>
@@ -1372,7 +1310,7 @@
   <a href="#_3" class="md-nav__link">
     <span class="md-ellipsis">
       
-        模块说明
+        文档索引
       
     </span>
   </a>
@@ -1383,46 +1321,7 @@
   <a href="#_4" class="md-nav__link">
     <span class="md-ellipsis">
       
-        数据流
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="数据流">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        写入流程
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_6" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        读取流程
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_7" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        引擎选择
+        验证与基准
       
     </span>
   </a>
@@ -1445,34 +1344,6 @@
   
   
     <li class="md-nav__item">
-      <a href="cacheps/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    CachePS 层
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="basekv/" class="md-nav__link">
         
   
@@ -1480,7 +1351,7 @@
   <span class="md-ellipsis">
     
   
-    BaseKV 抽象
+    BaseKV 与 Engine
   
 
     
@@ -1501,42 +1372,14 @@
   
   
     <li class="md-nav__item">
-      <a href="kv_engines/" class="md-nav__link">
+      <a href="composite_kvengine/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    KV 引擎实现
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="memory/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    内存管理
+    KVEngineComposite
   
 
     
@@ -2142,7 +1985,7 @@
   <a href="#_1" class="md-nav__link">
     <span class="md-ellipsis">
       
-        概述
+        在系统中的位置
       
     </span>
   </a>
@@ -2153,7 +1996,29 @@
   <a href="#_2" class="md-nav__link">
     <span class="md-ellipsis">
       
-        架构分层
+        代码目录
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cacheps-basekv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CachePS 与 BaseKV
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#kvenginecomposite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        KVEngineComposite 读写路径（默认）
       
     </span>
   </a>
@@ -2164,7 +2029,7 @@
   <a href="#_3" class="md-nav__link">
     <span class="md-ellipsis">
       
-        模块说明
+        文档索引
       
     </span>
   </a>
@@ -2175,46 +2040,7 @@
   <a href="#_4" class="md-nav__link">
     <span class="md-ellipsis">
       
-        数据流
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="数据流">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#_5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        写入流程
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#_6" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        读取流程
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#_7" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        引擎选择
+        验证与基准
       
     </span>
   </a>
@@ -2247,155 +2073,190 @@
 
 
 <h1 id="recstore">RecStore 存储层<a class="headerlink" href="#recstore" title="Permanent link">&para;</a></h1>
-<h2 id="_1">概述<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
-<p>存储层负责参数和嵌入向量的持久化存储与检索，从参数服务器的 CachePS 层向下，经过 BaseKV 抽象层，到具体的 KV 引擎实现，最终对接到内存管理器。</p>
-<h2 id="_2">架构分层<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
+<p>存储层为参数服务器提供本地键值语义：<code>uint64_t key -&gt; embedding 字节</code>。请求由 <code>CachePS</code> 经 <code>BaseKV</code> 接口下发；具体落盘/落内存策略由 <code>engine_type</code> 选择的 KV 引擎决定。</p>
+<h2 id="_1">在系统中的位置<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h2>
 <pre class="mermaid"><code>graph TD
-    Client[PSClient] -- "GetParameter/UpdateParameter/..." --&gt; Server[ParameterService&lt;br&gt;src/ps/grpc/grpc_ps_server.cpp]
-    Server --&gt; CachePS[CachePS&lt;br&gt;ps/base/cache_ps_impl.h]
-    CachePS --&gt; BaseKV[BaseKV&lt;br&gt;storage/kv_engine/base_kv.h]
-
-    BaseKV --&gt; EngineGroup
-
-    subgraph EngineGroup[KV Engine 实现]
-        direction TB
-        KVEngineExtendibleHash
-        KVEngineCCEH
-        KVEngineHybrid
-        KVEnginePetKV
-    end
-
-    EngineGroup --&gt; MemMgr
-
-    subgraph MemMgr[内存管理]
-        direction TB
-        PLSM[PersistLoopShmMalloc]
-        R2SM[R2ShmMalloc]
-        PSM[PersistSimpleMalloc]
-    end</code></pre>
-<h2 id="_3">模块说明<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
-<p>详细文档：</p>
+    Client[PSClient / Trainer] --&gt; RPC[brpc / gRPC / RDMA / LocalShm]
+    RPC --&gt; PS[ParameterService]
+    PS --&gt; CachePS[CachePS]
+    CachePS --&gt; BaseKV[BaseKV]
+    BaseKV --&gt; E1[KVEngineComposite]
+    BaseKV --&gt; E2[KVEnginePetKV]
+    BaseKV --&gt; E3[KVEngineFasterKV / HPS ...]
+    E1 --&gt; Index[Index]
+    E1 --&gt; VS[ValueStore]
+    VS --&gt; Mem[memory/ allocators]
+    VS --&gt; IO[IOBackend]</code></pre>
 <ul>
-<li><a href="cacheps/">cacheps.md</a> - CachePS 层</li>
-<li><a href="basekv/">basekv.md</a> - BaseKV 抽象接口</li>
-<li><a href="kv_engines/">kv_engines.md</a> - KV 引擎实现</li>
-<li><a href="memory/">memory.md</a> - 内存管理层</li>
+<li><strong>参数服务</strong>（<code>src/ps/</code>）：协议、分片、压缩、优化器；不直接操作 <code>Index</code> / <code>ValueStore</code>。</li>
+<li><strong>KV 引擎</strong>（<code>src/storage/kv_engine/</code>）：实现 <code>BaseKV</code>，对外隐藏索引与 value 布局。</li>
+<li><strong>可组合组件</strong>（<code>src/storage/index/</code>、<code>value_store/</code>、<code>io_backend/</code>、<code>allocator/</code>）：主要由 <code>KVEngineComposite</code> 组装；也可被测试或后续引擎单独使用。</li>
+<li><strong>外部与遗留适配</strong>（<code>src/storage/external/</code>、<code>src/storage/nvm/pet_kv/</code>）：FasterKV、HugeCTR HPS、PetKV 等整包实现。</li>
 </ul>
-<h2 id="_4">数据流<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
-<h3 id="_5">写入流程<a class="headerlink" href="#_5" title="Permanent link">&para;</a></h3>
+<p>引擎选择与 <code>BaseKV</code> 接口说明见 <a href="basekv/">basekv.md</a>。默认生产路径为 <strong><code>KVEngineComposite</code></strong>，组件与配置见 <a href="composite_kvengine/">composite_kvengine.md</a>。</p>
+<h2 id="_2">代码目录<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
 <tr>
-<th>步骤</th>
-<th>操作</th>
-<th>说明</th>
+<th>目录 / 文件</th>
+<th>职责</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>1</td>
-<td>GRPCPSClient.PutParameter(keys, values)</td>
-<td>前端/训练端批量提交键和值</td>
+<td><code>src/ps/base/cache_ps_impl.h</code></td>
+<td>从 <code>cache_ps.base_kv_config</code> 构造 <code>BaseKV</code></td>
 </tr>
 <tr>
-<td>2</td>
-<td>CachePS.PutParameter(reader, tid)</td>
-<td>解压参数、准备批量写入请求</td>
+<td><code>src/storage/kv_engine/base_kv.h</code></td>
+<td><code>BaseKV</code> / <code>BaseKVConfig</code> 抽象</td>
 </tr>
 <tr>
-<td>3</td>
-<td>BaseKV.BatchPut(keys, values, tid)</td>
-<td>统一封装 KV 接口，分发到具体引擎</td>
+<td><code>src/storage/kv_engine/engine_selector.h</code></td>
+<td><code>ResolveEngine</code>：<code>engine_type</code> 解析</td>
 </tr>
 <tr>
-<td>4</td>
-<td>KVEngine.Put(key, value_view, tid)</td>
-<td>按引擎策略写入 (内存/SSD/混合/NVM)</td>
+<td><code>src/storage/kv_engine/engine_composite.h</code></td>
+<td>默认组合引擎</td>
 </tr>
 <tr>
-<td>5</td>
-<td>MallocApi.New(size) → 分配内存地址</td>
-<td>内存管理器分配持久化地址，返回指针/偏移</td>
+<td><code>src/storage/kv_engine/engine_petkv.h</code></td>
+<td>PetKV 引擎</td>
 </tr>
 <tr>
-<td>6</td>
-<td>写入数据到分配的内存</td>
-<td>值落盘/落 PMEM，完成一次写入</td>
+<td><code>src/storage/kv_engine/kv_engine_register.cc</code></td>
+<td>链接 IO 后端等注册单元</td>
+</tr>
+<tr>
+<td><code>src/storage/index/</code></td>
+<td><code>Index</code>：key → value handle</td>
+</tr>
+<tr>
+<td><code>src/storage/value_store/</code></td>
+<td><code>ValueStore</code>：handle → 字节</td>
+</tr>
+<tr>
+<td><code>src/storage/io_backend/</code></td>
+<td>页级 SSD 读写（io_uring / SPDK）</td>
+</tr>
+<tr>
+<td><code>src/storage/allocator/ssd/</code></td>
+<td>SSD slab / buddy</td>
+</tr>
+<tr>
+<td><code>src/memory/allocators/</code></td>
+<td>DRAM <code>MallocApi</code>（PersistLoop、R2 等）</td>
+</tr>
+<tr>
+<td><code>src/storage/external/</code></td>
+<td>FasterKV、HPS 适配</td>
 </tr>
 </tbody>
 </table>
-<h3 id="_6">读取流程<a class="headerlink" href="#_6" title="Permanent link">&para;</a></h3>
+<p>服务端 JSON 字段总表见 <a href="../config/">config.md</a> 的 <code>base_kv_config</code> 一节。</p>
+<h2 id="cacheps-basekv">CachePS 与 BaseKV<a class="headerlink" href="#cacheps-basekv" title="Permanent link">&para;</a></h2>
+<p><code>CachePS</code> 在构造时读取 <code>cache_ps</code> 配置：</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">BaseKVConfig</span><span class="w"> </span><span class="n">kv_config</span><span class="p">;</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">kv_config</span><span class="p">.</span><span class="n">num_threads_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">[</span><span class="s">&quot;num_threads&quot;</span><span class="p">];</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">kv_config</span><span class="p">.</span><span class="n">json_config_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="p">[</span><span class="s">&quot;base_kv_config&quot;</span><span class="p">];</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="k">auto</span><span class="w"> </span><span class="n">resolved</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">base</span><span class="o">::</span><span class="n">ResolveEngine</span><span class="p">(</span><span class="n">kv_config</span><span class="p">);</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">base_kv_</span><span class="p">.</span><span class="n">reset</span><span class="p">(</span><span class="n">base</span><span class="o">::</span><span class="n">Factory</span><span class="o">&lt;</span><span class="n">BaseKV</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">BaseKVConfig</span><span class="o">&amp;&gt;::</span><span class="n">NewInstance</span><span class="p">(</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="n">resolved</span><span class="p">.</span><span class="n">engine</span><span class="p">,</span><span class="w"> </span><span class="n">resolved</span><span class="p">.</span><span class="n">cfg</span><span class="p">));</span>
+</code></pre></div>
+<ul>
+<li><code>num_threads_</code> 传入引擎，供批量与组件内部并行使用。</li>
+<li><code>json_config_</code> 原样交给具体引擎；<strong>字段合法性由各引擎及其子组件构造时检查</strong>。</li>
+<li>省略 <code>engine_type</code> 时，<code>ResolveEngine</code> 默认 <code>KVEngineComposite</code>。</li>
+</ul>
+<p>典型调用链：</p>
 <table>
 <thead>
 <tr>
-<th>步骤</th>
-<th>操作</th>
-<th>说明</th>
+<th>CachePS 操作</th>
+<th>BaseKV 方法</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>1</td>
-<td>GRPCPSClient.GetParameter(keys)</td>
-<td>前端/训练端批量读取键</td>
+<td>单条读写</td>
+<td><code>Put</code> / <code>Get</code></td>
 </tr>
 <tr>
-<td>2</td>
-<td>CachePS.GetParameter(keys, output)</td>
-<td>组织批量读取请求，准备输出缓冲</td>
+<td>批量 embedding</td>
+<td><code>BatchPut</code> / <code>BatchGet</code></td>
 </tr>
 <tr>
-<td>3</td>
-<td>BaseKV.BatchGet(keys, values, tid)</td>
-<td>统一调度到 KV 引擎</td>
+<td>表初始化 / 优化器</td>
+<td><code>optimizer_-&gt;Init(..., base_kv_.get())</code></td>
 </tr>
 <tr>
-<td>4</td>
-<td>KVEngine.Get(key, value, tid)</td>
-<td>根据索引定位值位置，读取原始字节串</td>
-</tr>
-<tr>
-<td>5</td>
-<td>从索引查找值的内存地址</td>
-<td>解析指针/偏移，触发内存或存储读取</td>
-</tr>
-<tr>
-<td>6</td>
-<td>读取数据到输出缓冲区</td>
-<td>转换为 ParameterPack，返回给上层</td>
+<td>清空</td>
+<td><code>clear()</code></td>
 </tr>
 </tbody>
 </table>
-<h2 id="_7">引擎选择<a class="headerlink" href="#_7" title="Permanent link">&para;</a></h2>
-<p>根据 (index_type, value_type) 组合自动选择引擎：</p>
+<h2 id="kvenginecomposite">KVEngineComposite 读写路径（默认）<a class="headerlink" href="#kvenginecomposite" title="Permanent link">&para;</a></h2>
+<p>写入（<code>Put</code> / <code>BatchPut</code>）：</p>
+<ol>
+<li><code>CachePS</code> 收到 key 与 float 数据，调用 <code>BaseKV::Put</code> 或 <code>BatchPut</code>。</li>
+<li><code>KVEngineComposite</code> 在 <code>ValueStore</code> 上 <code>AllocAndWrite</code> 新 slot。</li>
+<li><code>Index::Put</code> 更新 key 的 handle，返回旧 handle。</li>
+<li>对旧 handle 调用 <code>ValueStore::Retire</code>（延迟回收）。</li>
+</ol>
+<p>读取（<code>Get</code> / <code>BatchGet</code>）：</p>
+<ol>
+<li><code>Index</code> 解析 key → handle；未命中为 <code>kValueHandleNone</code>，对外表现为空值。</li>
+<li>若 <code>ValueStore::DirectPtr</code> 可用（DRAM），<code>BatchGet</code> 可返回指向底层存储的 <code>ConstArray&lt;float&gt;</code> 视图。</li>
+<li>否则 <code>Read</code> / <code>BatchRead</code>（SSD 或 tiered 的 SSD 部分）拷贝到线程局部 buffer。</li>
+</ol>
+<p><code>BatchPut</code> 对同一批次内重复 key 会退回逐条 <code>Put</code>，避免覆盖顺序不确定。其他引擎的语义以各自实现为准，见 <a href="basekv/">basekv.md</a>。</p>
+<h2 id="_3">文档索引<a class="headerlink" href="#_3" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
 <tr>
-<th>index_type</th>
-<th>value_type</th>
-<th>引擎</th>
+<th>文档</th>
+<th>内容</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>DRAM</td>
-<td>SSD</td>
-<td>KVEngineExtendibleHash</td>
+<td><a href="basekv/">basekv.md</a></td>
+<td><code>BaseKV</code> 接口、工厂创建、全部 <code>engine_type</code> 与外部引擎配置</td>
 </tr>
 <tr>
-<td>SSD</td>
-<td>SSD</td>
-<td>KVEngineCCEH</td>
+<td><a href="composite_kvengine/">composite_kvengine.md</a></td>
+<td><code>KVEngineComposite</code> 的 Index / ValueStore / IO / allocator 与扩展指南</td>
 </tr>
 <tr>
-<td>DRAM/SSD</td>
-<td>HYBRID</td>
-<td>KVEngineHybrid</td>
+<td><a href="../config/">config.md</a></td>
+<td><code>recstore_config.json</code> 中 <code>base_kv_config</code> 字段</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_4">验证与基准<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>范围</th>
+<th>命令 / 位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Composite 组合</td>
+<td><code>ctest -R test_kvengine</code></td>
 </tr>
 <tr>
-<td>DRAM</td>
-<td>DRAM</td>
-<td>KVEngineMap</td>
+<td>外部引擎</td>
+<td><code>test_external_kv_engine</code> / <code>KVEngineExternalEngineTest</code>（需对应 CMake 宏）</td>
+</tr>
+<tr>
+<td>SSD IO</td>
+<td><code>test_io_backend</code></td>
+</tr>
+<tr>
+<td>YCSB 对比</td>
+<td><code>.agents/skills/kvengine-ycsb/SKILL.md</code></td>
 </tr>
 </tbody>
 </table>
