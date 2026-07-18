@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import socket
 import statistics
+import subprocess
 from pathlib import Path
 from typing import Any, Iterable
 
-from ..common import SPARSE_FEATURES_PER_SAMPLE, _read_csv
+from ..common import ROOT, SPARSE_FEATURES_PER_SAMPLE, _read_csv
 from .config import BenchmarkConfig, infer_client_deployment, infer_ps_deployment
 
 
@@ -18,6 +20,18 @@ def _mean(rows: Iterable[dict[str, str]], column: str) -> float:
     return statistics.fmean(vals) if vals else 0.0
 
 
+LATENCY_BREAKDOWN_COLUMNS = (
+    "batch_prepare_ms",
+    "input_pack_ms",
+    "embed_lookup_local_ms",
+    "dense_fwd_ms",
+    "backward_ms",
+    "optimizer_ms",
+    "sparse_update_ms",
+    "step_total_ms",
+)
+
+
 def _p95(rows: Iterable[dict[str, str]], column: str) -> float:
     vals = sorted(float(row[column]) for row in rows if row.get(column, "") not in {"", "nan", "NaN"})
     if not vals:
@@ -25,32 +39,77 @@ def _p95(rows: Iterable[dict[str, str]], column: str) -> float:
     return vals[int(round((len(vals) - 1) * 0.95))]
 
 
+def _group_by_step(rows: Iterable[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("step", "")), []).append(row)
+    return grouped
+
+
+def _row_samples_per_sec(row: dict[str, str], batch_size: int) -> float:
+    # Prefer the CSV's own per-row samples_per_sec (recstore); torchrec's CSV has
+    # no such column, so derive it from batch_size/step_total_ms instead.
+    raw = row.get("samples_per_sec", "")
+    if raw not in ("", "nan", "NaN"):
+        return float(raw)
+    step_total = row.get("step_total_ms", "")
+    if step_total in ("", "nan", "NaN"):
+        return 0.0
+    step_total_ms = float(step_total)
+    return batch_size * 1000.0 / step_total_ms if step_total_ms > 0.0 else 0.0
+
+
+def _job_samples_per_sec(rows: list[dict[str, str]], batch_size: int) -> float:
+    # Job-level throughput: sum each step's per-rank samples_per_sec (every rank
+    # advances one step of its own batch_size in parallel), then average over steps.
+    # Averaging the raw per-rank rows instead would silently report per-rank throughput.
+    per_step_totals = [
+        sum(_row_samples_per_sec(row, batch_size) for row in step_rows)
+        for step_rows in _group_by_step(rows).values()
+    ]
+    return statistics.fmean(per_step_totals) if per_step_totals else 0.0
+
+
+def _job_rows_per_sec(rows: list[dict[str, str]], batch_size: int, latency_column: str) -> float:
+    sparse_rows = batch_size * SPARSE_FEATURES_PER_SAMPLE
+    per_step_totals = []
+    for step_rows in _group_by_step(rows).values():
+        total = 0.0
+        for row in step_rows:
+            raw = row.get(latency_column, "")
+            if raw in ("", "nan", "NaN"):
+                continue
+            latency_ms = float(raw)
+            if latency_ms > 0.0:
+                total += sparse_rows / (latency_ms / 1000.0) / 1e6
+        per_step_totals.append(total)
+    return statistics.fmean(per_step_totals) if per_step_totals else 0.0
+
+
 def collect_summary_rows(manifest: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    seen_csv: set[str] = set()
     for item in manifest:
-        path = Path(str(item.get("main_csv", "")))
+        csv_key = str(item.get("main_csv", ""))
+        if csv_key in seen_csv:
+            # One manifest row per client node shares the same main_csv (it already
+            # aggregates all ranks) -- processing it more than once double counts the run.
+            continue
+        seen_csv.add(csv_key)
+        path = Path(csv_key)
         if not path.exists():
             continue
         warm = _warm_rows(path)
         batch_size = int(item["batch_size"])
-        mean_step = _mean(warm, "step_total_ms")
-        mean_lookup = _mean(warm, "embed_lookup_local_ms")
-        mean_update = _mean(warm, "sparse_update_ms")
-        sparse_rows = batch_size * SPARSE_FEATURES_PER_SAMPLE
+        latency_means = {column: _mean(warm, column) for column in LATENCY_BREAKDOWN_COLUMNS}
         out.append(
             {
                 **item,
-                "mean_step_total_ms": mean_step,
                 "p95_step_total_ms": _p95(warm, "step_total_ms"),
-                "mean_embed_lookup_ms": mean_lookup,
-                "mean_sparse_update_ms": mean_update,
-                "samples_per_sec": batch_size * 1000.0 / mean_step if mean_step > 0.0 else 0.0,
-                "lookup_mrows_per_sec": sparse_rows / (mean_lookup / 1000.0) / 1e6
-                if mean_lookup > 0.0
-                else 0.0,
-                "update_mrows_per_sec": sparse_rows / (mean_update / 1000.0) / 1e6
-                if mean_update > 0.0
-                else 0.0,
+                "samples_per_sec": _job_samples_per_sec(warm, batch_size),
+                "lookup_mrows_per_sec": _job_rows_per_sec(warm, batch_size, "embed_lookup_local_ms"),
+                "update_mrows_per_sec": _job_rows_per_sec(warm, batch_size, "sparse_update_ms"),
+                **{f"mean_{column}": value for column, value in latency_means.items()},
             }
         )
     return out
@@ -73,13 +132,24 @@ def _repeat_stats(rows: list[dict[str, Any]], metric: str) -> tuple[float, float
     return mean, cv, len(vals)
 
 
+def _git_commit_hash() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        return "unknown"
+
+
 def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
+    header = [_git_commit_hash(), socket.gethostname(), ""]
     clients = "; ".join(
         f"{client.ip}/gpu{client.gpu_id}/rank{client.node_rank}/nproc{client.nproc_per_node}"
         for client in cfg.clients
     )
     servers = "; ".join(f"{server.ip}:{server.port}/shard{server.shard_id}" for server in cfg.servers)
     lines = [
+        *header,
         "# Benchmark E2E Summary",
         "",
         "## Workload 说明",
@@ -137,28 +207,31 @@ def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
     if not rows:
         lines.append("| - | - | - | 0.000 | 0.000 | 0.000 |")
 
+    latency_headers = " | ".join(LATENCY_BREAKDOWN_COLUMNS)
+    latency_aligns = " | ".join(["---:"] * len(LATENCY_BREAKDOWN_COLUMNS))
     lines.extend(
         [
             "",
-            "## E2E 延迟分解（ms，...）",
+            "## E2E 延迟分解（ms，warmup 已剔除，同一 run 内跨 rank 取均值）",
             "",
-            "| run_id | lane | backend | mean step | p95 step | lookup | sparse update |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+            f"| run_id | lane | backend | {latency_headers} | p95 step_total |",
+            f"| --- | --- | --- | {latency_aligns} | ---: |",
         ]
     )
     for row in rows:
+        latency_cells = " | ".join(
+            f"{float(row.get(f'mean_{column}', 0.0) or 0.0):.3f}" for column in LATENCY_BREAKDOWN_COLUMNS
+        )
         lines.append(
-            "| {run_id} | {lane} | {backend} | {mean:.3f} | {p95:.3f} | {lookup:.3f} | {update:.3f} |".format(
+            "| {run_id} | {lane} | {backend} | {latency_cells} | {p95:.3f} |".format(
                 run_id=row.get("run_id", ""),
                 lane=row.get("lane", row.get("transport", "")),
                 backend=row.get("backend", ""),
-                mean=float(row.get("mean_step_total_ms", 0.0) or 0.0),
+                latency_cells=latency_cells,
                 p95=float(row.get("p95_step_total_ms", 0.0) or 0.0),
-                lookup=float(row.get("mean_embed_lookup_ms", 0.0) or 0.0),
-                update=float(row.get("mean_sparse_update_ms", 0.0) or 0.0),
             )
         )
     if not rows:
-        lines.append("| - | - | - | 0.000 | 0.000 | 0.000 | 0.000 |")
+        lines.append("| - | - | - | " + " | ".join(["0.000"] * len(LATENCY_BREAKDOWN_COLUMNS)) + " | 0.000 |")
     lines.append("")
     return "\n".join(lines)
