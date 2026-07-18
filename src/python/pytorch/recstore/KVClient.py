@@ -118,7 +118,54 @@ class RecStoreClient:
         """Register UDF pull function."""
         raise NotImplementedError("register_pull_handler is not implemented for the ops-based client.")
 
-    def init_data(self, name: str, shape: Tuple[int, int], dtype: torch.dtype, part_policy: Any = None, init_func: Optional[Callable] = None, is_gdata: bool = True, base_offset: int = 0):
+    def register_tensor_meta(
+        self,
+        name: str,
+        shape: Tuple[int, int],
+        dtype: torch.dtype,
+        part_policy: Any = None,
+        is_gdata: bool = True,
+        base_offset: int = 0,
+        initialize_backend: bool = False,
+    ):
+        """Register tensor metadata and optionally initialize the backend table."""
+        if name in self._tensor_meta:
+            print(f"Tensor '{name}' already exists. Skipping initialization.")
+            return
+
+        num_embeddings, embedding_dim = shape
+        if initialize_backend:
+            success = self.ops.init_embedding_table(
+                name, int(num_embeddings), int(embedding_dim)
+            )
+            self._clear_gpu_cache_if_available()
+            if not success:
+                raise RuntimeError(
+                    f"Failed to initialize embedding table '{name}' on backend."
+                )
+
+        self._tensor_meta[name] = {
+            'shape': shape,
+            'dtype': dtype,
+            'base_offset': int(base_offset),
+            'part_policy': part_policy,
+        }
+        self._full_data_shape[name] = shape
+        self._data_name_list.add(name)
+        if is_gdata:
+            self._gdata_name_list.add(name)
+
+    def init_data(
+        self,
+        name: str,
+        shape: Tuple[int, int],
+        dtype: torch.dtype,
+        part_policy: Any = None,
+        init_func: Optional[Callable] = None,
+        is_gdata: bool = True,
+        base_offset: int = 0,
+        initialize_values: bool = True,
+    ):
         """Send message to kvserver to initialize new data tensor and mapping this
         data from server side to client side.
 
@@ -137,26 +184,25 @@ class RecStoreClient:
         is_gdata : bool
             Whether the created tensor is a ndata/edata or not.
         """
+        # print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype} (base_offset={base_offset}).")
+
         if name in self._tensor_meta:
             print(f"Tensor '{name}' already exists. Skipping initialization.")
             return
 
-        # print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype} (base_offset={base_offset}).")
-        
-        num_embeddings, embedding_dim = shape
-        # print(f"[DEBUG] Calling init_embedding_table for '{name}' with num_embeddings={num_embeddings}, embedding_dim={embedding_dim}")
-        success = self.ops.init_embedding_table(name, int(num_embeddings), int(embedding_dim))
-        self._clear_gpu_cache_if_available()
-        # print(f"[DEBUG] init_embedding_table returned: {success}")
-        if not success:
-            raise RuntimeError(f"Failed to initialize embedding table '{name}' on backend.")
-        
-        self._tensor_meta[name] = {'shape': shape, 'dtype': dtype}
-        self._full_data_shape[name] = shape
-        self._data_name_list.add(name)
-        if is_gdata:
-            self._gdata_name_list.add(name)
-        
+        self.register_tensor_meta(
+            name=name,
+            shape=shape,
+            dtype=dtype,
+            part_policy=part_policy,
+            is_gdata=is_gdata,
+            base_offset=base_offset,
+            initialize_backend=True,
+        )
+
+        if not initialize_values:
+            return
+
         # Avoid materializing a full dense tensor for large embedding tables
         # unless the caller explicitly requests custom initialization data.
         if init_func is not None:
