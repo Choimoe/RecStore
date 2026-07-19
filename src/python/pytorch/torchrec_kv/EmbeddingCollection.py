@@ -142,6 +142,23 @@ class RecStoreEmbeddingCollection(torch.nn.Module):
         self.is_recstore_sparse_module = True
         self._trace: List[Dict[str, torch.Tensor]] = []
 
+        if not self._enable_fusion and len(self._embedding_configs) > 1:
+            raise ValueError(
+                "Multiple RecStore embedding tables require enable_fusion=True "
+                "because backend lookups share one key space."
+            )
+        if self._enable_fusion and self._fusion_k < 0:
+            raise ValueError("fusion_k must be non-negative.")
+        if self._enable_fusion and len(self._embedding_configs) > 1:
+            max_rows_per_table = 1 << self._fusion_k
+            for config in self._embedding_configs:
+                if config.num_embeddings > max_rows_per_table:
+                    raise ValueError(
+                        f"Embedding table '{config.name}' with "
+                        f"{config.num_embeddings} rows does not fit in "
+                        f"fusion_k={self._fusion_k}."
+                    )
+
         self._master_config = self._embedding_configs[0]
         self.feature_keys: List[str] = []
         self._config_names: Dict[str, str] = {}

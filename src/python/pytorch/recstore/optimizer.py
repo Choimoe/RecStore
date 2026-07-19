@@ -468,12 +468,16 @@ class SparseOptimizer:
         if self.kv_client is None:
             self._inflight_handles.clear()
             return
-        for kv_client, handle, payload in self._inflight_handles:
-            t_wait_start = perf_counter()
-            kv_client.wait(handle)
-            self._perf_add("update_flush_wait_ms", (perf_counter() - t_wait_start) * 1e3)
-            self._last_update_payloads.append(payload)
-        self._inflight_handles.clear()
+        completed = 0
+        try:
+            for kv_client, handle, payload in self._inflight_handles:
+                t_wait_start = perf_counter()
+                kv_client.wait(handle)
+                self._perf_add("update_flush_wait_ms", (perf_counter() - t_wait_start) * 1e3)
+                self._last_update_payloads.append(payload)
+                completed += 1
+        finally:
+            del self._inflight_handles[:completed]
 
 class SparseSGD(SparseOptimizer):
     def step(self):

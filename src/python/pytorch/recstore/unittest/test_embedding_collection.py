@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from ...torchrec_kv import RecStoreEmbeddingCollection
+from torchrec_kv import RecStoreEmbeddingCollection
 from ..optimizer import SparseSGD
 
 
@@ -32,10 +32,13 @@ class _FakeKeyedJaggedTensor:
 class _FakeKVClient:
     def __init__(self, embedding_dim=4):
         self.embedding_dim = embedding_dim
+        self.backend_lr = 0.01
         self.init_data_calls = []
         self.pull_calls = []
         self.update_async_calls = []
         self.wait_calls = []
+        self.applied_handles = []
+        self.fail_once_handles = set()
         self._rows = {}
         self._next_handle = 1
 
@@ -72,7 +75,22 @@ class _FakeKVClient:
         return handle
 
     def wait(self, handle):
+        if handle in self.fail_once_handles:
+            self.fail_once_handles.remove(handle)
+            raise RuntimeError("backend failure")
         self.wait_calls.append(int(handle))
+        for _, ids, grads, queued_handle in self.update_async_calls:
+            if queued_handle != handle:
+                continue
+            for key, grad in zip(ids.cpu(), grads.cpu()):
+                row_id = int(key.item())
+                current = self._rows.get(
+                    row_id,
+                    torch.zeros(self.embedding_dim, dtype=torch.float32),
+                )
+                self._rows[row_id] = current - self.backend_lr * grad
+            self.applied_handles.append(handle)
+            break
 
 
 class _LegacyMetadataKVClient:
@@ -220,6 +238,17 @@ class TestRecStoreEmbeddingCollection(unittest.TestCase):
 
         optimizer = SparseSGD([ec], lr=0.1)
         optimizer.step()
+        self.assertTrue(
+            torch.allclose(
+                fake.pull("t0", torch.tensor([1, 3], dtype=torch.int64)),
+                torch.tensor(
+                    [
+                        [1.0, 1.1, 1.2, 1.3],
+                        [3.0, 3.1, 3.2, 3.3],
+                    ]
+                ),
+            )
+        )
         optimizer.flush()
 
         self.assertEqual(ec._trace, [])
@@ -240,6 +269,116 @@ class TestRecStoreEmbeddingCollection(unittest.TestCase):
             )
         )
         self.assertEqual(fake.wait_calls, [handle])
+        self.assertTrue(
+            torch.allclose(
+                fake.pull("t0", torch.tensor([1, 3], dtype=torch.int64)),
+                torch.tensor(
+                    [
+                        [0.98, 1.08, 1.18, 1.28],
+                        [2.99, 3.09, 3.19, 3.29],
+                    ]
+                ),
+            )
+        )
+
+    def test_flush_retries_only_unfinished_handles(self):
+        fake = _FakeKVClient()
+        ec = RecStoreEmbeddingCollection(
+            [
+                {
+                    "name": "t0",
+                    "embedding_dim": 4,
+                    "num_embeddings": 8,
+                    "feature_names": ["f1"],
+                }
+            ],
+            kv_client=fake,
+            enable_fusion=False,
+        )
+        optimizer = SparseSGD([ec], lr=0.1)
+        first = fake.update_async(
+            "t0", torch.tensor([1]), torch.ones((1, 4))
+        )
+        second = fake.update_async(
+            "t0", torch.tensor([2]), torch.ones((1, 4))
+        )
+        optimizer._inflight_handles = [
+            (fake, first, {"handle": first}),
+            (fake, second, {"handle": second}),
+        ]
+        fake.fail_once_handles.add(second)
+
+        with self.assertRaisesRegex(RuntimeError, "backend failure"):
+            optimizer.flush()
+
+        self.assertEqual(fake.applied_handles, [first])
+        self.assertEqual(
+            [handle for _, handle, _ in optimizer._inflight_handles],
+            [second],
+        )
+
+        optimizer.flush()
+        self.assertEqual(fake.applied_handles, [first, second])
+        self.assertEqual(optimizer._inflight_handles, [])
+
+    def test_multiple_tables_require_fused_key_space(self):
+        with self.assertRaisesRegex(ValueError, "require enable_fusion=True"):
+            RecStoreEmbeddingCollection(
+                [
+                    {
+                        "name": "t0",
+                        "embedding_dim": 4,
+                        "num_embeddings": 8,
+                        "feature_names": ["f1"],
+                    },
+                    {
+                        "name": "t1",
+                        "embedding_dim": 4,
+                        "num_embeddings": 8,
+                        "feature_names": ["f2"],
+                    },
+                ],
+                kv_client=_FakeKVClient(),
+                enable_fusion=False,
+            )
+
+    def test_fused_table_ids_must_fit_the_prefix_width(self):
+        with self.assertRaisesRegex(ValueError, "does not fit in fusion_k=4"):
+            RecStoreEmbeddingCollection(
+                [
+                    {
+                        "name": "t0",
+                        "embedding_dim": 4,
+                        "num_embeddings": 17,
+                        "feature_names": ["f1"],
+                    },
+                    {
+                        "name": "t1",
+                        "embedding_dim": 4,
+                        "num_embeddings": 8,
+                        "feature_names": ["f2"],
+                    },
+                ],
+                kv_client=_FakeKVClient(),
+                enable_fusion=True,
+                fusion_k=4,
+            )
+
+    def test_fusion_k_must_be_non_negative_for_one_table(self):
+        with self.assertRaisesRegex(ValueError, "fusion_k must be non-negative"):
+            RecStoreEmbeddingCollection(
+                [
+                    {
+                        "name": "t0",
+                        "embedding_dim": 4,
+                        "num_embeddings": 8,
+                        "feature_names": ["f1"],
+                    }
+                ],
+                kv_client=_FakeKVClient(),
+                enable_fusion=True,
+                fusion_k=-1,
+            )
 
     def test_initialize_without_values_uses_metadata_fallback_for_legacy_clients(self):
         fake = _LegacyMetadataKVClient()

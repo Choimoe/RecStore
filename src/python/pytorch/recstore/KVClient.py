@@ -795,11 +795,13 @@ class RecStoreClient:
 
     def wait(self, handle: int) -> None:
         """Wait for a queued async operation and apply it if still pending."""
-        pending = self._pending_async_ops.pop(int(handle), None)
+        handle = int(handle)
+        pending = self._pending_async_ops.get(handle)
         if pending is None:
-            return
+            raise RuntimeError(f"Unknown async update handle: {handle}")
         name, ids, grads = pending
         self.ops.emb_update_table(name, ids, grads)
+        del self._pending_async_ops[handle]
 
     def flush_async_updates(self) -> None:
         """Synchronously apply all queued async update operations."""
