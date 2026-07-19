@@ -156,6 +156,10 @@ class TestRecStoreEmbeddingCollection(unittest.TestCase):
                     torch.tensor([3], dtype=torch.int64),
                     torch.tensor([1], dtype=torch.int32),
                 ),
+                "payload": _FakeJaggedTensor(
+                    torch.tensor([99], dtype=torch.int64),
+                    torch.tensor([1], dtype=torch.int32),
+                ),
             }
         )
 

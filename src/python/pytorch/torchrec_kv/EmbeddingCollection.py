@@ -311,14 +311,7 @@ class RecStoreEmbeddingCollection(torch.nn.Module):
 
     def forward(self, features: KeyedJaggedTensor) -> Dict[str, JaggedTensor]:
         feature_embeddings: Dict[str, JaggedTensor] = {}
-        keys_in_batch = list(features.keys())
-        for feature_name in keys_in_batch:
-            if feature_name not in self._feature_configs:
-                raise KeyError(
-                    f"Feature '{feature_name}' does not belong to any "
-                    "RecStore embedding table."
-                )
-
+        for feature_name in self.feature_keys:
             jt = features[feature_name]
             values = jt.values()
             lengths = jt.lengths()
