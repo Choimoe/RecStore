@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import csv
 import fcntl
 import hashlib
 import importlib
 import json
 import os
-import re
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -33,7 +30,6 @@ from ..data.dlrm_source import (
 from ..runtime.hybrid_dlrm import (
     build_criterion,
     build_dense_module,
-    build_hybrid_dense_arch,
     compute_dense_loss,
     parse_layer_sizes,
     prepare_hybrid_dlrm_input,
@@ -45,7 +41,16 @@ from ..runtime.hybrid_dlrm import (
 from ..runtime.prefetch import LookaheadPrefetcher
 from ..runtime.bagpipe_cache import BagPipeCacheController, BagPipeSparseSGD
 from ..runtime.recstore_distributed import ShardedRecstoreClient
-from ..runtime.report import finalize_recstore_row, summarize_us, write_stage_csv
+from ..runtime.report import finalize_recstore_row, summarize_us
+from ..runtime.timing import StepTimer
+from ..runtime.worker_common import (
+    barrier_for_step_alignment as _barrier_for_step_alignment,
+    bool_int as _bool_int,
+    load_rows as _load_rows,
+    parse_nccl_transport_log as _parse_nccl_transport_log,
+    pick_socket_ifname as _pick_socket_ifname,
+    write_rows as _write_rows,
+)
 from .base import BenchmarkRunner
 
 FAST_PATH_LOOKUP_PROFILE_KEYS = (
@@ -189,19 +194,6 @@ def _finalize_step_timing(row: dict[str, Any], *, consume_start: float) -> None:
     row["batches_per_sec"] = _safe_ratio(1000.0, visible_ms)
 
 
-@contextmanager
-def stage_timer(row: dict[str, Any], key: str):
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        row[key] = (time.perf_counter() - start) * 1e3
-
-
-def _bool_int(flag: bool) -> int:
-    return 1 if flag else 0
-
-
 def _consume_perf_stats(obj: Any) -> dict[str, float]:
     if obj is None:
         return {}
@@ -269,15 +261,6 @@ def _notify_bagpipe_sparse_update(
         row=row,
         step=step,
     )
-
-
-def _load_rows(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
-    write_stage_csv(path, rows)
 
 
 def _merge_numeric_fields(
@@ -368,30 +351,6 @@ def _configure_gpu_cache(
         setter(False)
 
 
-def _pick_socket_ifname() -> str | None:
-    preferred = ("eno1", "eno8303")
-    try:
-        available = set(os.listdir("/sys/class/net"))
-    except OSError:
-        return None
-    for name in preferred:
-        if name in available:
-            return name
-    return None
-
-
-def _parse_nccl_transport_log(log_path: Path | None) -> str:
-    if log_path is None or not log_path.exists():
-        return "unknown"
-    match = re.search(
-        r"NCCL INFO NET/(IB|Socket)\s*:\s*Using",
-        log_path.read_text(errors="replace"),
-    )
-    if not match:
-        return "unknown"
-    return "RDMA" if match.group(1) == "IB" else "TCP"
-
-
 def _debug_log_path(cfg: RunConfig, rank: int) -> Path:
     return Path(cfg.output_root) / "outputs" / cfg.run_id / f"recstore_worker_rank{rank}.log"
 
@@ -476,15 +435,6 @@ def _merge_rank_outputs(paths: list[Path], out_path: Path) -> list[dict[str, Any
     merged.sort(key=lambda row: (int(row.get("rank", 0)), int(row.get("step", 0))))
     _write_rows(out_path, merged)
     return merged
-
-
-def _barrier_for_step_alignment(dist, device, local_rank: int, use_dist: bool) -> None:
-    if not use_dist:
-        return
-    if device.type == "cuda":
-        dist.barrier(device_ids=[local_rank])
-    else:
-        dist.barrier()
 
 
 def _build_train_dataloader_for_mode(
@@ -1159,8 +1109,11 @@ class RecStoreRunner(BenchmarkRunner):
                 _reset_perf_stats(sparse_optimizer)
                 sparse_optimizer.zero_grad()
                 embeddings = None
-                with stage_timer(row, "embed_lookup_local_ms"):
-                    sync_device(torch, device)
+                timer = StepTimer(row, torch, device)
+                # embed_lookup and sparse_update go over RDMA to the PS (host and
+                # network work), so they stay on the wall clock; the pure-GPU dense
+                # stages below are timed with CUDA events via timer.gpu().
+                with timer.cpu("embed_lookup_local_ms"):
                     if cfg.enable_bagpipe_cache and bagpipe_controller is not None:
                         bagpipe_controller.prefill_cache(sparse_features, device)
                     elif cfg.read_before_update and cfg.read_mode == "prefetch":
@@ -1189,15 +1142,14 @@ class RecStoreRunner(BenchmarkRunner):
                 if step >= cfg.warmup_steps:
                     read_lat_us.append(row["embed_lookup_local_ms"] * 1e3)
 
-                with stage_timer(row, "embed_pool_local_ms"):
+                with timer.gpu("embed_pool_local_ms"):
                     embedded_sparse_source = reshape_torchrec_embeddings_for_dlrm(
                         embeddings=embeddings,
                         feature_names=default_cat_names,
                         torch=torch,
                     )
-                    sync_device(torch, device)
 
-                with stage_timer(row, "output_unpack_ms"):
+                with timer.gpu("output_unpack_ms"):
                     dense_features, embedded_sparse, labels = prepare_hybrid_dlrm_input(
                         dense_batch=dense_batch,
                         embedded_sparse_source=embedded_sparse_source,
@@ -1207,15 +1159,13 @@ class RecStoreRunner(BenchmarkRunner):
                         detach_sparse=True,
                     )
 
-                with stage_timer(row, "dense_fwd_ms"):
-                    sync_device(torch, device)
+                with timer.gpu("dense_fwd_ms"):
                     loss, logits = compute_dense_loss(
                         model_type, dense_module, criterion,
                         dense_features, embedded_sparse, labels)
-                    sync_device(torch, device)
                 row["loss"] = float(loss.detach().float().cpu().item())
 
-                with stage_timer(row, "backward_ms"):
+                with timer.gpu("backward_ms"):
                     embedded_sparse_grad = run_hybrid_backward(
                         loss=loss,
                         embedded_sparse=embedded_sparse,
@@ -1224,14 +1174,11 @@ class RecStoreRunner(BenchmarkRunner):
                         device=device,
                     )
 
-                with stage_timer(row, "optimizer_ms"):
-                    sync_device(torch, device)
+                with timer.gpu("optimizer_ms"):
                     dense_optimizer.step()
                     dense_optimizer.zero_grad(set_to_none=True)
-                    sync_device(torch, device)
 
-                with stage_timer(row, "sparse_update_ms"):
-                    sync_device(torch, device)
+                with timer.cpu("sparse_update_ms"):
                     replay_start = time.perf_counter()
                     embedded_sparse_source.backward(
                         embedded_sparse_grad.to(embedded_sparse_source.device)
@@ -1285,6 +1232,8 @@ class RecStoreRunner(BenchmarkRunner):
                         time.perf_counter() - zero_grad_start
                     ) * 1e3
                     sync_device(torch, device)
+                # Resolve the CUDA-event GPU stages after a single device drain.
+                row["step_sync_wait_ms"] = timer.finish()
                 _merge_numeric_fields(
                     row,
                     getattr(sparse_optimizer, "_last_step_profile", None),

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import csv
 import fcntl
 import hashlib
 import json
 import os
 import pickle
-import re
 import subprocess
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +21,23 @@ from ..config import (
 from ..runtime.hybrid_dlrm import (
     build_criterion,
     build_dense_module,
-    build_hybrid_dense_arch,
     compute_dense_loss,
     parse_layer_sizes,
     prepare_hybrid_dlrm_input,
     rankmixer_task_names,
     reshape_torchrec_embeddings_for_dlrm,
     run_hybrid_backward,
-    sync_device,
 )
-from ..runtime.report import finalize_torchrec_row, write_stage_csv
+from ..runtime.report import finalize_torchrec_row
+from ..runtime.timing import StepTimer
+from ..runtime.worker_common import (
+    barrier_for_step_alignment as _barrier_for_step_alignment,
+    bool_int as _bool_int,
+    load_rows as _load_rows,
+    parse_nccl_transport_log as _parse_nccl_transport_log,
+    pick_socket_ifname as _pick_socket_ifname,
+    write_rows as _write_rows,
+)
 from ..runtime.torchrec_profile import build_torchrec_profiler
 from .base import BenchmarkRunner
 
@@ -47,52 +52,6 @@ def ensure_torchrec_available() -> None:
         raise RuntimeError(
             "TorchRec backend requires the `torchrec` package to be installed."
         ) from exc
-
-
-@contextmanager
-def stage_timer(row: dict[str, Any], key: str):
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        row[key] = (time.perf_counter() - start) * 1e3
-
-
-def _bool_int(flag: bool) -> int:
-    return 1 if flag else 0
-
-
-def _load_rows(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
-    write_stage_csv(path, rows)
-
-
-def _pick_socket_ifname() -> str | None:
-    preferred = ("eno1", "eno8303")
-    try:
-        available = set(os.listdir("/sys/class/net"))
-    except OSError:
-        return None
-    for name in preferred:
-        if name in available:
-            return name
-    return None
-
-
-def _parse_nccl_transport_log(log_path: Path | None) -> str:
-    if log_path is None or not log_path.exists():
-        return "unknown"
-    match = re.search(
-        r"NCCL INFO NET/(IB|Socket)\s*:\s*Using",
-        log_path.read_text(errors="replace"),
-    )
-    if not match:
-        return "unknown"
-    return "RDMA" if match.group(1) == "IB" else "TCP"
 
 
 def _debug_log_path(cfg: RunConfig, rank: int) -> Path:
@@ -259,25 +218,8 @@ def _make_trace_handler(cfg: RunConfig, rank: int):
     return _handler
 
 
-def _barrier_for_step_alignment(dist, device, local_rank: int, use_dist: bool) -> None:
-    if not use_dist:
-        return
-    if device.type == "cuda":
-        dist.barrier(device_ids=[local_rank])
-    else:
-        dist.barrier()
-
-
 def _is_fair_remote_mode(cfg: RunConfig, world_size: int) -> bool:
     return cfg.torchrec_dist_mode == "fair_remote" and world_size > 1
-
-
-def _sync_for_timing(torch, device, cfg: RunConfig, boundary: str) -> None:
-    mode = cfg.torchrec_timing_sync_mode
-    if mode == "stage":
-        sync_device(torch, device)
-    elif mode == "step" and boundary == "step":
-        sync_device(torch, device)
 
 
 def _build_uvm_caching_constraints(
@@ -596,57 +538,40 @@ def _run_single_or_dist_worker(
                 "torchrec_role": "trainer" if is_trainer_rank else "embedding_worker",
                 "torchrec_is_trainer": _bool_int(is_trainer_rank),
             }
-            _sync_for_timing(torch, device, cfg, "step")
             step_start = time.perf_counter()
+            timer = StepTimer(row, torch, device)
 
-            with stage_timer(row, "batch_prepare_ms"):
-                _append_worker_debug(cfg, rank, f"before_batch_prepare step={step}")
+            _append_worker_debug(cfg, rank, f"before_batch_prepare step={step}")
+            with timer.cpu("batch_prepare_ms"):
                 try:
                     dense_batch, sparse_batch, labels_batch = next(data_iter)
                 except StopIteration:
                     data_iter = iter(dataloader)
                     dense_batch, sparse_batch, labels_batch = next(data_iter)
-                _append_worker_debug(cfg, rank, f"after_batch_prepare step={step}")
 
             _append_worker_debug(cfg, rank, f"before_input_pack step={step}")
-            with stage_timer(row, "input_pack_ms"):
+            with timer.cpu("input_pack_ms"):
                 dense_batch, sparse_features = build_kjt_batch_from_dense_sparse_labels(
                     dense_batch,
                     sparse_batch,
                     labels_batch,
                 )
                 sparse_features = sparse_features.to(device)
-                _sync_for_timing(torch, device, cfg, "stage")
-            _append_worker_debug(cfg, rank, f"after_input_pack step={step}")
 
             _append_worker_debug(cfg, rank, f"before_embedding step={step}")
-            collective_start = time.perf_counter()
-            with stage_timer(row, "embed_lookup_local_ms"):
-                _sync_for_timing(torch, device, cfg, "stage")
+            with timer.gpu("embed_lookup_local_ms"):
                 embeddings = embedding_module(sparse_features)
-                _sync_for_timing(torch, device, cfg, "stage")
-            collective_elapsed_ms = (time.perf_counter() - collective_start) * 1e3
-            _append_worker_debug(cfg, rank, f"after_embedding step={step}")
 
             _append_worker_debug(cfg, rank, f"before_pool step={step}")
-            with stage_timer(row, "embed_pool_local_ms"):
+            with timer.gpu("embed_pool_local_ms"):
                 embedded_sparse_source = reshape_torchrec_embeddings_for_dlrm(
                     embeddings=embeddings,
                     feature_names=DEFAULT_CAT_NAMES,
                     torch=torch,
                 )
-                _sync_for_timing(torch, device, cfg, "stage")
-            _append_worker_debug(cfg, rank, f"after_pool step={step}")
-
-            if use_dist:
-                row["collective_launch_ms"] = 0.0
-                row["collective_wait_ms"] = collective_elapsed_ms
-            else:
-                row["collective_launch_ms"] = 0.0
-                row["collective_wait_ms"] = 0.0
 
             _append_worker_debug(cfg, rank, f"before_output_unpack step={step}")
-            with stage_timer(row, "output_unpack_ms"):
+            with timer.gpu("output_unpack_ms"):
                 dense_features, embedded_sparse, labels = prepare_hybrid_dlrm_input(
                     dense_batch=dense_batch,
                     embedded_sparse_source=embedded_sparse_source,
@@ -655,21 +580,17 @@ def _run_single_or_dist_worker(
                     device=device,
                     detach_sparse=True,
                 )
-            _append_worker_debug(cfg, rank, f"after_output_unpack step={step}")
 
             if is_trainer_rank:
                 _append_worker_debug(cfg, rank, f"before_dense_fwd step={step}")
-                with stage_timer(row, "dense_fwd_ms"):
-                    _sync_for_timing(torch, device, cfg, "stage")
+                with timer.gpu("dense_fwd_ms"):
                     loss, logits = compute_dense_loss(
                         model_type, dense_module, criterion,
                         dense_features, embedded_sparse, labels)
-                    _sync_for_timing(torch, device, cfg, "stage")
                 row["loss"] = float(loss.detach().float().cpu().item())
-                _append_worker_debug(cfg, rank, f"after_dense_fwd step={step}")
 
                 _append_worker_debug(cfg, rank, f"before_backward step={step}")
-                with stage_timer(row, "backward_ms"):
+                with timer.gpu("backward_ms"):
                     embedded_sparse_grad = run_hybrid_backward(
                         loss=loss,
                         embedded_sparse=embedded_sparse,
@@ -677,15 +598,11 @@ def _run_single_or_dist_worker(
                         torch=torch,
                         device=device,
                     )
-                _append_worker_debug(cfg, rank, f"after_backward step={step}")
 
                 _append_worker_debug(cfg, rank, f"before_optimizer step={step}")
-                with stage_timer(row, "optimizer_ms"):
-                    _sync_for_timing(torch, device, cfg, "stage")
+                with timer.gpu("optimizer_ms"):
                     dense_optimizer.step()
                     dense_optimizer.zero_grad(set_to_none=True)
-                    _sync_for_timing(torch, device, cfg, "stage")
-                _append_worker_debug(cfg, rank, f"after_optimizer step={step}")
             else:
                 row["dense_fwd_ms"] = 0.0
                 row["backward_ms"] = 0.0
@@ -694,27 +611,29 @@ def _run_single_or_dist_worker(
 
             embedded_sparse_grad = embedded_sparse_grad.contiguous()
 
-            with stage_timer(row, "sparse_update_ms"):
-                _append_worker_debug(cfg, rank, f"before_sparse_update step={step}")
-                _sync_for_timing(torch, device, cfg, "stage")
+            _append_worker_debug(cfg, rank, f"before_sparse_update step={step}")
+            with timer.gpu("sparse_update_ms"):
                 if fair_remote_mode and use_dist:
-                    dist.broadcast(
-                        embedded_sparse_grad,
-                        src=0,
-                    )
+                    dist.broadcast(embedded_sparse_grad, src=0)
                 embedded_sparse_source.backward(
                     embedded_sparse_grad.to(embedded_sparse_source.device)
                 )
                 sparse_optimizer.step()
                 sparse_optimizer.zero_grad(set_to_none=True)
-                _sync_for_timing(torch, device, cfg, "stage")
-                _append_worker_debug(cfg, rank, f"after_sparse_update step={step}")
 
             if profiler is not None:
                 profiler.step()
 
-            _sync_for_timing(torch, device, cfg, "step")
+            # GPU stages are timed with CUDA events and resolved in finish() after
+            # a single device drain, so no stage absorbs a neighbor's un-drained
+            # tail. finish() returns that drain wait (the cross-rank straggler
+            # cost) instead of letting it vanish into the step_total gap.
+            row["step_sync_wait_ms"] = timer.finish()
             row["step_total_ms"] = (time.perf_counter() - step_start) * 1e3
+            row["collective_launch_ms"] = 0.0
+            row["collective_wait_ms"] = (
+                row["embed_lookup_local_ms"] if use_dist else 0.0
+            )
             rows.append(finalize_torchrec_row(row))
             _append_worker_debug(cfg, rank, f"before_step_barrier step={step}")
             _barrier_for_step_alignment(

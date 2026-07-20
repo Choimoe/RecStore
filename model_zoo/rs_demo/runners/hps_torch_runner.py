@@ -36,11 +36,11 @@ from ..runtime.hybrid_dlrm import (
 )
 from ..runtime.report import finalize_torchrec_row, write_stage_csv
 from .base import BenchmarkRunner
+from ..runtime.timing import stage_timer
 from .torchrec_runner import (
     _barrier_for_step_alignment,
     _merge_rank_outputs,
     _pick_socket_ifname,
-    stage_timer,
 )
 
 
