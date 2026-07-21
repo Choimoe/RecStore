@@ -262,6 +262,32 @@ class RecStoreEmbeddingCollection(torch.nn.Module):
     def embedding_configs(self) -> List[_EmbeddingConfigView]:
         return list(self._embedding_configs)
 
+    def recstore_checkpoint_config(self) -> Dict[str, Any]:
+        tables = []
+        for table_idx, config in enumerate(self._embedding_configs):
+            base_offset = (
+                table_idx << self._fusion_k if self._enable_fusion else 0
+            )
+            tables.append(
+                {
+                    "name": config.name,
+                    "num_embeddings": config.num_embeddings,
+                    "embedding_dim": config.embedding_dim,
+                    "base_offset": base_offset,
+                    "feature_names": list(config.feature_names),
+                    "embedding_names": list(config.embedding_names),
+                }
+            )
+        return {
+            "tables": tables,
+            "fusion": {
+                "enabled": self._enable_fusion,
+                "fusion_k": self._fusion_k,
+            },
+            "clamp_ids": self._clamp_ids,
+            "need_indices": self._need_indices,
+        }
+
     def reset_trace(self) -> None:
         self._trace = []
 

@@ -2,6 +2,7 @@ import torch
 import os
 import time
 import ctypes
+import json
 from typing import Optional, Tuple, List, Dict, Any, Callable
 
 _LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
@@ -807,6 +808,61 @@ class RecStoreClient:
         """Synchronously apply all queued async update operations."""
         for handle in list(self._pending_async_ops.keys()):
             self.wait(handle)
+
+    @staticmethod
+    def _checkpoint_metadata_json(metadata: Any) -> str:
+        if isinstance(metadata, str):
+            payload = metadata
+        elif isinstance(metadata, dict):
+            payload = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+        else:
+            raise TypeError("checkpoint metadata must be a JSON string or dict")
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as error:
+            raise ValueError("checkpoint metadata must be valid JSON") from error
+        if (
+            not isinstance(parsed, dict)
+            or not isinstance(parsed.get("identity"), dict)
+            or not isinstance(parsed.get("checkpoint_id"), str)
+            or not parsed["checkpoint_id"]
+        ):
+            raise ValueError(
+                "checkpoint metadata requires identity and non-empty checkpoint_id"
+            )
+        return payload
+
+    def save_checkpoint(self, path: str, metadata: Any) -> None:
+        """Save all RecStore shards after applying queued sparse updates."""
+        checkpoint_path = os.fspath(path)
+        if not checkpoint_path:
+            raise ValueError("checkpoint path must be non-empty")
+        self.flush_async_updates()
+        payload = self._checkpoint_metadata_json(metadata)
+        save = getattr(self.ops, "save_checkpoint", None)
+        if not callable(save):
+            raise RuntimeError(
+                "save_checkpoint requires an ops library exposing save_checkpoint()."
+            )
+        if not bool(save(checkpoint_path, payload)):
+            raise RuntimeError("RecStore checkpoint save failed")
+
+    def load_checkpoint(self, path: str, metadata: Any) -> None:
+        """Load all RecStore shards into a fresh, unmodified parameter server."""
+        checkpoint_path = os.fspath(path)
+        if not checkpoint_path:
+            raise ValueError("checkpoint path must be non-empty")
+        if self._pending_async_ops:
+            raise RuntimeError("cannot load a checkpoint with pending sparse updates")
+        payload = self._checkpoint_metadata_json(metadata)
+        load = getattr(self.ops, "load_checkpoint", None)
+        if not callable(load):
+            raise RuntimeError(
+                "load_checkpoint requires an ops library exposing load_checkpoint()."
+            )
+        if not bool(load(checkpoint_path, payload)):
+            raise RuntimeError("RecStore checkpoint load failed")
+        self._clear_gpu_cache_if_available()
 
     def get_data_meta(self, name: str) -> Tuple[torch.dtype, Tuple[int, ...], None]:
         """Get meta data (data_type, data_shape, partition_policy)"""

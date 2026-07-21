@@ -161,6 +161,20 @@ target_link_libraries(test_kvengine PUBLIC
 )
 add_test(NAME test_kvengine COMMAND test_kvengine)
 
+add_executable(test_kvengine_checkpoint test_kvengine_checkpoint.cpp)
+target_link_libraries(test_kvengine_checkpoint PUBLIC
+    extendible_hash
+    base
+    base_memory
+    ps_common
+    kv_engine
+    gtest
+    gtest_main
+    pthread
+    TBB::tbb
+)
+add_test(NAME test_kvengine_checkpoint COMMAND test_kvengine_checkpoint)
+
 if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     add_executable(test_hps_recstore_backend
         test_hps_recstore_backend.cpp
