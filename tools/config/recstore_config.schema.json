@@ -59,6 +59,33 @@
             "$ref": "#/$defs/serverNode"
           }
         },
+        "optimizer": {
+          "type": "object",
+          "description": "Server-owned sparse optimizer. Omit for legacy SGD(lr=0.01).",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "learning_rate"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "SGD",
+                "RowWiseAdagrad"
+              ]
+            },
+            "learning_rate": {
+              "type": "number",
+              "minimum": 0
+            },
+            "epsilon": {
+              "type": "number",
+              "minimum": 0,
+              "default": 1e-10
+            }
+          }
+        },
         "base_kv_config": {
           "$ref": "#/$defs/baseKvConfig"
         }

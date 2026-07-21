@@ -68,6 +68,7 @@ public:
     auto r                 = base::ResolveEngine(kv_config);
     base_kv_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
         r.engine, r.cfg));
+    optimizer_ = CreateOptimizer(config.value("optimizer", json::object()));
   }
 
   ~CachePS() {}

@@ -31,6 +31,38 @@ void ValidateFlatUpdateArgs(const base::ConstArray<uint64_t>& keys,
 
 } // namespace
 
+std::unique_ptr<Optimizer> CreateOptimizer(const json& config) {
+  if (!config.is_object()) {
+    throw std::invalid_argument("cache_ps.optimizer must be an object");
+  }
+
+  const std::string type    = config.value("type", "SGD");
+  const float learning_rate = config.value("learning_rate", 0.01f);
+  if (!std::isfinite(learning_rate) || learning_rate < 0.0f) {
+    throw std::invalid_argument(
+        "cache_ps.optimizer.learning_rate must be finite and non-negative");
+  }
+
+  if (type == "SGD") {
+    LOG(INFO) << "Configured sparse optimizer: type=SGD learning_rate="
+              << learning_rate;
+    return std::make_unique<SGD>(learning_rate);
+  }
+
+  if (type == "RowWiseAdagrad") {
+    const float epsilon = config.value("epsilon", 1e-10f);
+    if (!std::isfinite(epsilon) || epsilon < 0.0f) {
+      throw std::invalid_argument(
+          "cache_ps.optimizer.epsilon must be finite and non-negative");
+    }
+    LOG(INFO) << "Configured sparse optimizer: type=RowWiseAdagrad "
+              << "learning_rate=" << learning_rate << " epsilon=" << epsilon;
+    return std::make_unique<RowWiseAdaGrad>(learning_rate, epsilon);
+  }
+
+  throw std::invalid_argument("Unsupported cache_ps.optimizer.type: " + type);
+}
+
 void SGD::Init(const std::vector<std::string> table_name,
                const EmbeddingTableConfig& config,
                BaseKV* base_kv) {
@@ -288,10 +320,11 @@ void RowWiseAdaGrad::Init(const std::vector<std::string> table_name,
     SparseTensor* acc_tensor        = new SparseTensor();
     std::vector<uint64_t> acc_shape = {
         config.num_embeddings, 1}; // One value per row
+    TAG_TYPE acc_tag = static_cast<TAG_TYPE>(MOMENT_1);
     acc_tensor->init(
         const_cast<std::string&>(acc_table_name),
         MOMENT_1,
-        tag,
+        acc_tag,
         acc_shape,
         base_kv);
     tensor_map_[acc_table_name] = acc_tensor;
@@ -321,14 +354,17 @@ void RowWiseAdaGrad::Update(
   acc_it->second->BatchGet(keys, &acc_values, tid);
 
   for (int i = 0; i < size; ++i) {
-    const auto* item = reader->item(i);
-    if (current_values[i].Size() == 0 || acc_values[i].Size() == 0) {
-      continue;
+    const auto* item           = reader->item(i);
+    const auto& current        = current_values[static_cast<size_t>(i)];
+    const auto& acc            = acc_values[static_cast<size_t>(i)];
+    const int64_t expected_dim = param_it->second->EmbeddingDim();
+    if (item->dim != expected_dim ||
+        (current.Size() != 0 && current.Size() != expected_dim) ||
+        (acc.Size() != 0 && acc.Size() != 1)) {
+      throw std::runtime_error(
+          "RowWiseAdaGrad::Update embedding_dim mismatch for table " + table);
     }
-
-    float* param_data = const_cast<float*>(current_values[i].Data());
-    float* acc_data   = const_cast<float*>(acc_values[i].Data());
-    int dim           = std::min(current_values[i].Size(), item->dim);
+    const int dim = item->dim;
 
     float grad_square_mean = 0.0;
 #pragma omp simd reduction(+ : grad_square_mean)
@@ -337,12 +373,34 @@ void RowWiseAdaGrad::Update(
     }
     grad_square_mean /= dim;
 
-    acc_data[0] += grad_square_mean;
+    float accumulated_grad = acc.Size() == 0 ? 0.0f : acc.Data()[0];
+    accumulated_grad += grad_square_mean;
 
-    float adaptive_lr = learning_rate_ / (std::sqrt(acc_data[0]) + epsilon_);
+    const float adaptive_lr =
+        learning_rate_ / (std::sqrt(accumulated_grad) + epsilon_);
+    if (current.Size() == 0) {
+      std::vector<float> initial_value(static_cast<size_t>(dim), 0.0f);
+      for (int j = 0; j < dim; ++j) {
+        initial_value[static_cast<size_t>(j)] = -adaptive_lr * item->data()[j];
+      }
+      const std::string value(
+          reinterpret_cast<const char*>(initial_value.data()),
+          initial_value.size() * sizeof(float));
+      param_it->second->Put(item->key, value, tid);
+    } else {
+      float* param_data = const_cast<float*>(current.Data());
 #pragma omp simd
-    for (int j = 0; j < dim; ++j) {
-      param_data[j] -= adaptive_lr * item->data()[j];
+      for (int j = 0; j < dim; ++j) {
+        param_data[j] -= adaptive_lr * item->data()[j];
+      }
+    }
+
+    if (acc.Size() == 0) {
+      const std::string value(
+          reinterpret_cast<const char*>(&accumulated_grad), sizeof(float));
+      acc_it->second->Put(item->key, value, tid);
+    } else {
+      const_cast<float*>(acc.Data())[0] = accumulated_grad;
     }
   }
 }
@@ -377,20 +435,15 @@ void RowWiseAdaGrad::UpdateFlat(
   for (int64_t row = 0; row < num_rows; ++row) {
     const auto& current = current_values[static_cast<size_t>(row)];
     const auto& acc     = acc_values[static_cast<size_t>(row)];
-    if (current.Size() == 0 || acc.Size() == 0) {
-      continue;
-    }
-    if (static_cast<int64_t>(current.Size()) != embedding_dim ||
-        acc.Size() != 1) {
+    if ((current.Size() != 0 &&
+         static_cast<int64_t>(current.Size()) != embedding_dim) ||
+        (acc.Size() != 0 && acc.Size() != 1)) {
       throw std::runtime_error(
           "RowWiseAdaGrad::UpdateFlat embedding_dim mismatch for table " +
           table);
     }
 
-    const float* row_grad = grads + row * embedding_dim;
-    float* param_data     = const_cast<float*>(current.Data());
-    float* acc_data       = const_cast<float*>(acc.Data());
-
+    const float* row_grad  = grads + row * embedding_dim;
     float grad_square_mean = 0.0f;
 #pragma omp simd reduction(+ : grad_square_mean)
     for (int64_t col = 0; col < embedding_dim; ++col) {
@@ -398,11 +451,35 @@ void RowWiseAdaGrad::UpdateFlat(
     }
     grad_square_mean /= static_cast<float>(embedding_dim);
 
-    acc_data[0] += grad_square_mean;
-    float adaptive_lr = learning_rate_ / (std::sqrt(acc_data[0]) + epsilon_);
+    float accumulated_grad = acc.Size() == 0 ? 0.0f : acc.Data()[0];
+    accumulated_grad += grad_square_mean;
+    const float adaptive_lr =
+        learning_rate_ / (std::sqrt(accumulated_grad) + epsilon_);
+
+    if (current.Size() == 0) {
+      std::vector<float> initial_value(
+          static_cast<size_t>(embedding_dim), 0.0f);
+      for (int64_t col = 0; col < embedding_dim; ++col) {
+        initial_value[static_cast<size_t>(col)] = -adaptive_lr * row_grad[col];
+      }
+      const std::string value(
+          reinterpret_cast<const char*>(initial_value.data()),
+          initial_value.size() * sizeof(float));
+      param_it->second->Put(keys[static_cast<size_t>(row)], value, tid);
+    } else {
+      float* param_data = const_cast<float*>(current.Data());
 #pragma omp simd
-    for (int64_t col = 0; col < embedding_dim; ++col) {
-      param_data[col] -= adaptive_lr * row_grad[col];
+      for (int64_t col = 0; col < embedding_dim; ++col) {
+        param_data[col] -= adaptive_lr * row_grad[col];
+      }
+    }
+
+    if (acc.Size() == 0) {
+      const std::string value(
+          reinterpret_cast<const char*>(&accumulated_grad), sizeof(float));
+      acc_it->second->Put(keys[static_cast<size_t>(row)], value, tid);
+    } else {
+      const_cast<float*>(acc.Data())[0] = accumulated_grad;
     }
   }
 }

@@ -1,3 +1,6 @@
+import json
+import math
+import os
 import time
 
 import torch
@@ -6,6 +9,49 @@ from time import perf_counter
 from .single_node_exchange import SparseGradPayload, exchange_sparse_grads
 
 _LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
+
+
+def _server_sparse_optimizer_config() -> Dict[str, Any]:
+    config_path = os.environ.get("RECSTORE_CONFIG")
+    if not config_path:
+        return {"type": "SGD", "learning_rate": 0.01, "epsilon": 1e-10}
+    try:
+        with open(config_path, "r", encoding="utf-8") as config_file:
+            root_config = json.load(config_file)
+        optimizer_config = root_config.get("cache_ps", {}).get("optimizer", {})
+    except (OSError, TypeError, ValueError) as error:
+        raise RuntimeError(
+            f"Failed to read sparse optimizer config from {config_path}: {error}"
+        ) from error
+    if not isinstance(optimizer_config, dict):
+        raise RuntimeError("cache_ps.optimizer must be an object")
+    return {
+        "type": optimizer_config.get("type", "SGD"),
+        "learning_rate": float(optimizer_config.get("learning_rate", 0.01)),
+        "epsilon": float(optimizer_config.get("epsilon", 1e-10)),
+    }
+
+
+def _validate_server_sparse_optimizer(
+    expected_type: str,
+    learning_rate: float,
+    epsilon: float,
+) -> None:
+    actual = _server_sparse_optimizer_config()
+    matches = (
+        actual["type"] == expected_type
+        and math.isclose(
+            actual["learning_rate"], float(learning_rate), rel_tol=1e-12, abs_tol=0.0
+        )
+        and math.isclose(actual["epsilon"], float(epsilon), rel_tol=1e-12, abs_tol=0.0)
+    )
+    if not matches:
+        raise RuntimeError(
+            "RecStore sparse optimizer mismatch: "
+            f"requested type={expected_type}, learning_rate={learning_rate}, "
+            f"epsilon={epsilon}; cache_ps config has type={actual['type']}, "
+            f"learning_rate={actual['learning_rate']}, epsilon={actual['epsilon']}"
+        )
 
 class DistEmbedding:
     pass
@@ -481,7 +527,7 @@ class SparseOptimizer:
 
 class SparseSGD(SparseOptimizer):
     def step(self):
-        """Performs a single Sparse SGD optimization step."""
+        """Aggregates sparse gradients and submits them to the backend optimizer."""
         with torch.no_grad():
             self._last_step_profile = {}
             self._last_update_payloads = []
@@ -511,3 +557,24 @@ class SparseSGD(SparseOptimizer):
                         print(f"Warning: Module type {type(mod).__name__} is not supported by SparseSGD optimizer.")
                     if hasattr(mod, 'reset_trace'):
                         mod.reset_trace()
+
+
+class SparseRowWiseAdagrad(SparseSGD):
+    """Submit raw gradients to a matching server-owned RowWiseAdagrad optimizer."""
+
+    def __init__(
+        self,
+        params: List[torch.nn.Module],
+        lr: float = 0.01,
+        eps: float = 1e-10,
+    ) -> None:
+        if not all(
+            hasattr(module, "_config_names") and hasattr(module, "_trace")
+            for module in params
+        ):
+            raise TypeError(
+                "SparseRowWiseAdagrad only supports RecStore sparse modules"
+            )
+        _validate_server_sparse_optimizer("RowWiseAdagrad", lr, eps)
+        super().__init__(params, lr)
+        self.eps = float(eps)

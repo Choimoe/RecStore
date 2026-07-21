@@ -4,6 +4,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include "sparse_tensor.h"
 #include "ps/base/base_client.h"
@@ -105,3 +106,5 @@ public:
                   int64_t embedding_dim,
                   unsigned tid) override;
 };
+
+std::unique_ptr<Optimizer> CreateOptimizer(const json& config);

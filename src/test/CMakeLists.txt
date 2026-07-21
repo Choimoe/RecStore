@@ -108,6 +108,16 @@ target_link_libraries(test_config PUBLIC
 )
 add_test(NAME test_config COMMAND test_config)
 
+add_executable(test_optimizer test_optimizer.cpp)
+target_link_libraries(test_optimizer PUBLIC
+    sparse_tensor
+    base
+    gtest
+    gtest_main
+    pthread
+)
+add_test(NAME test_optimizer COMMAND test_optimizer)
+
 add_executable(test_shm_file test_shm_file.cpp)
 target_link_libraries(test_shm_file PUBLIC
     base
@@ -477,6 +487,16 @@ set_tests_properties(
     test_hierkv_python_ops_py
     PROPERTIES
     LABELS "hierkv;python;integration"
+)
+
+add_python_unittest(
+    test_sparse_optimizer_config_py
+    src.python.pytorch.recstore.unittest.test_sparse_optimizer_config
+)
+set_tests_properties(
+    test_sparse_optimizer_config_py
+    PROPERTIES
+    LABELS "optimizer;python"
 )
 
 if(TARGET recstore_torch_ops)
