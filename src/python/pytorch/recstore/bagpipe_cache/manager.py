@@ -52,14 +52,22 @@ class BagPipeWindowScheduler:
                 self.depth if requested_issue_depth == 0 else min(self.depth, requested_issue_depth)
             )
         self._planned_steps: set[int] = set()
-        self._pending_prefetch: dict[int, torch.Tensor] = {}
+        self._batch_features: dict[int, Any] = {}
+        self._pending_prefetch: dict[int, tuple[torch.Tensor, Any | None]] = {}
 
     @property
     def depth(self) -> int:
         return int(getattr(self.lookahead_prefetcher, "depth", 0))
 
-    def observe_batch(self, step: int, fused_ids: torch.Tensor) -> None:
+    def observe_batch(
+        self,
+        step: int,
+        fused_ids: torch.Tensor,
+        sparse_features: Any | None = None,
+    ) -> None:
         self.bagpipe_policy.observe_batch(int(step), fused_ids)
+        if sparse_features is not None:
+            self._batch_features[int(step)] = sparse_features
 
     def plan_ready(
         self,
@@ -88,8 +96,12 @@ class BagPipeWindowScheduler:
             if not (self.read_before_update and self.read_mode == "prefetch"):
                 continue
             if batch_step <= int(current_step):
+                self._batch_features.pop(batch_step, None)
                 continue
-            self._pending_prefetch[batch_step] = bagpipe_plan.prefetch_ids
+            self._pending_prefetch[batch_step] = (
+                bagpipe_plan.prefetch_ids,
+                self._batch_features.pop(batch_step, None),
+            )
 
     def on_step_end(self, step: int, row: dict[str, Any]) -> torch.Tensor:
         evicted = self.bagpipe_policy.on_step_end(int(step))
@@ -114,13 +126,13 @@ class BagPipeWindowScheduler:
         for batch_step in sorted(list(self._pending_prefetch.keys())):
             if batch_step > ready_until:
                 continue
-            prefetch_ids = self._pending_prefetch.pop(batch_step)
+            prefetch_ids, sparse_features = self._pending_prefetch.pop(batch_step)
             if prefetch_ids.numel() == 0:
                 issued = getattr(self.bagpipe_policy, "on_prefetch_issued", None)
                 if callable(issued):
                     issued(batch_step, prefetch_ids)
                 continue
-            self._enqueue_planned_prefetch(row, prefetch_ids)
+            self._enqueue_planned_prefetch(row, prefetch_ids, sparse_features)
             issued_nonempty = True
             issued = getattr(self.bagpipe_policy, "on_prefetch_issued", None)
             if callable(issued):
@@ -151,11 +163,15 @@ class BagPipeWindowScheduler:
         self,
         row: dict[str, Any],
         prefetch_ids: torch.Tensor,
+        sparse_features: Any | None,
     ) -> None:
         if prefetch_ids.numel() == 0:
             return
         prefetch_issue_before = self.lookahead_prefetcher.consume_stats(reset=False)
-        self.lookahead_prefetcher.enqueue_fused_ids(prefetch_ids)
+        if self.bagpipe_policy.cache_capacity <= 0 and sparse_features is not None:
+            self.lookahead_prefetcher.enqueue(sparse_features)
+        else:
+            self.lookahead_prefetcher.enqueue_fused_ids(prefetch_ids)
         self.lookahead_prefetcher.advance()
         prefetch_issue_after = self.lookahead_prefetcher.consume_stats(reset=False)
         for key in (

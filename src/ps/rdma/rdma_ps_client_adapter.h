@@ -43,6 +43,13 @@ public:
                           const float* grads,
                           int64_t num_rows,
                           int64_t embedding_dim) override;
+  uint64_t SubmitUpdateParameterFlatAsync(
+      const std::string& table_name,
+      const base::ConstArray<uint64_t>& keys,
+      const float* grads,
+      int64_t num_rows,
+      int64_t embedding_dim);
+  int WaitUpdateParameterFlat(uint64_t update_id);
   int InitEmbeddingTable(const std::string& table_name,
                          const EmbeddingTableConfig& config) override;
   int AsyncGetParameter(const base::ConstArray<uint64_t>& keys,
@@ -68,13 +75,17 @@ private:
   using ShardChunk      = shard_routing::ShardChunk;
 
   struct PrefetchState {
-    float* buffer          = nullptr;
-    std::size_t buffer_id  = 0;
+    std::shared_ptr<std::vector<float>> buffer;
     int rpc_id             = -1;
     int64_t key_count      = 0;
     int64_t embedding_dim  = 0;
     bool borrowed_response = false;
     bool batch_response    = false;
+  };
+
+  struct PendingUpdate {
+    std::vector<std::pair<int, int>> shard_rpcs;
+    std::thread::id owner;
   };
 
   void EnsureClientInitialized();
@@ -94,8 +105,6 @@ private:
   bool QueryRPCFinished(int rpc_id);
   void WaitRPCFinish(int rpc_id);
   void RevokeRPCResource(int rpc_id);
-  float* AcquirePrefetchBuffer(std::size_t bytes, std::size_t* buffer_id);
-  void ReleasePrefetchBuffer(std::size_t buffer_id);
   const float* BorrowPrefetchResult(const PrefetchState& state,
                                     std::int32_t* status_code,
                                     std::size_t* response_bytes);
@@ -117,11 +126,10 @@ private:
   mutable std::mutex batches_mu_;
   std::unordered_map<int, BatchRequest> batches_;
   std::unordered_map<std::string, TableState> tables_;
-  std::vector<std::unique_ptr<char[]>> prefetch_buffers_;
-  std::vector<std::size_t> prefetch_buffer_capacities_;
-  std::vector<std::size_t> free_prefetch_buffer_ids_;
   std::unordered_map<uint64_t, PrefetchState> prefetches_;
   uint64_t next_prefetch_id_ = 1;
+  std::unordered_map<uint64_t, PendingUpdate> pending_updates_;
+  uint64_t next_update_id_ = 1;
 };
 
 } // namespace recstore

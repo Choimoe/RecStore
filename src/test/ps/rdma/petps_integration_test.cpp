@@ -292,13 +292,15 @@ TEST(PetPSIntegrationTest, AdapterFlatUpdateRoundTripMultiShard) {
     }
   }
 
-  ASSERT_EQ(adapter.UpdateParameterFlat(
-                "flat_update",
-                base::ConstArray<std::uint64_t>(keys),
-                grads.data(),
-                static_cast<int64_t>(keys.size()),
-                embedding_dim),
-            0);
+  const uint64_t update_id = adapter.SubmitUpdateParameterFlatAsync(
+      "flat_update",
+      base::ConstArray<std::uint64_t>(keys),
+      grads.data(),
+      static_cast<int64_t>(keys.size()),
+      embedding_dim);
+  ASSERT_GT(update_id, 0);
+  ASSERT_EQ(adapter.WaitUpdateParameterFlat(update_id), 0);
+  EXPECT_THROW(adapter.WaitUpdateParameterFlat(update_id), std::runtime_error);
 
   std::vector<float> output(grads.size(), 0.0f);
   ASSERT_EQ(adapter.GetParameter(

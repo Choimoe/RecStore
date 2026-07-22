@@ -7,6 +7,39 @@ from ._sparse_test_utils import KVClientIsolationMixin, build_features
 
 
 class TestSparseOptimizerStaging(KVClientIsolationMixin, unittest.TestCase):
+    def test_rdma_update_is_submitted_before_wait(self):
+        ebc, fake = self.build_module()
+        submitted = {}
+        wait_calls = []
+
+        fake.current_ps_backend = lambda: "rdma"
+
+        def submit(name, ids, grads):
+            submitted[77] = (name, ids.clone(), grads.clone())
+            return 77
+
+        def wait(handle):
+            wait_calls.append(int(handle))
+            name, ids, grads = submitted.pop(int(handle))
+            fake.emb_update_table(name, ids, grads)
+
+        fake.emb_update_async = submit
+        fake.emb_update_wait = wait
+        optimizer = SparseSGD([ebc], lr=0.1)
+        features = build_features()
+
+        optimizer.zero_grad()
+        ebc(features).values().sum().backward()
+        optimizer.step()
+
+        self.assertIn(77, submitted)
+        self.assertEqual(fake.update_calls, [])
+
+        optimizer.flush()
+
+        self.assertEqual(wait_calls, [77])
+        self.assertEqual(len(fake.update_calls), 1)
+
     def test_sparse_optimizer_uses_module_specific_kv_client_for_async_updates(self):
         class _ProxyKVClient:
             def __init__(self, inner):

@@ -209,6 +209,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         # Cache for fused prefetch metadata (unique IDs and inverse) for one batch
         self._fused_ids_cpu: torch.Tensor | None = None
         self._fused_inverse: torch.Tensor | None = None
+        self._fused_prefetch_full_batch: bool = False
 
         # Phase-1 single-node distributed fast path stays fully opt-in.
         self.enable_single_node_distributed_fast_path: bool = False
@@ -431,13 +432,13 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         fused_ids_cpu: torch.Tensor | None = None,
         fused_inverse: torch.Tensor | None = None,
         invalid_fused_ids_cpu: torch.Tensor | None = None,
+        full_batch: bool = False,
     ):
         """Set a single fused prefetch handle for the upcoming forward.
 
         Optionally record stats: number of ids and issue timestamp for latency accounting.
-        Extra fused_ids_cpu and fused_inverse are accepted for API compatibility with the
-        prefetcher; they are currently unused but kept to avoid argument errors when
-        passed through from the producer thread.
+        The fused ID metadata lets a full-batch consumer expand unique lookup rows
+        without recomputing ``torch.unique``.
         """
         self._clear_per_feature_prefetch_state()
         slot = {
@@ -446,6 +447,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             "issue_ts": float(issue_ts) if issue_ts is not None else time.time(),
             "fused_ids_cpu": fused_ids_cpu if fused_ids_cpu is not None else None,
             "fused_inverse": fused_inverse if fused_inverse is not None else None,
+            "full_batch": bool(full_batch),
             "invalid_fused_ids_cpu": (
                 invalid_fused_ids_cpu.detach().to(dtype=torch.int64, device="cpu").flatten()
                 if isinstance(invalid_fused_ids_cpu, torch.Tensor)
@@ -469,6 +471,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             self._fused_prefetch_issue_ts = slot["issue_ts"]
             self._fused_ids_cpu = slot["fused_ids_cpu"]
             self._fused_inverse = slot["fused_inverse"]
+            self._fused_prefetch_full_batch = bool(slot.get("full_batch", False))
             self._fused_invalid_ids_cpu = slot.get("invalid_fused_ids_cpu")
         else:
             self._fused_prefetch_handle = None
@@ -476,6 +479,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             self._fused_prefetch_issue_ts = None
             self._fused_ids_cpu = None
             self._fused_inverse = None
+            self._fused_prefetch_full_batch = False
             self._fused_invalid_ids_cpu = None
 
     def _issue_fused_prefetch_from_ids(
@@ -485,6 +489,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         num_ids: int,
         *,
         record_handle: bool,
+        full_batch: bool,
     ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
         if unique_ids.numel() == 0:
             issue_ts = perf_counter()
@@ -506,23 +511,16 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 issue_ts=issue_ts,
                 fused_ids_cpu=unique_ids,
                 fused_inverse=inverse,
+                full_batch=full_batch,
             )
             return handle
         return handle, num_ids, issue_ts, unique_ids, inverse
 
-    def issue_fused_prefetch(
+    def prepare_fused_prefetch(
         self,
         features: KeyedJaggedTensor,
-        *,
-        record_handle: bool = True,
-    ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
-        """Compute fused global IDs and issue a single prefetch.
-
-        When record_handle is True (default), the handle is stored on the module and the
-        handle is returned. When False, the caller receives a tuple with metadata so the
-        consumer can set the handle later without touching shared state in the producer
-        thread: (handle, num_ids, issue_ts, fused_ids_cpu, inverse).
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """Build reusable unique-ID metadata for a full-batch fused prefetch."""
         if not self._enable_fusion or self._master_config is None:
             raise RuntimeError("Fused prefetch requires fusion enabled and a valid master config.")
 
@@ -544,10 +542,41 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         fused_ids_cpu_full = fused_values_all.to("cpu") if fused_values_all.numel() > 0 else fused_values_all
         unique_ids, inverse = self._dedupe_fused_ids_cpu(fused_ids_cpu_full)
         self._perf_add("lookup_ids_build_ms", (perf_counter() - t_build_start) * 1e3)
+        return unique_ids, inverse, int(fused_values_all.numel())
+
+    def issue_prepared_fused_prefetch(
+        self,
+        unique_ids: torch.Tensor,
+        inverse: torch.Tensor,
+        num_ids: int,
+        *,
+        record_handle: bool = True,
+    ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
+        """Issue a full-batch prefetch from previously prepared ID metadata."""
         return self._issue_fused_prefetch_from_ids(
             unique_ids,
             inverse,
-            int(fused_values_all.numel()),
+            int(num_ids),
+            record_handle=record_handle,
+            full_batch=True,
+        )
+
+    def issue_fused_prefetch(
+        self,
+        features: KeyedJaggedTensor,
+        *,
+        record_handle: bool = True,
+    ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
+        """Compute fused global IDs and issue a single prefetch.
+
+        When record_handle is True (default), the handle is stored on the module and the
+        handle is returned. When False, the caller receives a tuple with metadata so the
+        consumer can set the handle later without touching shared state in the producer
+        thread: (handle, num_ids, issue_ts, fused_ids_cpu, inverse).
+        """
+        prepared = self.prepare_fused_prefetch(features)
+        return self.issue_prepared_fused_prefetch(
+            *prepared,
             record_handle=record_handle,
         )
 
@@ -572,6 +601,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             inverse,
             int(unique_ids.numel()),
             record_handle=record_handle,
+            full_batch=False,
         )
 
     def prefill_gpu_cache_for_fused_ids(self, fused_ids: torch.Tensor) -> bool:
@@ -983,18 +1013,30 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             inv = self._fused_inverse
             ids_cached = self._fused_ids_cpu
             if inv is not None and ids_cached is not None and all_embeddings.size(0) == ids_cached.numel():
-                current_unique_ids = torch.unique(fused_values_all.detach().to(dtype=torch.int64, device="cpu"))
-                ids_match_current_batch = (
-                    ids_cached.detach().to(dtype=torch.int64, device="cpu").flatten().numel()
-                    == current_unique_ids.numel()
-                    and torch.equal(
-                        ids_cached.detach().to(dtype=torch.int64, device="cpu").flatten(),
-                        current_unique_ids,
+                if self._fused_prefetch_full_batch:
+                    cached_ids = ids_cached.detach().to(dtype=torch.int64, device="cpu").flatten()
+                    cached_inverse = inv.detach().to(dtype=torch.long, device="cpu").flatten()
+                    current_ids = cpu_ids.detach().to(dtype=torch.int64, device="cpu").flatten()
+                    slot_matches_current_batch = (
+                        cached_inverse.numel() == current_ids.numel()
+                        and (
+                            cached_inverse.numel() == 0
+                            or (
+                                int(cached_inverse.min().item()) >= 0
+                                and int(cached_inverse.max().item()) < cached_ids.numel()
+                                and torch.equal(
+                                    cached_ids.index_select(0, cached_inverse),
+                                    current_ids,
+                                )
+                            )
+                        )
                     )
-                )
-                if (
-                    ids_match_current_batch
-                    and (invalid_ids is None or invalid_ids.numel() == 0)
+                    if not slot_matches_current_batch:
+                        raise RuntimeError(
+                            "Fused prefetch slot does not match the current batch"
+                        )
+                if self._fused_prefetch_full_batch and (
+                    invalid_ids is None or invalid_ids.numel() == 0
                 ):
                     indexer = inv.to(device=all_embeddings.device, dtype=torch.long)
                     all_embeddings = all_embeddings.index_select(0, indexer)

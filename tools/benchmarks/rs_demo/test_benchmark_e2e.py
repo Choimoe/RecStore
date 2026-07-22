@@ -10,6 +10,23 @@ from unittest import mock
 
 
 class TestBenchmarkE2E(unittest.TestCase):
+    def test_recstore_step_total_includes_preconsume_work(self) -> None:
+        src_root = str(Path(__file__).resolve().parents[3] / "src")
+        if src_root not in sys.path:
+            sys.path.insert(0, src_root)
+        from model_zoo.rs_demo.runners.recstore_runner import _finalize_step_timing
+
+        row = {"batch_size": 2}
+        with mock.patch(
+            "model_zoo.rs_demo.runners.recstore_runner.time.perf_counter",
+            return_value=20.0,
+        ):
+            _finalize_step_timing(row, consume_start=18.0, wall_start=15.0)
+
+        self.assertEqual(row["step_visible_ms"], 2000.0)
+        self.assertEqual(row["step_total_ms"], 5000.0)
+        self.assertEqual(row["samples_per_sec"], 0.4)
+
     def test_parse_specs_and_infer_topology(self) -> None:
         from tools.benchmarks.e2e.custom import (
             BenchmarkConfig,
@@ -314,6 +331,37 @@ class TestBenchmarkE2E(unittest.TestCase):
         self.assertIn("## Workload 说明", report)
         self.assertIn("## E2E 吞吐", report)
         self.assertIn("## E2E 延迟分解", report)
+
+    def test_collect_summary_uses_slowest_rank_for_job_throughput(self) -> None:
+        from tools.benchmarks.e2e.custom import collect_summary_rows
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "recstore_main.csv"
+            with csv_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "step",
+                        "rank",
+                        "warmup_excluded",
+                        "step_total_ms",
+                        "embed_lookup_local_ms",
+                        "sparse_update_ms",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {"step": 0, "rank": 0, "warmup_excluded": 0, "step_total_ms": 50, "embed_lookup_local_ms": 5, "sparse_update_ms": 10}
+                )
+                writer.writerow(
+                    {"step": 0, "rank": 1, "warmup_excluded": 0, "step_total_ms": 100, "embed_lookup_local_ms": 5, "sparse_update_ms": 10}
+                )
+
+            rows = collect_summary_rows(
+                [{"main_csv": str(csv_path), "batch_size": 256}]
+            )
+
+        self.assertAlmostEqual(rows[0]["samples_per_sec"], 5120.0)
 
     def test_dry_run_writes_configs_commands_and_report(self) -> None:
         from tools.benchmarks.e2e.custom import main

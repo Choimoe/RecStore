@@ -131,6 +131,10 @@ public:
   void EmbUpdate(const std::string& table_name,
                  const base::RecTensor& keys,
                  const base::RecTensor& grads) override;
+  uint64_t EmbUpdateAsync(const std::string& table_name,
+                          const base::RecTensor& keys,
+                          const base::RecTensor& grads);
+  void WaitForEmbUpdate(uint64_t update_id);
   bool InitEmbeddingTable(const std::string& table_name,
                           const EmbeddingTableConfig& config) override;
   bool EmbExists(const base::RecTensor& keys) override;

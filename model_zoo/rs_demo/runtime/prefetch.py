@@ -13,6 +13,7 @@ class PrefetchSlot:
     issue_ts: float
     fused_ids_cpu: Any
     fused_inverse: Any
+    full_batch: bool
 
 
 class LookaheadPrefetcher:
@@ -98,6 +99,7 @@ class LookaheadPrefetcher:
                 issue_ts=float(issue_ts),
                 fused_ids_cpu=fused_ids_cpu,
                 fused_inverse=fused_inverse,
+                full_batch=True,
             )
         )
         self._stats["prefetch_issued_batches"] += 1.0
@@ -121,6 +123,7 @@ class LookaheadPrefetcher:
                 issue_ts=float(issue_ts),
                 fused_ids_cpu=fused_ids_cpu,
                 fused_inverse=fused_inverse,
+                full_batch=False,
             )
         )
         self._stats["prefetch_issued_batches"] += 1.0
@@ -155,6 +158,7 @@ class LookaheadPrefetcher:
             fused_ids_cpu=slot.fused_ids_cpu,
             fused_inverse=slot.fused_inverse,
             invalid_fused_ids_cpu=invalid_fused_ids,
+            full_batch=slot.full_batch,
         )
         self._stats["prefetch_consumed_batches"] += 1.0
         self._stats["prefetch_consumed_total_ids"] += float(slot.num_ids)

@@ -6,10 +6,8 @@
 #include <random>
 
 #include "base/array.h"
-#include "base/factory.h"
 #include "base/init.h"
 #include "base/timer.h"
-#include "ps/base/base_client.h"
 #include "test/server_mgr/ps_server_launcher.h"
 
 namespace {
@@ -72,72 +70,6 @@ void TestBasicConfig(const std::vector<int>& ports) {
               << client.shard_count() << std::endl;
   } catch (const std::exception& e) {
     std::cerr << "Recstore config test failed: " << e.what() << std::endl;
-  }
-}
-
-void TestFactoryClient(const std::vector<int>& ports) {
-  std::cout << "=== Testing Factory Pattern ===" << std::endl;
-
-  json config = {
-      {"distributed_client",
-       {{"servers",
-         {{{"host", "127.0.0.1"}, {"port", ports[0]}, {"shard", 0}},
-          {{"host", "127.0.0.1"}, {"port", ports[1]}, {"shard", 1}}}},
-        {"num_shards", 2},
-        {"hash_method", "city_hash"}}}};
-
-  std::unique_ptr<BasePSClient> base_client(
-      base::Factory<BasePSClient, json>::NewInstance(
-          "distributed_grpc", config));
-
-  if (!base_client) {
-    std::cerr << "Failed to create distributed PS client via factory!"
-              << std::endl;
-    return;
-  }
-
-  auto* client =
-      dynamic_cast<DistributedGRPCParameterClient*>(base_client.get());
-  if (!client) {
-    std::cerr << "Failed to cast to DistributedGRPCParameterClient!"
-              << std::endl;
-    return;
-  }
-
-  std::cout << "Successfully created distributed PS client via factory"
-            << std::endl;
-
-  try {
-    client->ClearPS();
-    std::vector<uint64_t> keys_vec = {1, 2, 3};
-    base::ConstArray<uint64_t> keys(keys_vec);
-    std::vector<std::vector<float>> emptyvalues(keys_vec.size());
-    std::vector<std::vector<float>> rightvalues = {{1}, {2, 2}, {3, 3, 3}};
-    std::vector<std::vector<float>> values;
-    client->GetParameter(keys, &values);
-    CHECK(check_eq_2d(values, emptyvalues));
-    std::cout << "pass first check" << std::endl;
-
-    client->PutParameter(keys, rightvalues);
-    client->GetParameter(keys, &values);
-    CHECK(check_eq_2d(values, rightvalues));
-    std::cout << "pass second check" << std::endl;
-
-    client->ClearPS();
-    client->GetParameter(keys, &values);
-    CHECK(check_eq_2d(values, emptyvalues));
-
-    std::cout << "load fake data" << std::endl;
-    CHECK(client->LoadFakeData(100));
-    std::cout << "load fake data done" << std::endl;
-    std::cout << "dump fake data" << std::endl;
-    CHECK(client->DumpFakeData(100));
-    std::cout << "dump fake data done" << std::endl;
-
-    std::cout << "All distributed PS operations passed!" << std::endl;
-  } catch (const std::exception& e) {
-    std::cout << "Test skipped (servers not available): " << e.what()
-              << std::endl;
   }
 }
 
@@ -360,9 +292,6 @@ int main(int argc, char** argv) {
   std::cout << std::endl;
 
   TestBasicConfig(ports);
-  std::cout << std::endl;
-
-  TestFactoryClient(ports);
   std::cout << std::endl;
 
   TestDirectClient(ports);

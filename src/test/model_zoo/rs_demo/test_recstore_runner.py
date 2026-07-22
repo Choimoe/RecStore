@@ -21,6 +21,7 @@ from model_zoo.rs_demo.runners.recstore_runner import (
     _build_train_dataloader_for_mode,
     _effective_prefetch_issue_depth,
     _maybe_wrap_dense_module_for_dist,
+    _should_use_bagpipe_window_scheduler,
 )
 from model_zoo.rs_demo.runtime.prefetch import LookaheadPrefetcher
 
@@ -36,7 +37,7 @@ class _DummyDense(torch.nn.Module):
         return self.linear(features)
 
 
-class _FakeShardedClient:
+class _FakeRecStoreClient:
     def __init__(self) -> None:
         self.emb_read_calls = 0
         self.emb_read_prefetch_calls = 0
@@ -136,7 +137,7 @@ class _FakeShardedClient:
         return self._shared_local_shm_table
 
 
-class _FakeDirectReadShardedClient(_FakeShardedClient):
+class _FakeDirectReadRecStoreClient(_FakeRecStoreClient):
     def emb_read(self, keys: torch.Tensor, embedding_dim: int) -> torch.Tensor:
         self.emb_read_calls += 1
         return torch.zeros((keys.numel(), embedding_dim), dtype=torch.float32)
@@ -153,6 +154,7 @@ class _FakeRecStoreEmbeddingBagCollection:
         self.issue_fused_prefetch_record_flags: list[bool] = []
         self.issue_fused_prefetch_features: list[object] = []
         self.issue_fused_id_prefetch_ids: list[torch.Tensor] = []
+        self.prepare_fused_prefetch_calls = 0
         self.set_fused_prefetch_handle_calls = 0
         self.forward_features: list[object] = []
         self.reset_perf_stats_calls = 0
@@ -182,6 +184,23 @@ class _FakeRecStoreEmbeddingBagCollection:
             fused_ids.detach().to(dtype=torch.int64, device="cpu").flatten(),
             torch.arange(int(fused_ids.numel()), dtype=torch.int64),
         )
+
+    def prepare_fused_prefetch(self, features):
+        self.prepare_fused_prefetch_calls += 1
+        self.issue_fused_prefetch_features.append(features)
+        return (
+            torch.tensor([1], dtype=torch.int64),
+            torch.tensor([0], dtype=torch.int64),
+            7,
+        )
+
+    def issue_prepared_fused_prefetch(
+        self, unique_ids, inverse, num_ids, *, record_handle: bool = True
+    ):
+        del unique_ids, inverse
+        self.issue_fused_prefetch_calls += 1
+        self.issue_fused_prefetch_record_flags.append(bool(record_handle))
+        return 3000 + self.issue_fused_prefetch_calls
 
     def set_fused_prefetch_handle(self, *args, **kwargs) -> None:
         del args, kwargs
@@ -430,6 +449,36 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertEqual(_effective_prefetch_issue_depth(10, 20), 10)
         self.assertEqual(_effective_prefetch_issue_depth(50, 0), 50)
 
+    def test_depth_zero_without_gpu_cache_skips_bagpipe_scheduler(self) -> None:
+        self.assertFalse(
+            _should_use_bagpipe_window_scheduler(
+                enable_bagpipe_cache=False,
+                enable_gpu_cache=False,
+                prefetch_depth=0,
+            )
+        )
+        self.assertTrue(
+            _should_use_bagpipe_window_scheduler(
+                enable_bagpipe_cache=False,
+                enable_gpu_cache=False,
+                prefetch_depth=1,
+            )
+        )
+        self.assertTrue(
+            _should_use_bagpipe_window_scheduler(
+                enable_bagpipe_cache=False,
+                enable_gpu_cache=True,
+                prefetch_depth=0,
+            )
+        )
+        self.assertFalse(
+            _should_use_bagpipe_window_scheduler(
+                enable_bagpipe_cache=True,
+                enable_gpu_cache=True,
+                prefetch_depth=1,
+            )
+        )
+
     def test_lookahead_prefetcher_delays_consumption_by_depth(self) -> None:
         module = _FakePrefetchModule()
         prefetcher = LookaheadPrefetcher(module, depth=2, embedding_dim=128)
@@ -628,7 +677,7 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertEqual(policy.update_calls[0][1].tolist(), [4, 5])
         self.assertEqual(policy.update_calls[0][2].tolist(), [4, 5])
 
-    def test_finalize_step_timing_uses_visible_training_time(self) -> None:
+    def test_finalize_step_timing_separates_visible_and_total_time(self) -> None:
         row = {
             "batch_size": 64,
             "prefetch_queue_residence_ms": 50.0,
@@ -638,21 +687,23 @@ class TestRecStoreRunner(unittest.TestCase):
             "model_zoo.rs_demo.runners.recstore_runner.time.perf_counter",
             return_value=12.0,
         ):
-            recstore_runner._finalize_step_timing(row, consume_start=10.0)
+            recstore_runner._finalize_step_timing(
+                row, consume_start=10.0, wall_start=9.0
+            )
 
         self.assertEqual(row["step_visible_ms"], 2000.0)
-        self.assertEqual(row["step_total_ms"], 2000.0)
-        self.assertEqual(row["samples_per_sec"], 32.0)
-        self.assertEqual(row["batches_per_sec"], 0.5)
+        self.assertEqual(row["step_total_ms"], 3000.0)
+        self.assertAlmostEqual(row["samples_per_sec"], 64 / 3)
+        self.assertAlmostEqual(row["batches_per_sec"], 1 / 3)
         self.assertEqual(row["prefetch_queue_residence_ms"], 50.0)
-        self.assertEqual(row["step_end_to_end_ms"], 2000.0)
+        self.assertEqual(row["step_end_to_end_ms"], 3000.0)
 
     def test_warmup_gpu_local_shm_fast_path_runs_only_for_shared_cuda_fast_path(self) -> None:
         cfg = RunConfig(
             backend="recstore",
             enable_single_node_distributed_fast_path=True,
         )
-        client = _FakeShardedClient()
+        client = _FakeRecStoreClient()
         client._shared_local_shm_table = True
 
         warmed = recstore_runner._maybe_warmup_gpu_local_shm_fast_path(
@@ -670,7 +721,7 @@ class TestRecStoreRunner(unittest.TestCase):
             enable_single_node_distributed_fast_path=True,
             single_node_ps_backend="hierkv",
         )
-        client = _FakeShardedClient()
+        client = _FakeRecStoreClient()
         client._shared_local_shm_table = True
         client.set_ps_backend("hierkv")
 
@@ -689,7 +740,7 @@ class TestRecStoreRunner(unittest.TestCase):
             backend="recstore",
             enable_single_node_distributed_fast_path=False,
         )
-        client = _FakeShardedClient()
+        client = _FakeRecStoreClient()
         client._shared_local_shm_table = True
 
         warmed = recstore_runner._maybe_warmup_gpu_local_shm_fast_path(
@@ -718,9 +769,7 @@ class TestRecStoreRunner(unittest.TestCase):
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
 
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeDirectReadRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         class _ProfiledEmbeddingBagCollection(_FakeRecStoreEmbeddingBagCollection):
             def __init__(self, *args, **kwargs) -> None:
@@ -752,7 +801,6 @@ class TestRecStoreRunner(unittest.TestCase):
                 mock.patch.dict(
                     "sys.modules",
                     {
-                        "client": fake_client_module,
                         "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                         "python.pytorch.recstore.optimizer": fake_optimizer_module,
                     },
@@ -778,8 +826,8 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                    lambda raw_client, runtime_dir: fake_client,
+                    "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                    lambda library_path: fake_client,
                 )
             )
             stack.enter_context(
@@ -802,7 +850,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                    "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                     lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                 )
             )
@@ -848,7 +896,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
+                    "model_zoo.rs_demo.runners.recstore_runner._write_rows",
                     lambda *args, **kwargs: None,
                 )
             )
@@ -1284,9 +1332,7 @@ class TestRecStoreRunner(unittest.TestCase):
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
 
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeDirectReadRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
         fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
@@ -1298,7 +1344,6 @@ class TestRecStoreRunner(unittest.TestCase):
                 mock.patch.dict(
                     "sys.modules",
                     {
-                        "client": fake_client_module,
                         "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                         "python.pytorch.recstore.optimizer": fake_optimizer_module,
                     },
@@ -1308,11 +1353,11 @@ class TestRecStoreRunner(unittest.TestCase):
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed", lambda *_: None))
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD", _FakeDenseOptimizer))
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.detect_library_path", lambda *_: repo_root / "build/lib/lib_recstore_ops.so"))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient", lambda raw_client, runtime_dir: fake_client))
+            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner._create_recstore_client", lambda library_path: fake_client))
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names", lambda: ["cat_0"]))
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader", lambda **kwargs: (dataset, dataloader)))
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels", lambda *args, **kwargs: (None, object())))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch", lambda *args, **kwargs: _DummyDense().to(kwargs["device"])))
+            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.build_dense_module", lambda *args, **kwargs: _DummyDense().to(kwargs["device"])))
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm", lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True)))
             stack.enter_context(
                 mock.patch(
@@ -1330,7 +1375,7 @@ class TestRecStoreRunner(unittest.TestCase):
             stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row", lambda row: row))
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
+                    "model_zoo.rs_demo.runners.recstore_runner._write_rows",
                     lambda path, rows: captured_rows.extend(rows),
                 )
             )
@@ -1425,7 +1470,7 @@ class TestRecStoreRunner(unittest.TestCase):
             gpu_cache_capacity=1024,
             recstore_main_csv="/tmp/recstore-gpu-cache-false.csv",
         )
-        fake_client = _FakeShardedClient()
+        fake_client = _FakeRecStoreClient()
         fake_client.enable_gpu_cache_result = False
         fake_ebc = types.SimpleNamespace(kv_client=fake_client)
 
@@ -1436,7 +1481,7 @@ class TestRecStoreRunner(unittest.TestCase):
 
     def test_gpu_cache_profile_merges_with_stage_prefix(self) -> None:
         row = {}
-        fake_client = _FakeShardedClient()
+        fake_client = _FakeRecStoreClient()
         fake_client.gpu_cache_profile = {
             "gpu_cache_query_ms": 0.11,
             "gpu_cache_backend_lookup_ms": 0.22,
@@ -1481,9 +1526,7 @@ class TestRecStoreRunner(unittest.TestCase):
         labels = torch.zeros((1, 1), dtype=torch.float32)
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeDirectReadRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         class _ProfiledEmbeddingBagCollection(_FakeRecStoreEmbeddingBagCollection):
             def __init__(self, *args, **kwargs) -> None:
@@ -1515,7 +1558,6 @@ class TestRecStoreRunner(unittest.TestCase):
                 mock.patch.dict(
                     "sys.modules",
                     {
-                        "client": fake_client_module,
                         "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                         "python.pytorch.recstore.optimizer": fake_optimizer_module,
                     },
@@ -1541,8 +1583,8 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                    lambda raw_client, runtime_dir: fake_client,
+                    "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                    lambda library_path: fake_client,
                 )
             )
             stack.enter_context(
@@ -1565,7 +1607,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                    "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                     lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                 )
             )
@@ -1593,7 +1635,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
+                    "model_zoo.rs_demo.runners.recstore_runner._write_rows",
                     lambda *args, **kwargs: None,
                 )
             )
@@ -1627,7 +1669,6 @@ class TestRecStoreRunner(unittest.TestCase):
             )
 
         self.assertEqual(fake_client.set_ps_backend_calls, ["hierkv"])
-        self.assertEqual(fake_client.activate_shard_calls, [0])
 
     def test_read_before_update_prefetch_mode_uses_ebc_prefetch_and_sparse_optimizer(self) -> None:
         runner_runtime = Path(tempfile.mkdtemp())
@@ -1650,9 +1691,7 @@ class TestRecStoreRunner(unittest.TestCase):
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
 
-        fake_client = _FakeShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
         fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
@@ -1661,7 +1700,6 @@ class TestRecStoreRunner(unittest.TestCase):
         with mock.patch.dict(
             "sys.modules",
             {
-                "client": fake_client_module,
                 "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                 "python.pytorch.recstore.optimizer": fake_optimizer_module,
             },
@@ -1677,8 +1715,8 @@ class TestRecStoreRunner(unittest.TestCase):
                             lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
                         ):
                             with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                                lambda raw_client, runtime_dir: fake_client,
+                                "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                                lambda library_path: fake_client,
                             ):
                                 with mock.patch(
                                     "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
@@ -1693,7 +1731,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                             lambda *args, **kwargs: (None, object()),
                                         ):
                                             with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                                                "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                                                 lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                                             ):
                                                 with mock.patch(
@@ -1725,7 +1763,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                                                         lambda xs: "ok",
                                                                     ):
                                                                         with mock.patch(
-                                                                            "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
+                                                                            "model_zoo.rs_demo.runners.recstore_runner._write_rows",
                                                                             lambda *args, **kwargs: None,
                                                                         ):
                                                                             runner = RecStoreRunner(runner_runtime)
@@ -1773,9 +1811,7 @@ class TestRecStoreRunner(unittest.TestCase):
         build_devices: list[torch.device | None] = []
         build_device_by_feature: dict[object, torch.device | None] = {}
 
-        fake_client = _FakeShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
         fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
@@ -1785,7 +1821,6 @@ class TestRecStoreRunner(unittest.TestCase):
         with mock.patch.dict(
             "sys.modules",
             {
-                "client": fake_client_module,
                 "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                 "python.pytorch.recstore.optimizer": fake_optimizer_module,
             },
@@ -1801,8 +1836,8 @@ class TestRecStoreRunner(unittest.TestCase):
                             lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
                         ):
                             with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                                lambda raw_client, runtime_dir: fake_client,
+                                "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                                lambda library_path: fake_client,
                             ):
                                 with mock.patch(
                                     "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
@@ -1827,7 +1862,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                             build_fake_kjt,
                                         ):
                                             with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                                                "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                                                 lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                                             ):
                                                 with mock.patch(
@@ -1859,7 +1894,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                                                         lambda xs: "ok",
                                                                     ):
                                                                         with mock.patch(
-                                                                            "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
+                                                                            "model_zoo.rs_demo.runners.recstore_runner._write_rows",
                                                                             lambda path, rows: captured_rows.extend(rows),
                                                                         ):
                                                                             runner = RecStoreRunner(runner_runtime)
@@ -1954,9 +1989,7 @@ class TestRecStoreRunner(unittest.TestCase):
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
 
-        fake_client = _FakeShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
         fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
@@ -1966,7 +1999,6 @@ class TestRecStoreRunner(unittest.TestCase):
         with mock.patch.dict(
             "sys.modules",
             {
-                "client": fake_client_module,
                 "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                 "python.pytorch.recstore.optimizer": fake_optimizer_module,
             },
@@ -1982,8 +2014,8 @@ class TestRecStoreRunner(unittest.TestCase):
                             lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
                         ):
                             with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                                lambda raw_client, runtime_dir: fake_client,
+                                "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                                lambda library_path: fake_client,
                             ):
                                 with mock.patch(
                                     "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
@@ -1998,7 +2030,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                             lambda *args, **kwargs: (None, object()),
                                         ):
                                             with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                                                "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                                                 lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                                             ):
                                                 with mock.patch(
@@ -2030,7 +2062,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                                                         lambda xs: "ok",
                                                                     ):
                                                                         with mock.patch(
-                                                                            "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
+                                                                            "model_zoo.rs_demo.runners.recstore_runner._write_rows",
                                                                             lambda *args, **kwargs: None,
                                                                         ):
                                                                             runner = RecStoreRunner(runner_runtime)
@@ -2070,9 +2102,7 @@ class TestRecStoreRunner(unittest.TestCase):
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
 
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeDirectReadRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         class _ProfiledEmbeddingBagCollection(_FakeRecStoreEmbeddingBagCollection):
             def __init__(self, *args, **kwargs) -> None:
@@ -2100,7 +2130,6 @@ class TestRecStoreRunner(unittest.TestCase):
         with mock.patch.dict(
             "sys.modules",
             {
-                "client": fake_client_module,
                 "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                 "python.pytorch.recstore.optimizer": fake_optimizer_module,
             },
@@ -2111,8 +2140,8 @@ class TestRecStoreRunner(unittest.TestCase):
                     lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
                 ):
                     with mock.patch(
-                        "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                        lambda raw_client, runtime_dir: fake_client,
+                        "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                        lambda library_path: fake_client,
                     ):
                         with mock.patch(
                             "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
@@ -2127,7 +2156,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                     lambda *args, **kwargs: (None, object()),
                                 ):
                                     with mock.patch(
-                                        "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                                        "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                                         lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                                     ):
                                         with mock.patch(
@@ -2197,9 +2226,7 @@ class TestRecStoreRunner(unittest.TestCase):
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
 
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeDirectReadRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
         fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
@@ -2213,7 +2240,6 @@ class TestRecStoreRunner(unittest.TestCase):
         with mock.patch.dict(
             "sys.modules",
             {
-                "client": fake_client_module,
                 "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                 "python.pytorch.recstore.optimizer": fake_optimizer_module,
             },
@@ -2224,8 +2250,8 @@ class TestRecStoreRunner(unittest.TestCase):
                     lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
                 ):
                     with mock.patch(
-                        "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                        lambda raw_client, runtime_dir: fake_client,
+                        "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                        lambda library_path: fake_client,
                     ):
                         with mock.patch(
                             "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
@@ -2240,7 +2266,7 @@ class TestRecStoreRunner(unittest.TestCase):
                                     _build_sparse_features,
                                 ):
                                     with mock.patch(
-                                        "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                                        "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                                         lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                                     ):
                                         with mock.patch(
@@ -2306,9 +2332,7 @@ class TestRecStoreRunner(unittest.TestCase):
         dataset = [(dense, sparse, labels)]
         dataloader = [(dense, sparse, labels)]
 
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeDirectReadRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
         fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
@@ -2325,7 +2349,6 @@ class TestRecStoreRunner(unittest.TestCase):
                 mock.patch.dict(
                     "sys.modules",
                     {
-                        "client": fake_client_module,
                         "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                         "python.pytorch.recstore.optimizer": fake_optimizer_module,
                     },
@@ -2351,8 +2374,8 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                    lambda raw_client, runtime_dir: fake_client,
+                    "model_zoo.rs_demo.runners.recstore_runner._create_recstore_client",
+                    lambda library_path: fake_client,
                 )
             )
             stack.enter_context(
@@ -2375,7 +2398,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                    "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                     lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                 )
             )
@@ -2427,7 +2450,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
+                    "model_zoo.rs_demo.runners.recstore_runner._write_rows",
                     lambda *args, **kwargs: None,
                 )
             )
@@ -2460,7 +2483,7 @@ class TestRecStoreRunner(unittest.TestCase):
             rank0 = Path(tmpdir) / "rank0.csv"
             rank1 = Path(tmpdir) / "rank1.csv"
             out_csv = Path(tmpdir) / "main.csv"
-            recstore_runner.write_stage_csv(
+            recstore_runner._write_rows(
                 rank1,
                 [
                     {
@@ -2472,7 +2495,7 @@ class TestRecStoreRunner(unittest.TestCase):
                     }
                 ],
             )
-            recstore_runner.write_stage_csv(
+            recstore_runner._write_rows(
                 rank0,
                 [
                     {

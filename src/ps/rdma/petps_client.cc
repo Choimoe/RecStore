@@ -381,6 +381,20 @@ void PetPSClient::FillUpdateDescriptor(
   }
 }
 
+void PetPSClient::FillUpdateFlatDescriptor(
+    RequestDescriptor* descriptor,
+    std::uint64_t seq,
+    std::size_t key_count,
+    std::size_t payload_bytes,
+    std::size_t embedding_dim,
+    const std::string& table_name,
+    const RcClientQpView& view) const {
+  FillUpdateDescriptor(
+      descriptor, seq, key_count, payload_bytes, table_name, view);
+  descriptor->op            = static_cast<std::uint16_t>(RcOp::kUpdateFlat);
+  descriptor->embedding_dim = static_cast<std::uint32_t>(embedding_dim);
+}
+
 void PetPSClient::FillInitTableDescriptor(
     RequestDescriptor* descriptor,
     std::uint64_t seq,
@@ -781,33 +795,105 @@ int PetPSClient::SubmitUpdateParameterFlat(
     return -1;
   }
 
-  std::string payload;
-  std::string error;
-  const std::size_t payload_bytes = UpdatePayloadBytesFlat(
-      keys, grads, embedding_dim, &payload, &error);
+  const std::size_t payload_bytes =
+      FlatUpdatePayloadBytes(keys.Size(), embedding_dim);
   if (payload_bytes == 0) {
-    throw std::runtime_error("RC UPDATE payload build failed: " + error);
+    throw std::runtime_error("RC UPDATE payload has invalid shape");
   }
 
   std::lock_guard<std::mutex> guard(mu_);
   EnsureThreadInitializedLocked();
   const SlotHandle slot_handle = AcquireIdleSlot();
   auto& slot = SlotAt(slot_handle.qp_index, slot_handle.slot_in_qp);
-  RequestDescriptor descriptor;
-  FillUpdateDescriptor(
-      &descriptor,
-      slot.next_seq++,
-      keys.Size(),
-      payload_bytes,
-      table_name,
-      slot.view);
   if (!RequestPayloadFitsSlot(payload_bytes)) {
     slot.busy = false;
     throw std::runtime_error("UPDATE request exceeds RC request slot");
   }
+  const std::size_t key_bytes = keys.Size() * sizeof(std::uint64_t);
+  auto* payload               = static_cast<char*>(slot.view.payload);
+  std::memcpy(payload, keys.Data(), key_bytes);
+  std::memcpy(
+      payload + key_bytes, grads, keys.Size() * embedding_dim * sizeof(float));
+
+  RequestDescriptor descriptor;
+  FillUpdateFlatDescriptor(
+      &descriptor,
+      slot.next_seq++,
+      keys.Size(),
+      payload_bytes,
+      embedding_dim,
+      table_name,
+      slot.view);
   float* recv = AllocateStatusReceiveBufferLocked();
   return SubmitRpcLocked(
-      &slot, descriptor, payload.data(), payload_bytes, recv, 0, 0, true);
+      &slot, descriptor, payload, payload_bytes, recv, 0, 0, true);
+}
+
+int PetPSClient::SubmitUpdateParameterFlatGather(
+    const std::string& table_name,
+    const std::uint64_t* keys,
+    const float* grads,
+    std::size_t num_rows,
+    std::size_t embedding_dim,
+    const std::size_t* row_indices,
+    std::size_t row_count) {
+  if (row_count == 0) {
+    return 0;
+  }
+  if (keys == nullptr || grads == nullptr || row_indices == nullptr ||
+      embedding_dim == 0 ||
+      row_count > static_cast<std::size_t>(FLAGS_max_kv_num_per_request)) {
+    return -1;
+  }
+
+  const std::size_t payload_bytes =
+      FlatUpdatePayloadBytes(row_count, embedding_dim);
+  if (payload_bytes == 0) {
+    throw std::runtime_error("RC UPDATE gather payload has invalid shape");
+  }
+
+  std::lock_guard<std::mutex> guard(mu_);
+  EnsureThreadInitializedLocked();
+  const SlotHandle slot_handle = AcquireIdleSlot();
+  auto& slot = SlotAt(slot_handle.qp_index, slot_handle.slot_in_qp);
+  if (!RequestPayloadFitsSlot(payload_bytes)) {
+    slot.busy = false;
+    throw std::runtime_error("UPDATE gather request exceeds RC request slot");
+  }
+  std::string error;
+  if (PackFlatUpdatePayloadGather(
+          keys,
+          grads,
+          num_rows,
+          embedding_dim,
+          row_indices,
+          row_count,
+          slot.view.payload,
+          payload_bytes,
+          &error) == 0) {
+    slot.busy = false;
+    throw std::runtime_error("RC UPDATE gather payload build failed: " + error);
+  }
+
+  RequestDescriptor descriptor;
+  FillUpdateFlatDescriptor(
+      &descriptor,
+      slot.next_seq++,
+      row_count,
+      payload_bytes,
+      embedding_dim,
+      table_name,
+      slot.view);
+  float* recv = AllocateStatusReceiveBufferLocked();
+  return SubmitRpcLocked(
+      &slot,
+      descriptor,
+      slot.view.payload,
+      payload_bytes,
+      recv,
+      0,
+      0,
+      true);
 }
 
 int PetPSClient::WaitUpdateParameter(int rpc_id) {
@@ -822,7 +908,8 @@ int PetPSClient::WaitUpdateParameter(int rpc_id) {
       return -1;
     }
   }
-  const auto status = *reinterpret_cast<const std::int32_t*>(pending.recv_buffer);
+  const auto status =
+      *reinterpret_cast<const std::int32_t*>(pending.recv_buffer);
   RevokeRPCResource(rpc_id);
   return status == static_cast<std::int32_t>(RpcStatus::kOk) ? 0 : -1;
 }

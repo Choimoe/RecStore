@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -133,6 +134,74 @@ class TestFusedPrefetch(unittest.TestCase):
         kjt = build_sparse_features(keys=keys, values=values, lengths=lengths)
         return kjt
 
+    def test_fused_prefetch_reuses_slot_deduplication_metadata(self):
+        configs = [
+            dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
+        ]
+        fake = _FakeOps()
+        ebc = RecStoreEmbeddingBagCollection(
+            configs,
+            enable_fusion=True,
+            fusion_k=30,
+            kv_client=_FakeKVClient(fake),
+        )
+        fused_ids = torch.tensor([1, 1, 3], dtype=torch.int64)
+        result = ebc.issue_fused_id_prefetch(fused_ids, record_handle=False)
+        handle, num_ids, issue_ts, unique_ids, inverse = result
+        ebc.set_fused_prefetch_handle(
+            handle,
+            num_ids=num_ids,
+            issue_ts=issue_ts,
+            fused_ids_cpu=unique_ids,
+            fused_inverse=inverse,
+            full_batch=True,
+        )
+
+        with mock.patch.object(
+            torch,
+            "unique",
+            side_effect=AssertionError("consume must reuse prefetch metadata"),
+        ):
+            embeddings, used = ebc._consume_fused_prefetch_embeddings(
+                fused_ids,
+                fused_ids,
+                compute_device=torch.device("cpu"),
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(embeddings.shape, (3, 4))
+
+    def test_fused_prefetch_rejects_mismatched_slot(self):
+        configs = [
+            dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
+        ]
+        fake = _FakeOps()
+        ebc = RecStoreEmbeddingBagCollection(
+            configs,
+            enable_fusion=True,
+            fusion_k=30,
+            kv_client=_FakeKVClient(fake),
+        )
+        prefetched_ids = torch.tensor([1, 1, 3], dtype=torch.int64)
+        current_ids = torch.tensor([1, 3, 3], dtype=torch.int64)
+        result = ebc.issue_fused_id_prefetch(prefetched_ids, record_handle=False)
+        handle, num_ids, issue_ts, unique_ids, inverse = result
+        ebc.set_fused_prefetch_handle(
+            handle,
+            num_ids=num_ids,
+            issue_ts=issue_ts,
+            fused_ids_cpu=unique_ids,
+            fused_inverse=inverse,
+            full_batch=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            ebc._consume_fused_prefetch_embeddings(
+                current_ids,
+                current_ids,
+                compute_device=torch.device("cpu"),
+            )
+
     def test_fused_prefetch_matches_sync(self):
         configs = [
             dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
@@ -233,6 +302,34 @@ class TestFusedPrefetch(unittest.TestCase):
         self.assertNotIn((1 << 30) + 4, looked_up_ids)
         perf = ebc.consume_perf_stats(reset=True)
         self.assertEqual(perf["lookup_fallback_pull_ms"], 0.0)
+
+    def test_prepared_fused_prefetch_matches_sync(self):
+        configs = [
+            dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
+            dict(name="t1", embedding_dim=4, num_embeddings=16, feature_names=["f2"]),
+        ]
+        fake = _FakeOps()
+        ebc = RecStoreEmbeddingBagCollection(
+            configs,
+            enable_fusion=True,
+            fusion_k=30,
+            kv_client=_FakeKVClient(fake),
+        )
+        for idx, cfg in enumerate(configs):
+            base_offset = idx << 30
+            keys = torch.arange(cfg["num_embeddings"], dtype=torch.int64) + base_offset
+            values = torch.arange(
+                cfg["num_embeddings"] * cfg["embedding_dim"], dtype=torch.float32
+            ).view(cfg["num_embeddings"], cfg["embedding_dim"])
+            fake.emb_write(keys, values + idx * 1000)
+
+        features = self._build_features()
+        expected = ebc(features).values().detach().clone()
+        prepared = ebc.prepare_fused_prefetch(features)
+        ebc.issue_prepared_fused_prefetch(*prepared)
+        actual = ebc(features).values().detach()
+
+        self.assertTrue(torch.allclose(expected, actual))
 
     def test_partial_fused_prefetch_records_merge_stats(self):
         configs = [

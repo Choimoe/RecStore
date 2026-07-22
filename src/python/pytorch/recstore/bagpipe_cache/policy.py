@@ -87,23 +87,20 @@ class BagPipeCachePolicy:
         cache_insert = {
             emb_id
             for emb_id in current_ids
-            if emb_id not in cache_before_batch
+            if self.cache_capacity > 0
+            and emb_id not in cache_before_batch
             and step < future_last_use.get(emb_id, step) <= step + self.lookahead_depth
         }
         ttl_updates = {
             emb_id: future_last_use[emb_id]
             for emb_id in sorted(current_ids)
-            if step < future_last_use.get(emb_id, step) <= step + self.lookahead_depth
+            if self.cache_capacity > 0
+            and step < future_last_use.get(emb_id, step) <= step + self.lookahead_depth
         }
 
         for emb_id in sorted(ttl_updates):
             self._touch_cache(emb_id, ttl_updates[emb_id])
 
-        if self.cache_capacity <= 0 and self._cache_ttl:
-            raise RuntimeError(
-                "BagPipe cache capacity exceeded: capacity=0 "
-                f"required={len(self._cache_ttl)} at step={step}"
-            )
         if self.cache_capacity > 0 and len(self._cache_ttl) > self.cache_capacity:
             raise RuntimeError(
                 "BagPipe cache capacity exceeded: "

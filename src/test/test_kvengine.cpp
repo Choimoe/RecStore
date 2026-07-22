@@ -423,6 +423,42 @@ TEST_P(KVEngineCartesianTest, BatchGetFlatRejectsMismatchedDim) {
       0));
 }
 
+TEST_P(KVEngineCartesianTest, ApplySgdUpdateFlatUpdatesAndInitializesRows) {
+  if (value_type_ != "DRAM_VALUE_STORE") {
+    GTEST_SKIP() << "Direct flat SGD update requires DRAM_VALUE_STORE";
+  }
+
+  constexpr int64_t kDim     = 32;
+  std::vector<uint64_t> keys = {101, 202};
+  std::vector<float> initial(kDim, 1.0f);
+  kv_engine_->Put(
+      keys[0],
+      std::string_view(reinterpret_cast<const char*>(initial.data()),
+                       initial.size() * sizeof(float)),
+      0);
+
+  std::vector<float> grads(keys.size() * kDim, 2.0f);
+  ASSERT_TRUE(kv_engine_->ApplySgdUpdateFlat(
+      base::ConstArray<uint64_t>(keys),
+      grads.data(),
+      keys.size(),
+      kDim,
+      0.1f,
+      0,
+      0));
+
+  for (size_t row = 0; row < keys.size(); ++row) {
+    std::string value;
+    kv_engine_->Get(keys[row], value, 0);
+    ASSERT_EQ(value.size(), initial.size() * sizeof(float));
+    const auto* floats   = reinterpret_cast<const float*>(value.data());
+    const float expected = row == 0 ? 0.8f : -0.2f;
+    for (int64_t col = 0; col < kDim; ++col) {
+      EXPECT_FLOAT_EQ(floats[col], expected);
+    }
+  }
+}
+
 TEST_P(KVEngineCartesianTest, BatchPutMixedOverwriteAndRealloc) {
   const std::vector<uint64_t> keys = {7001, 7002, 7003, 7004};
   std::vector<std::vector<float>> initial_values(

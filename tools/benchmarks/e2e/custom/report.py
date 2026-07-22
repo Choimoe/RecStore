@@ -46,27 +46,16 @@ def _group_by_step(rows: Iterable[dict[str, str]]) -> dict[str, list[dict[str, s
     return grouped
 
 
-def _row_samples_per_sec(row: dict[str, str], batch_size: int) -> float:
-    # Prefer the CSV's own per-row samples_per_sec (recstore); torchrec's CSV has
-    # no such column, so derive it from batch_size/step_total_ms instead.
-    raw = row.get("samples_per_sec", "")
-    if raw not in ("", "nan", "NaN"):
-        return float(raw)
-    step_total = row.get("step_total_ms", "")
-    if step_total in ("", "nan", "NaN"):
-        return 0.0
-    step_total_ms = float(step_total)
-    return batch_size * 1000.0 / step_total_ms if step_total_ms > 0.0 else 0.0
-
-
 def _job_samples_per_sec(rows: list[dict[str, str]], batch_size: int) -> float:
-    # Job-level throughput: sum each step's per-rank samples_per_sec (every rank
-    # advances one step of its own batch_size in parallel), then average over steps.
-    # Averaging the raw per-rank rows instead would silently report per-rank throughput.
-    per_step_totals = [
-        sum(_row_samples_per_sec(row, batch_size) for row in step_rows)
-        for step_rows in _group_by_step(rows).values()
-    ]
+    per_step_totals = []
+    for step_rows in _group_by_step(rows).values():
+        latencies = [
+            float(row["step_total_ms"])
+            for row in step_rows
+            if row.get("step_total_ms", "") not in {"", "nan", "NaN"}
+        ]
+        if latencies and max(latencies) > 0.0:
+            per_step_totals.append(batch_size * len(step_rows) * 1000.0 / max(latencies))
     return statistics.fmean(per_step_totals) if per_step_totals else 0.0
 
 

@@ -7,20 +7,12 @@ This shim preserves the original import path
 code continues to work without changes.
 """
 
-from python.pytorch.recstore.bagpipe_cache import (  # noqa: F401
-    BagPipeCacheController,
-    BagPipeCachePolicy,
-    BagPipeConsumeDecision,
-    BagPipeConsumeResult,
-    BagPipeSparseSGD,
-    BagPipeStepPlan,
-    BagPipeUpdateResult,
-    BagPipeWindowScheduler,
-    CacheEntry,
-    PrefetchSlot,
-    attach_or_refetch_with_bagpipe_policy,
-    notify_sparse_update,
-)
+try:
+    from python.pytorch.recstore.bagpipe_cache import *  # noqa: F401,F403
+except ModuleNotFoundError as exc:
+    if exc.name != "python":
+        raise
+    from src.python.pytorch.recstore.bagpipe_cache import *  # noqa: F401,F403
 
 # Re-export LookaheadPrefetcher for backward compat (was re-exported by the
 # original monolithic file via ``from .prefetch import LookaheadPrefetcher``).

@@ -114,6 +114,7 @@ class _FakeLookaheadPrefetcher:
     def __init__(self, depth: int) -> None:
         self.depth = int(depth)
         self.enqueued_ids: list[torch.Tensor] = []
+        self.enqueued_features: list[object] = []
         self.advance_calls = 0
         self.stats = {
             "prefetch_issued_batches": 0.0,
@@ -129,6 +130,12 @@ class _FakeLookaheadPrefetcher:
         self.enqueued_ids.append(fused_ids.detach().cpu().clone())
         self.stats["prefetch_issued_batches"] += 1.0
         self.stats["prefetch_total_ids"] += float(fused_ids.numel())
+        self.stats["prefetch_issue_ms"] += 0.5
+
+    def enqueue(self, sparse_features) -> None:
+        self.enqueued_features.append(sparse_features)
+        self.stats["prefetch_issued_batches"] += 1.0
+        self.stats["prefetch_total_ids"] += 1.0
         self.stats["prefetch_issue_ms"] += 0.5
 
     def advance(self) -> bool:
@@ -164,8 +171,9 @@ class _RealPrefetchModule:
         fused_ids_cpu: torch.Tensor,
         fused_inverse=None,
         invalid_fused_ids_cpu=None,
+        full_batch=False,
     ) -> None:
-        del num_ids, issue_ts, fused_inverse, invalid_fused_ids_cpu
+        del num_ids, issue_ts, fused_inverse, invalid_fused_ids_cpu, full_batch
         self.attached.append((int(handle), fused_ids_cpu.tolist()))
 
     def prefill_gpu_cache_for_fused_ids(self, fused_ids: torch.Tensor) -> bool:
@@ -178,6 +186,32 @@ class _RealPrefetchModule:
 
 
 class TestBagPipeCacheManager(unittest.TestCase):
+    def test_zero_capacity_scheduler_prefetches_full_sparse_features(self) -> None:
+        from ..bagpipe_cache import BagPipeCachePolicy
+
+        policy = BagPipeCachePolicy(lookahead_depth=1, cache_capacity=0)
+        prefetcher = _FakeLookaheadPrefetcher(depth=1)
+        scheduler = BagPipeWindowScheduler(
+            bagpipe_policy=policy,
+            lookahead_prefetcher=prefetcher,
+            read_before_update=True,
+            read_mode="prefetch",
+        )
+        step0_features = object()
+        step1_features = object()
+        prepared_batches = [
+            (0, {}, torch.tensor([4], dtype=torch.int64)),
+            (1, {}, torch.tensor([5], dtype=torch.int64)),
+        ]
+        scheduler.observe_batch(0, prepared_batches[0][2], step0_features)
+        scheduler.observe_batch(1, prepared_batches[1][2], step1_features)
+
+        scheduler.plan_ready(current_step=0, prepared_batches=prepared_batches)
+        scheduler.issue_prefetches_ready_after_update(current_step=0, row={})
+
+        self.assertEqual(prefetcher.enqueued_features, [step1_features])
+        self.assertEqual(prefetcher.enqueued_ids, [])
+
     def test_window_scheduler_issues_future_nonempty_prefetches_after_step_barrier(self) -> None:
         from ..bagpipe_cache import BagPipeCachePolicy
 
