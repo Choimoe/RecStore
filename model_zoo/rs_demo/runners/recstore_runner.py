@@ -839,11 +839,6 @@ class RecStoreRunner(BenchmarkRunner):
                 kv_client=client,
                 initialize_tables=(rank == 0),
             )
-            if cfg.enable_single_node_distributed_fast_path:
-                embedding_module.enable_single_node_distributed_fast_path = True
-                embedding_module.single_node_distributed_mode = "single_node"
-                embedding_module.single_node_ps_backend = cfg.single_node_ps_backend
-                embedding_module.single_node_owner_policy = cfg.single_node_owner_policy
             _configure_gpu_cache(
                 embedding_module,
                 cfg,
@@ -862,17 +857,16 @@ class RecStoreRunner(BenchmarkRunner):
                 )
                 if callable(set_clear_after_cpu_update):
                     set_clear_after_cpu_update(False)
+            fast_path_backend = embedding_module.resolve_fast_path_backend()
             _append_worker_debug(
                 cfg,
                 rank,
                 "fast_path_state "
-                f"enabled={getattr(embedding_module, 'enable_single_node_distributed_fast_path', False)} "
-                f"mode={getattr(embedding_module, 'single_node_distributed_mode', None)} "
-                f"backend={getattr(embedding_module, 'single_node_ps_backend', None)} "
-                f"owner_policy={getattr(embedding_module, 'single_node_owner_policy', None)} "
+                f"mode={embedding_module.fast_path_mode} "
+                f"backend={fast_path_backend} "
                 f"dist_initialized={dist.is_initialized()} "
                 f"dist_world_size={dist.get_world_size() if dist.is_initialized() else 'na'} "
-                f"can_use={embedding_module._can_use_single_node_distributed_fast_path()}",
+                f"can_use={fast_path_backend is not None}",
             )
             _barrier_for_step_alignment(
                 dist=dist,
@@ -1253,7 +1247,6 @@ class RecStoreRunner(BenchmarkRunner):
 
                     optimizer_step_start = time.perf_counter()
                     sparse_optimizer.step()
-                    sync_device(torch, device)
                     row["sparse_optimizer_step_ms"] = (
                         time.perf_counter() - optimizer_step_start
                     ) * 1e3
@@ -1273,7 +1266,6 @@ class RecStoreRunner(BenchmarkRunner):
 
                     flush_start = time.perf_counter()
                     sparse_optimizer.flush()
-                    sync_device(torch, device)
                     row["sparse_optimizer_flush_ms"] = (
                         time.perf_counter() - flush_start
                     ) * 1e3
@@ -1307,7 +1299,6 @@ class RecStoreRunner(BenchmarkRunner):
                     row["sparse_zero_grad_ms"] = (
                         time.perf_counter() - zero_grad_start
                     ) * 1e3
-                    sync_device(torch, device)
                 # Resolve the CUDA-event GPU stages after a single device drain.
                 row["step_sync_wait_ms"] = timer.finish()
                 _merge_numeric_fields(

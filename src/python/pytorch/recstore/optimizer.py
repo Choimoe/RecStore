@@ -5,8 +5,6 @@ from typing import List, Union, Dict, Tuple, Any
 from time import perf_counter
 from .single_node_exchange import SparseGradPayload, exchange_sparse_grads
 
-_LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
-
 class DistEmbedding:
     pass
 
@@ -97,36 +95,13 @@ def _process_generic_module_with_trace(mod: Any, lr: float, kv_client: Any):
     return handles
 
 
-def _can_use_single_node_distributed_fast_path(mod: Any) -> bool:
-    if not getattr(mod, "enable_single_node_distributed_fast_path", False):
-        return False
-    if getattr(mod, "single_node_distributed_mode", None) != "single_node":
-        return False
-    if getattr(mod, "single_node_owner_policy", None) != "hash_mod_world_size":
-        return False
-    if getattr(mod, "single_node_ps_backend", None) not in _LOCAL_FAST_PATH_BACKENDS:
-        return False
-    dist = getattr(torch, "distributed", None)
-    if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
-        return False
-    if not hasattr(dist, "get_world_size") or dist.get_world_size() <= 1:
-        return False
-    return True
-
-
 def _uses_shared_local_shm_single_table(mod: Any) -> bool:
-    if not getattr(mod, "_enable_fusion", False):
+    if mod.fast_path_mode == "off" or not mod._enable_fusion:
         return False
-    if getattr(mod, "_master_config", None) is None:
-        return False
-    module_kv_client = getattr(mod, "kv_client", None)
-    if module_kv_client is None:
-        return False
-    probe = getattr(module_kv_client, "is_shared_local_shm_table", None)
-    if not callable(probe):
+    if mod._master_config is None:
         return False
     try:
-        return bool(probe())
+        return bool(mod.kv_client.is_shared_local_shm_table())
     except Exception:
         return False
 
@@ -176,6 +151,7 @@ def _merge_numeric_profile(dst: Dict[str, float], src: Dict[str, Any] | None) ->
 def _process_generic_module_with_trace_single_node_distributed(
     mod: Any,
     lr: float,
+    backend: str,
 ) -> List[Dict[str, Any]]:
     if not mod._trace:
         return []
@@ -190,12 +166,11 @@ def _process_generic_module_with_trace_single_node_distributed(
     current_backend = None
     if hasattr(module_kv_client, "current_ps_backend"):
         current_backend = module_kv_client.current_ps_backend()
-    target_backend = getattr(mod, "single_node_ps_backend", "local_shm")
     if hasattr(module_kv_client, "activate_shard"):
         module_kv_client.activate_shard(rank)
-    if current_backend != target_backend:
+    if current_backend != backend:
         if hasattr(module_kv_client, "set_ps_backend"):
-            module_kv_client.set_ps_backend(target_backend)
+            module_kv_client.set_ps_backend(backend)
 
     profile = {
         "trace_collect_ms": 0.0,
@@ -214,9 +189,6 @@ def _process_generic_module_with_trace_single_node_distributed(
         all_grads = torch.cat([grads for _, grads in entries], dim=0)
         unique_ids, summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
         profile["trace_aggregate_ms"] += (time.perf_counter() - aggregate_start) * 1e3
-        if getattr(mod, "single_node_owner_policy", "hash_mod_world_size") != "hash_mod_world_size":
-            raise RuntimeError("single-node distributed sparse update currently requires hash_mod_world_size")
-
         normalized_ids = unique_ids.detach().to(dtype=torch.int64)
         normalized_grads = summed_grads.detach().to(dtype=torch.float32)
         destination_ranks = torch.remainder(normalized_ids, world_size)
@@ -330,7 +302,7 @@ def _process_generic_module_with_trace_shared_local_shm_single_table(
     current_backend = None
     if hasattr(module_kv_client, "current_ps_backend"):
         current_backend = module_kv_client.current_ps_backend()
-    target_backend = getattr(mod, "single_node_ps_backend", "local_shm")
+    target_backend = "local_shm"
     if hasattr(module_kv_client, "activate_shard"):
         module_kv_client.activate_shard(rank)
     if current_backend != target_backend:
@@ -492,17 +464,21 @@ class SparseSGD(SparseOptimizer):
                                 _process_generic_module_with_trace_shared_local_shm_single_table(mod, lr)
                             )
                             self._capture_module_fast_path_profile(mod)
-                        elif _can_use_single_node_distributed_fast_path(mod):
-                            self._last_update_payloads.extend(
-                                _process_generic_module_with_trace_single_node_distributed(mod, lr)
-                            )
-                            self._capture_module_fast_path_profile(mod)
                         else:
-                            t_enqueue_start = perf_counter()
-                            self._inflight_handles.extend(
-                                _process_generic_module_with_trace(mod, lr, self.kv_client)
-                            )
-                            self._perf_add("update_async_enqueue_ms", (perf_counter() - t_enqueue_start) * 1e3)
+                            fast_path_backend = mod.resolve_fast_path_backend()
+                            if fast_path_backend is not None:
+                                self._last_update_payloads.extend(
+                                    _process_generic_module_with_trace_single_node_distributed(
+                                        mod, lr, fast_path_backend
+                                    )
+                                )
+                                self._capture_module_fast_path_profile(mod)
+                            else:
+                                t_enqueue_start = perf_counter()
+                                self._inflight_handles.extend(
+                                    _process_generic_module_with_trace(mod, lr, self.kv_client)
+                                )
+                                self._perf_add("update_async_enqueue_ms", (perf_counter() - t_enqueue_start) * 1e3)
                     else:
                         print(f"Warning: Module type {type(mod).__name__} is not supported by SparseSGD optimizer.")
                     if hasattr(mod, 'reset_trace'):

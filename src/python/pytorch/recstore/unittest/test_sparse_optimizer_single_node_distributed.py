@@ -44,20 +44,26 @@ class _FakeModule:
         self._config_names = ["table0"]
         self._trace = list(trace)
         self.kv_client = kv_client
+        self._enable_fusion = False
+        self._master_config = None
+        self.fast_path_mode = "auto"
         self.reset_trace_calls = 0
 
     def reset_trace(self):
         self.reset_trace_calls += 1
         self._trace = []
 
+    def resolve_fast_path_backend(self):
+        return None
+
 
 class _FakeFastPathModule(_FakeModule):
     def __init__(self, trace, kv_client, *, backend: str = "local_shm"):
         super().__init__(trace, kv_client)
-        self.enable_single_node_distributed_fast_path = True
-        self.single_node_distributed_mode = "single_node"
-        self.single_node_owner_policy = "hash_mod_world_size"
-        self.single_node_ps_backend = str(backend)
+        self.fast_path_backend = str(backend)
+
+    def resolve_fast_path_backend(self):
+        return self.fast_path_backend
 
 
 class _FakeSharedLocalShmDirectModule(_FakeFastPathModule):

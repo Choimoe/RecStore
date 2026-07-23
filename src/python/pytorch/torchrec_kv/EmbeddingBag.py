@@ -1,5 +1,6 @@
 import torch
 import logging
+import os
 import time
 import torch.nn.functional as F
 from torch.autograd import Function
@@ -162,8 +163,11 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                  enable_fusion: bool = True, fusion_k: int = 30,
                  ps_host: str = None, ps_port: int = None,
                  kv_client: RecStoreClient | None = None,
-                 initialize_tables: bool = True):
+                 initialize_tables: bool = True,
+                 fast_path_mode: str = "auto"):
         super().__init__()
+        if fast_path_mode not in {"auto", "off"}:
+            raise ValueError("fast_path_mode must be 'auto' or 'off'")
         self._embedding_bag_configs = [
             EmbeddingBagConfig(**c) for c in embedding_bag_configs
         ]
@@ -211,11 +215,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         self._fused_inverse: torch.Tensor | None = None
         self._fused_prefetch_full_batch: bool = False
 
-        # Phase-1 single-node distributed fast path stays fully opt-in.
-        self.enable_single_node_distributed_fast_path: bool = False
-        self.single_node_distributed_mode: str | None = None
-        self.single_node_owner_policy: str = "hash_mod_world_size"
-        self.single_node_ps_backend: str = "local_shm"
+        self.fast_path_mode = fast_path_mode
         self.reset_perf_stats()
 
         for idx, config in enumerate(self._embedding_bag_configs):
@@ -268,8 +268,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         setup. The single-node fast path and request-lazy backends (BRPC/GRPC)
         do not, and are left untouched.
         """
-        if getattr(self, "enable_single_node_distributed_fast_path", False):
-            return False
         current_ps_backend = getattr(self.kv_client, "current_ps_backend", None)
         if not callable(current_ps_backend):
             return False
@@ -662,21 +660,24 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         invalidator(self._master_config.name, unique_ids)
         return True
 
-    def _can_use_single_node_distributed_fast_path(self) -> bool:
-        if not self.enable_single_node_distributed_fast_path:
-            return False
+    def resolve_fast_path_backend(self) -> str | None:
+        if self.fast_path_mode == "off":
+            return None
+        if self.fast_path_mode != "auto":
+            raise ValueError("fast_path_mode must be 'auto' or 'off'")
         dist = getattr(torch, "distributed", None)
         if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
-            return False
+            return None
         if not hasattr(dist, "get_world_size") or dist.get_world_size() <= 1:
-            return False
-        if self.single_node_distributed_mode != "single_node":
-            return False
-        if self.single_node_owner_policy != "hash_mod_world_size":
-            return False
-        if self.single_node_ps_backend not in _LOCAL_FAST_PATH_BACKENDS:
-            return False
-        return True
+            return None
+        try:
+            local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", ""))
+        except ValueError:
+            return None
+        if local_world_size != int(dist.get_world_size()):
+            return None
+        backend = str(self.kv_client.current_ps_backend()).lower()
+        return backend if backend in _LOCAL_FAST_PATH_BACKENDS else None
 
     def _uses_shared_local_shm_single_table(self) -> bool:
         probe = getattr(self.kv_client, "is_shared_local_shm_table", None)
@@ -687,15 +688,21 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         except Exception:
             return False
 
-    def _prepare_single_node_local_shm_fast_path_client(self, rank: int = 0) -> None:
+    def _prepare_single_node_local_shm_fast_path_client(
+        self,
+        backend: str,
+        rank: int = 0,
+    ) -> None:
         current_backend = None
         if hasattr(self.kv_client, "current_ps_backend"):
             current_backend = self.kv_client.current_ps_backend()
+        if backend not in _LOCAL_FAST_PATH_BACKENDS:
+            raise RuntimeError("single-node fast path requires local_shm or hierkv backend")
         if hasattr(self.kv_client, "activate_shard"):
             self.kv_client.activate_shard(rank)
-        if current_backend != self.single_node_ps_backend:
+        if current_backend != backend:
             if hasattr(self.kv_client, "set_ps_backend"):
-                self.kv_client.set_ps_backend(self.single_node_ps_backend)
+                self.kv_client.set_ps_backend(backend)
 
     def _build_lookup_request_payload(
         self,
@@ -737,14 +744,15 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         self,
         fused_ids: torch.Tensor,
         *,
+        backend: str,
         compute_device: torch.device,
     ) -> torch.Tensor:
         profile = _new_lookup_profile()
         dist = torch.distributed
         rank = int(dist.get_rank())
         world_size = int(dist.get_world_size())
-        backend = dist
-        self._prepare_single_node_local_shm_fast_path_client(rank)
+        exchange_backend = dist
+        self._prepare_single_node_local_shm_fast_path_client(backend, rank)
 
         local_payload = self._build_lookup_request_payload(
             fused_ids,
@@ -756,7 +764,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         gathered_requests = exchange_lookup_ids(
             local_payload,
             world_size=world_size,
-            backend=backend,
+            backend=exchange_backend,
         )
         self._perf_add("lookup_owner_exchange_ms", (perf_counter() - t_exchange_start) * 1e3)
         profile["lookup_exchange_ids_ms"] += (
@@ -818,7 +826,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         gathered_responses = exchange_lookup_embedding_responses(
             response_payload,
             world_size=world_size,
-            backend=backend,
+            backend=exchange_backend,
         )
         profile["lookup_exchange_responses_ms"] += (
             time.perf_counter() - exchange_responses_start
@@ -856,7 +864,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             hasattr(dist, "is_initialized") and bool(dist.is_initialized())
         )
         rank = int(dist.get_rank()) if dist_available and dist_initialized else 0
-        self._prepare_single_node_local_shm_fast_path_client(rank)
+        self._prepare_single_node_local_shm_fast_path_client("local_shm", rank)
         lookup_start = time.perf_counter()
         local_embeddings = self.kv_client.local_lookup_flat(
             self._master_config.name,
@@ -1250,18 +1258,16 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             lengths_total_list: List[torch.Tensor] = []
             compute_device = features.device()  # target device (cuda or cpu)
             uses_shared_local_shm = self._uses_shared_local_shm_single_table()
-            use_shared_local_shm_direct_fast_path = (
-                self._can_use_single_node_distributed_fast_path() and uses_shared_local_shm
+            fast_path_backend = self.resolve_fast_path_backend()
+            use_local_shm_direct_fast_path = (
+                self.fast_path_mode != "off" and uses_shared_local_shm
             )
-            use_local_shm_direct_fast_path = uses_shared_local_shm
             use_single_node_owner_exchange_fast_path = (
-                self._can_use_single_node_distributed_fast_path()
-                and not use_shared_local_shm_direct_fast_path
+                fast_path_backend is not None
+                and not use_local_shm_direct_fast_path
             )
             use_single_node_fast_path = (
                 use_local_shm_direct_fast_path
-                or
-                use_shared_local_shm_direct_fast_path
                 or use_single_node_owner_exchange_fast_path
             )
 
@@ -1327,6 +1333,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             elif use_single_node_owner_exchange_fast_path:
                 all_embeddings = self._lookup_fused_embeddings_single_node_distributed(
                     fused_values_all,
+                    backend=fast_path_backend,
                     compute_device=compute_device,
                 )
             elif self._fused_prefetch_handle is not None:

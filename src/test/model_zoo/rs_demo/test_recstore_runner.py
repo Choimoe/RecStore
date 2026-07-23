@@ -159,6 +159,7 @@ class _FakeRecStoreEmbeddingBagCollection:
         self.forward_features: list[object] = []
         self.reset_perf_stats_calls = 0
         self._single_node_forward_profile = {}
+        self.fast_path_mode = "auto"
         _FakeRecStoreEmbeddingBagCollection.last_instance = self
 
     def issue_fused_prefetch(self, features, *, record_handle: bool = True):
@@ -224,11 +225,8 @@ class _FakeRecStoreEmbeddingBagCollection:
         self.forward_features.append(features)
         return object()
 
-    def _can_use_single_node_distributed_fast_path(self) -> bool:
-        return bool(
-            getattr(self, "enable_single_node_distributed_fast_path", False)
-            and getattr(self, "single_node_distributed_mode", None) == "single_node"
-        )
+    def resolve_fast_path_backend(self):
+        return None
 
 
 class _FakePrefetchModule:
@@ -1305,10 +1303,7 @@ class TestRecStoreRunner(unittest.TestCase):
 
         fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
 
-        self.assertFalse(hasattr(fake_ebc, "enable_single_node_distributed_fast_path"))
-        self.assertFalse(hasattr(fake_ebc, "single_node_distributed_mode"))
-        self.assertFalse(hasattr(fake_ebc, "single_node_ps_backend"))
-        self.assertFalse(hasattr(fake_ebc, "single_node_owner_policy"))
+        self.assertEqual(fake_ebc.fast_path_mode, "auto")
 
     def test_local_worker_rows_include_ps_kv_backend_label(self) -> None:
         runner_runtime = Path(tempfile.mkdtemp())
@@ -1395,7 +1390,7 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertEqual(captured_rows[0]["ps_kv_backend"], "hps_rocksdb")
         self.assertEqual(captured_rows[0]["model_backend_label"], "recstore:hps_rocksdb")
 
-    def test_embedding_module_injects_single_node_fast_path_when_enabled(self) -> None:
+    def test_embedding_module_auto_detects_fast_path_without_runner_injection(self) -> None:
         cfg = RunConfig(
             backend="recstore",
             steps=1,
@@ -1414,10 +1409,7 @@ class TestRecStoreRunner(unittest.TestCase):
 
         fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
 
-        self.assertTrue(fake_ebc.enable_single_node_distributed_fast_path)
-        self.assertEqual(fake_ebc.single_node_distributed_mode, "single_node")
-        self.assertEqual(fake_ebc.single_node_ps_backend, "local_shm")
-        self.assertEqual(fake_ebc.single_node_owner_policy, "hash_mod_world_size")
+        self.assertEqual(fake_ebc.fast_path_mode, "auto")
 
     def test_gpu_cache_options_are_forwarded_to_recstore_module(self) -> None:
         cfg = RunConfig(

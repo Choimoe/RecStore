@@ -111,6 +111,9 @@ class _FakeKVClient:
     def is_shared_local_shm_table(self) -> bool:
         return False
 
+    def current_ps_backend(self) -> str:
+        return "local_shm"
+
 
 class _FakeKVClientWithoutPrefill(_FakeKVClient):
     prefill_gpu_cache = None
@@ -556,8 +559,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = (idx << 30)
@@ -606,8 +607,6 @@ class TestFusedPrefetch(unittest.TestCase):
             keys = torch.arange(cfg["num_embeddings"], dtype=torch.int64) + base_offset
             vals = torch.zeros((cfg["num_embeddings"], cfg["embedding_dim"]), dtype=torch.float32)
             fake.emb_write(keys, vals)
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
 
         features = self._build_features()
@@ -634,8 +633,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = idx << 30
@@ -667,8 +664,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = (idx << 30)
@@ -703,8 +698,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = (idx << 30)
