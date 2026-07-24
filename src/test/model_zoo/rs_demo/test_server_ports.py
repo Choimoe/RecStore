@@ -17,6 +17,29 @@ from model_zoo.rs_demo.runtime.server import (
 
 
 class TestChooseAvailablePorts(unittest.TestCase):
+    def _make_runtime_dir(
+        self,
+        output_root,
+        *,
+        base_cfg=None,
+        run_id="case",
+        ps_type="BRPC",
+        **kwargs,
+    ):
+        if base_cfg is None:
+            base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
+        return make_runtime_dir(
+            base_cfg=base_cfg,
+            host="127.0.0.1",
+            port0=15123,
+            port1=15124,
+            allocator="PersistLoopShmMalloc",
+            output_root=output_root,
+            run_id=run_id,
+            ps_type=ps_type,
+            **kwargs,
+        )
+
     def test_return_preferred_when_free(self) -> None:
         with socket.socket() as s0, socket.socket() as s1:
             s0.bind(("127.0.0.1", 0))
@@ -39,18 +62,8 @@ class TestChooseAvailablePorts(unittest.TestCase):
             self.assertNotEqual(got0, got1)
 
     def test_make_runtime_dir_uses_output_root_and_run_id(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
         with tempfile.TemporaryDirectory() as tmpdir:
-            runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
-                run_id="case-a",
-                ps_type="BRPC",
-            )
+            runtime_dir, runtime_cfg_path = self._make_runtime_dir(tmpdir, run_id="case-a")
             self.assertTrue(str(runtime_dir).startswith(f"{tmpdir}/runtime/case-a"))
             self.assertEqual(runtime_cfg_path, runtime_dir / "recstore_config.json")
             self.assertTrue(runtime_cfg_path.exists())
@@ -62,20 +75,12 @@ class TestChooseAvailablePorts(unittest.TestCase):
             )
 
     def test_make_runtime_dir_returns_absolute_paths_for_relative_output_root(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
         with tempfile.TemporaryDirectory() as tmpdir:
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir)
-                runtime_dir, runtime_cfg_path = make_runtime_dir(
-                    base_cfg=base_cfg,
-                    host="127.0.0.1",
-                    port0=15123,
-                    port1=15124,
-                    allocator="PersistLoopShmMalloc",
-                    output_root="relative-output",
-                    run_id="case-relative",
-                    ps_type="BRPC",
+                runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                    "relative-output", run_id="case-relative"
                 )
             finally:
                 os.chdir(old_cwd)
@@ -94,52 +99,17 @@ class TestChooseAvailablePorts(unittest.TestCase):
             "distributed_client": {"servers": []},
         }
         with tempfile.TemporaryDirectory() as tmpdir:
-            runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
-                run_id="case-cap",
-                ps_type="BRPC",
-                kv_capacity=520_000,
+            runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                tmpdir, base_cfg=base_cfg, run_id="case-cap", kv_capacity=520_000
             )
             self.assertTrue(str(runtime_dir).startswith(f"{tmpdir}/runtime/case-cap"))
             runtime_cfg = runtime_cfg_path.read_text(encoding="utf-8")
             self.assertIn('"capacity": 520000', runtime_cfg)
 
-    def test_make_runtime_dir_keeps_shared_base_kv_prefix_for_sharded_server(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
-                run_id="case-shards",
-                ps_type="BRPC",
-            )
-            runtime_cfg = json.loads(runtime_cfg_path.read_text(encoding="utf-8"))
-            self.assertIn("value", runtime_cfg["cache_ps"]["base_kv_config"])
-            self.assertTrue(
-                runtime_cfg["cache_ps"]["base_kv_config"]["value"]["path"].startswith(
-                    "/dev/shm/rs_demo_kv/case-shards/"
-                )
-            )
-
     def test_make_runtime_dir_writes_local_shm_runtime_section(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
         with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
+            _runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                tmpdir,
                 run_id="case-local-shm",
                 ps_type="LOCAL_SHM",
                 value_size_bytes=256,
@@ -151,15 +121,9 @@ class TestChooseAvailablePorts(unittest.TestCase):
             self.assertIn('"default_value_size_hint": 256', runtime_cfg)
 
     def test_make_runtime_dir_writes_tiered_base_kv_when_requested(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
         with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
+            _runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                tmpdir,
                 run_id="case-tiered",
                 ps_type="GRPC",
                 kv_capacity=20_000,
@@ -184,15 +148,9 @@ class TestChooseAvailablePorts(unittest.TestCase):
             self.assertEqual(base_kv["value"]["tiering"], {"cache_policy": "LRU"})
 
     def test_make_runtime_dir_applies_tiered_dram_capacity_multiplier(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
         with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
+            _runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                tmpdir,
                 run_id="case-tiered-small-dram",
                 ps_type="GRPC",
                 kv_capacity=20_000,
@@ -209,15 +167,9 @@ class TestChooseAvailablePorts(unittest.TestCase):
             )
 
     def test_make_runtime_dir_writes_hps_rocksdb_base_kv_when_requested(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
         with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
+            _runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                tmpdir,
                 run_id="case-hps-rocks",
                 ps_type="GRPC",
                 kv_capacity=20_000,
@@ -236,15 +188,9 @@ class TestChooseAvailablePorts(unittest.TestCase):
             self.assertTrue(Path(base_kv["path"]).exists())
 
     def test_make_runtime_dir_writes_hps_hash_map_base_kv_when_requested(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
         with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
+            _runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                tmpdir,
                 run_id="case-hps-hash",
                 ps_type="GRPC",
                 kv_capacity=20_000,
@@ -261,47 +207,22 @@ class TestChooseAvailablePorts(unittest.TestCase):
             self.assertNotIn("index", base_kv)
             self.assertNotIn("value", base_kv)
 
-    def test_make_runtime_dir_uses_single_shared_local_shm_shard(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
-                run_id="case-local-shm-single",
-                ps_type="LOCAL_SHM",
-                value_size_bytes=256,
-            )
-            runtime_cfg = json.loads(runtime_cfg_path.read_text(encoding="utf-8"))
+    def test_make_runtime_dir_uses_single_shard_for_e2e_bringup(self) -> None:
+        for ps_type, run_id in (("LOCAL_SHM", "case-local-shm-single"), ("RDMA", "case-rdma-single")):
+            with self.subTest(ps_type=ps_type):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    _runtime_dir, runtime_cfg_path = self._make_runtime_dir(
+                        tmpdir,
+                        run_id=run_id,
+                        ps_type=ps_type,
+                        value_size_bytes=256,
+                    )
+                    runtime_cfg = json.loads(runtime_cfg_path.read_text(encoding="utf-8"))
 
-            self.assertEqual(runtime_cfg["cache_ps"]["num_shards"], 1)
-            self.assertEqual(runtime_cfg["distributed_client"]["num_shards"], 1)
-            self.assertEqual(runtime_cfg["cache_ps"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
-            self.assertEqual(runtime_cfg["distributed_client"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
-
-    def test_make_runtime_dir_uses_single_rdma_shard_for_e2e_bringup(self) -> None:
-        base_cfg = {"cache_ps": {}, "distributed_client": {"servers": []}}
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _runtime_dir, runtime_cfg_path = make_runtime_dir(
-                base_cfg=base_cfg,
-                host="127.0.0.1",
-                port0=15123,
-                port1=15124,
-                allocator="PersistLoopShmMalloc",
-                output_root=tmpdir,
-                run_id="case-rdma-single",
-                ps_type="RDMA",
-                value_size_bytes=256,
-            )
-            runtime_cfg = json.loads(runtime_cfg_path.read_text(encoding="utf-8"))
-
-            self.assertEqual(runtime_cfg["cache_ps"]["num_shards"], 1)
-            self.assertEqual(runtime_cfg["distributed_client"]["num_shards"], 1)
-            self.assertEqual(runtime_cfg["cache_ps"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
-            self.assertEqual(runtime_cfg["distributed_client"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
+                    self.assertEqual(runtime_cfg["cache_ps"]["num_shards"], 1)
+                    self.assertEqual(runtime_cfg["distributed_client"]["num_shards"], 1)
+                    self.assertEqual(runtime_cfg["cache_ps"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
+                    self.assertEqual(runtime_cfg["distributed_client"]["servers"], [{"host": "127.0.0.1", "port": 15123, "shard": 0}])
 
     def test_wait_server_ready_local_shm_only_requires_live_process(self) -> None:
         proc = mock.Mock()

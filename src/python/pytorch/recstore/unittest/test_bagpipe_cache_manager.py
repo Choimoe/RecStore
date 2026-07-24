@@ -116,27 +116,12 @@ class _FakeLookaheadPrefetcher:
         self.enqueued_ids: list[torch.Tensor] = []
         self.enqueued_features: list[object] = []
         self.advance_calls = 0
-        self.stats = {
-            "prefetch_issued_batches": 0.0,
-            "prefetch_total_ids": 0.0,
-            "prefetch_issue_ms": 0.0,
-        }
-
-    def consume_stats(self, *, reset: bool = True):
-        del reset
-        return dict(self.stats)
 
     def enqueue_fused_ids(self, fused_ids: torch.Tensor) -> None:
         self.enqueued_ids.append(fused_ids.detach().cpu().clone())
-        self.stats["prefetch_issued_batches"] += 1.0
-        self.stats["prefetch_total_ids"] += float(fused_ids.numel())
-        self.stats["prefetch_issue_ms"] += 0.5
 
     def enqueue(self, sparse_features) -> None:
         self.enqueued_features.append(sparse_features)
-        self.stats["prefetch_issued_batches"] += 1.0
-        self.stats["prefetch_total_ids"] += 1.0
-        self.stats["prefetch_issue_ms"] += 0.5
 
     def advance(self) -> bool:
         self.advance_calls += 1
@@ -246,16 +231,7 @@ class TestBagPipeCacheManager(unittest.TestCase):
         scheduler.issue_prefetches_ready_after_update(current_step=0, row=end_row)
         self.assertEqual([ids.tolist() for ids in prefetcher.enqueued_ids], [[5]])
         self.assertEqual(prefetcher.advance_calls, 1)
-        self.assertEqual(rows[0]["bagpipe_prefetch_ids"], 1)
-        self.assertEqual(rows[0]["bagpipe_cache_insert_ids"], 1)
-        self.assertEqual(rows[0]["bagpipe_cache_insert_success_ids"], 0)
-        self.assertEqual(rows[1]["bagpipe_prefetch_ids"], 1)
-        self.assertEqual(rows[2]["bagpipe_prefetch_ids"], 0)
         self.assertEqual([ids.tolist() for ids in module.cache_insert_ids], [])
-        self.assertNotIn("bagpipe_prefetch_ids", rows[3])
-        self.assertEqual(end_row["prefetch_issued_batches"], 1.0)
-        self.assertEqual(end_row["prefetch_total_ids"], 1.0)
-        self.assertEqual(end_row["prefetch_issue_ms"], 0.5)
 
     def test_window_scheduler_real_prefetcher_attaches_handle_for_matching_step(self) -> None:
         from model_zoo.rs_demo.runtime.prefetch import LookaheadPrefetcher
@@ -327,7 +303,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
             [ids.tolist() for ids in module.issued_fused_ids.values()],
             [[101], [102]],
         )
-        self.assertNotIn("bagpipe_prefetch_ids", prepared_batches[3][1])
 
     def test_window_scheduler_surfaces_capacity_overflow(self) -> None:
         from ..bagpipe_cache import BagPipeCachePolicy
@@ -382,9 +357,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
 
         self.assertEqual(evicted.tolist(), [4])
         self.assertEqual([ids.tolist() for ids in module.cache_invalidate_ids], [[4]])
-        self.assertEqual(row["bagpipe_step_end_evict_ids"], 1)
-        self.assertEqual(row["bagpipe_step_end_gpu_cache_evict_success_ids"], 1)
-        self.assertEqual(row["bagpipe_step_end_gpu_cache_evict_failures"], 0)
 
     def test_valid_prefetch_attaches_ready_handle(self) -> None:
         policy = _FakeBagPipePolicy(_FakeConsumeDecision([], [7]))
@@ -406,9 +378,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
         self.assertEqual(prefetcher.attach_calls, 1)
         self.assertEqual(prefetcher.discard_calls, 0)
         self.assertEqual(module.issue_fused_prefetch_calls, [])
-        self.assertEqual(row["bagpipe_stale_ids"], 0)
-        self.assertEqual(row["bagpipe_valid_prefetch_ids"], 1)
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 0)
 
     def test_all_stale_refetch_discards_handle_and_refetches_same_batch(self) -> None:
         policy = _FakeBagPipePolicy(_FakeConsumeDecision([7], []))
@@ -430,10 +399,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
         self.assertEqual(prefetcher.discard_calls, 1)
         self.assertEqual(prefetcher.attach_calls, 0)
         self.assertEqual(module.issue_fused_prefetch_calls, [features])
-        self.assertEqual(row["bagpipe_stale_ids"], 1)
-        self.assertEqual(row["bagpipe_stale_cached_ids"], 0)
-        self.assertEqual(row["bagpipe_stale_refetch_ids"], 1)
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 1)
 
     def test_partial_stale_refetch_repairs_invalid_ids_without_discard(self) -> None:
         policy = _FakeBagPipePolicy(_FakeConsumeDecision([7], [8]))
@@ -458,7 +423,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
             [7],
         )
         self.assertEqual(module.issue_fused_prefetch_calls, [])
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 0)
 
     def test_stale_cached_discards_handle_without_refetch(self) -> None:
         policy = _FakeBagPipePolicy(
@@ -490,12 +454,8 @@ class TestBagPipeCacheManager(unittest.TestCase):
             [7],
         )
         self.assertEqual(module.issue_fused_prefetch_calls, [])
-        self.assertEqual(row["bagpipe_stale_ids"], 1)
-        self.assertEqual(row["bagpipe_stale_cached_ids"], 1)
-        self.assertEqual(row["bagpipe_stale_refetch_ids"], 0)
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 0)
 
-    def test_depth_zero_issues_direct_prefetch_and_sets_bagpipe_counters(self) -> None:
+    def test_depth_zero_issues_direct_prefetch(self) -> None:
         policy = _FakeBagPipePolicy(_FakeConsumeDecision([7], [8]))
         prefetcher = _FakePrefetcher()
         module = _FakeEmbeddingModule()
@@ -516,11 +476,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
         self.assertEqual(prefetcher.attach_calls, 0)
         self.assertEqual(prefetcher.discard_calls, 0)
         self.assertEqual(module.issue_fused_prefetch_calls, [features])
-        self.assertEqual(row["bagpipe_stale_ids"], 0)
-        self.assertEqual(row["bagpipe_stale_cached_ids"], 0)
-        self.assertEqual(row["bagpipe_stale_refetch_ids"], 0)
-        self.assertEqual(row["bagpipe_valid_prefetch_ids"], 0)
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 0)
 
     def test_sparse_update_marks_gpu_cache_updated_ids_for_policy(self) -> None:
         class _Client:
@@ -558,9 +513,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0][0], "table0")
         self.assertEqual(client.calls[0][3], 0.25)
-        self.assertEqual(row["bagpipe_gpu_cache_update_ids"], 2)
-        self.assertEqual(row["bagpipe_policy_cached_update_ids"], 0)
-        self.assertEqual(row["bagpipe_gpu_cache_update_failures"], 0)
         self.assertEqual(policy.update_calls[0][1].tolist(), [4, 5])
         self.assertEqual(policy.update_calls[0][2].tolist(), [4, 5])
 
@@ -593,9 +545,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
             step=3,
         )
 
-        self.assertEqual(row["bagpipe_gpu_cache_update_ids"], 0)
-        self.assertEqual(row["bagpipe_policy_cached_update_ids"], 0)
-        self.assertEqual(row["bagpipe_gpu_cache_update_failures"], 1)
         self.assertEqual(policy.update_calls[0][1].tolist(), [4, 5])
         self.assertEqual(policy.update_calls[0][2].tolist(), [])
 
@@ -635,9 +584,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0][1].tolist(), [5])
         self.assertEqual(client.calls[0][2].tolist(), [[4.0, 5.0, 6.0, 7.0]])
-        self.assertEqual(row["bagpipe_gpu_cache_update_ids"], 1)
-        self.assertEqual(row["bagpipe_policy_cached_update_ids"], 1)
-        self.assertEqual(row["bagpipe_gpu_cache_update_failures"], 0)
         self.assertEqual(policy.update_calls[0][1].tolist(), [4, 5, 6])
         self.assertEqual(policy.update_calls[0][2].tolist(), [5])
 
@@ -685,9 +631,6 @@ class TestBagPipeCacheManager(unittest.TestCase):
 
         self.assertEqual(module.kv_client.calls, 2)
         self.assertEqual([ids.tolist() for ids in module.repaired_ids], [[5]])
-        self.assertEqual(row["bagpipe_gpu_cache_update_ids"], 1)
-        self.assertEqual(row["bagpipe_policy_cached_update_ids"], 1)
-        self.assertEqual(row["bagpipe_gpu_cache_update_failures"], 0)
         self.assertEqual(policy.update_calls[0][2].tolist(), [5])
 
 

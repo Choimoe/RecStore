@@ -14,7 +14,7 @@ from model_zoo.rs_demo.runners.torchrec_runner import _merge_rank_outputs
 
 
 class TestTorchRecReport(unittest.TestCase):
-    def test_finalize_recstore_row_includes_sparse_breakdown_rollups(self) -> None:
+    def test_finalize_recstore_row_includes_emb_stage(self) -> None:
         row = finalize_recstore_row(
             {
                 "backend": "recstore",
@@ -24,28 +24,18 @@ class TestTorchRecReport(unittest.TestCase):
                 "step_total_ms": 10.0,
                 "batch_prepare_ms": 1.0,
                 "input_pack_ms": 0.5,
-                "prefetch_issue_ms": 0.2,
                 "embed_lookup_local_ms": 2.0,
                 "embed_pool_local_ms": 1.0,
                 "output_unpack_ms": 0.7,
                 "dense_fwd_ms": 1.1,
                 "backward_ms": 1.8,
-                "optimizer_ms": 0.9,
-                "sparse_update_ms": 1.4,
+                "dense_optimizer_ms": 0.9,
+                "sparse_optimizer_ms": 1.4,
                 "lookup_wait_ms": 0.6,
-                "lookup_owner_exchange_ms": 0.4,
-                "lookup_local_lookup_ms": 0.5,
-                "lookup_reassemble_ms": 0.3,
-                "update_trace_merge_ms": 0.25,
-                "update_owner_exchange_ms": 0.35,
-                "update_local_apply_ms": 0.45,
-                "update_flush_wait_ms": 0.15,
             }
         )
 
         self.assertEqual(row["emb_stage_ms"], 4.2)
-        self.assertEqual(row["lookup_breakdown_ms"], 1.8)
-        self.assertEqual(row["sparse_update_breakdown_ms"], 1.2)
 
     def test_write_stage_csv_includes_kv_columns(self) -> None:
         row = finalize_torchrec_row(
@@ -66,7 +56,7 @@ class TestTorchRecReport(unittest.TestCase):
                 "output_unpack_ms": 0.7,
                 "dense_fwd_ms": 1.1,
                 "backward_ms": 1.8,
-                "optimizer_ms": 0.9,
+                "dense_optimizer_ms": 0.9,
             }
         )
 

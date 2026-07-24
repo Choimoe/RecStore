@@ -105,7 +105,6 @@ class BagPipeWindowScheduler:
 
     def on_step_end(self, step: int, row: dict[str, Any]) -> torch.Tensor:
         evicted = self.bagpipe_policy.on_step_end(int(step))
-        row["bagpipe_step_end_evict_ids"] = int(evicted.numel())
         self._invalidate_evicted_cache_rows(
             row,
             evicted,
@@ -152,12 +151,9 @@ class BagPipeWindowScheduler:
 
     @staticmethod
     def _record_plan(row: dict[str, Any], bagpipe_plan: Any) -> None:
-        row["bagpipe_prefetch_ids"] = int(bagpipe_plan.prefetch_ids.numel())
-        row["bagpipe_cache_insert_ids"] = int(bagpipe_plan.cache_insert_ids.numel())
-        row["bagpipe_evict_ids"] = int(bagpipe_plan.evict_ids.numel())
-        row["bagpipe_sync_now_ids"] = int(bagpipe_plan.sync_now_ids.numel())
-        row["bagpipe_sync_later_ids"] = int(bagpipe_plan.sync_later_ids.numel())
-        row["bagpipe_no_sync_ids"] = int(bagpipe_plan.no_sync_ids.numel())
+        del row, bagpipe_plan
+        return
+
 
     def _enqueue_planned_prefetch(
         self,
@@ -167,21 +163,11 @@ class BagPipeWindowScheduler:
     ) -> None:
         if prefetch_ids.numel() == 0:
             return
-        prefetch_issue_before = self.lookahead_prefetcher.consume_stats(reset=False)
         if self.bagpipe_policy.cache_capacity <= 0 and sparse_features is not None:
             self.lookahead_prefetcher.enqueue(sparse_features)
         else:
             self.lookahead_prefetcher.enqueue_fused_ids(prefetch_ids)
         self.lookahead_prefetcher.advance()
-        prefetch_issue_after = self.lookahead_prefetcher.consume_stats(reset=False)
-        for key in (
-            "prefetch_issued_batches",
-            "prefetch_total_ids",
-            "prefetch_issue_ms",
-        ):
-            row[key] = float(prefetch_issue_after.get(key, 0.0)) - float(
-                prefetch_issue_before.get(key, 0.0)
-            )
 
     @staticmethod
     def _cache_insert_ids_not_prefetched(
@@ -208,28 +194,16 @@ class BagPipeWindowScheduler:
         row: dict[str, Any],
         cache_insert_ids: torch.Tensor,
     ) -> None:
-        row["bagpipe_cache_insert_success_ids"] = 0
-        row["bagpipe_cache_insert_failures"] = 0
+        del row
         if cache_insert_ids.numel() == 0:
             return
         inserter = getattr(self.embedding_module, "prefill_gpu_cache_for_fused_ids", None)
         if not callable(inserter):
-            row["bagpipe_cache_insert_failures"] = 1
-            row["bagpipe_cache_insert_failure_reason"] = (
-                "missing prefill_gpu_cache_for_fused_ids"
-            )
             return
         try:
-            if bool(inserter(cache_insert_ids)):
-                row["bagpipe_cache_insert_success_ids"] = int(cache_insert_ids.numel())
-            else:
-                row["bagpipe_cache_insert_failures"] = 1
-                row["bagpipe_cache_insert_failure_reason"] = (
-                    "prefill_gpu_cache_for_fused_ids returned False"
-                )
-        except Exception as exc:
-            row["bagpipe_cache_insert_failures"] = 1
-            row["bagpipe_cache_insert_failure_reason"] = f"{type(exc).__name__}: {exc}"
+            inserter(cache_insert_ids)
+        except Exception:
+            return
 
     def _invalidate_evicted_cache_rows(
         self,
@@ -238,28 +212,17 @@ class BagPipeWindowScheduler:
         *,
         prefix: str,
     ) -> None:
-        row[f"{prefix}_success_ids"] = 0
-        row[f"{prefix}_failures"] = 0
+        del row, prefix
         if evict_ids.numel() == 0:
             return
         invalidator = getattr(self.embedding_module, "invalidate_gpu_cache_for_fused_ids", None)
         if not callable(invalidator):
-            row[f"{prefix}_failures"] = 1
-            row[f"{prefix}_failure_reason"] = (
-                "missing invalidate_gpu_cache_for_fused_ids"
-            )
             return
         try:
-            if bool(invalidator(evict_ids)):
-                row[f"{prefix}_success_ids"] = int(evict_ids.numel())
-            else:
-                row[f"{prefix}_failures"] = 1
-                row[f"{prefix}_failure_reason"] = (
-                    "invalidate_gpu_cache_for_fused_ids returned False"
-                )
-        except Exception as exc:
-            row[f"{prefix}_failures"] = 1
-            row[f"{prefix}_failure_reason"] = f"{type(exc).__name__}: {exc}"
+            invalidator(evict_ids)
+        except Exception:
+            return
+
 
 
 def attach_or_refetch_with_bagpipe_policy(
@@ -274,11 +237,6 @@ def attach_or_refetch_with_bagpipe_policy(
 ) -> BagPipeConsumeResult:
     """Attach a valid lookahead handle or repair a stale BagPipe prefetch."""
     if int(prefetch_depth) <= 0:
-        row["bagpipe_stale_ids"] = 0
-        row["bagpipe_stale_cached_ids"] = 0
-        row["bagpipe_stale_refetch_ids"] = 0
-        row["bagpipe_valid_prefetch_ids"] = 0
-        row["bagpipe_discarded_stale_handle"] = 0
         embedding_module.issue_fused_prefetch(sparse_features)
         return BagPipeConsumeResult(0, 0, 0, 0, 0)
 
@@ -299,17 +257,12 @@ def attach_or_refetch_with_bagpipe_policy(
         ).numel()
     )
     valid_prefetch_ids = int(consume_decision.valid_prefetch_ids.numel())
-    row["bagpipe_stale_ids"] = stale_ids
-    row["bagpipe_stale_cached_ids"] = stale_cached_ids
-    row["bagpipe_stale_refetch_ids"] = stale_refetch_ids
-    row["bagpipe_valid_prefetch_ids"] = valid_prefetch_ids
 
     can_repair_from_valid_prefetch = valid_prefetch_ids > 0 and stale_ids > 0
     if stale_refetch_ids > 0 and not can_repair_from_valid_prefetch:
         discarded_stale_handle = _bool_int(lookahead_prefetcher.discard_next_ready())
     else:
         discarded_stale_handle = 0
-    row["bagpipe_discarded_stale_handle"] = discarded_stale_handle
 
     if consume_decision.requires_refetch and not can_repair_from_valid_prefetch:
         embedding_module.issue_fused_prefetch(sparse_features)
@@ -415,11 +368,6 @@ def notify_sparse_update(
         if cache_updated_chunks
         else torch.empty((0,), dtype=torch.int64)
     )
-    row["bagpipe_gpu_cache_update_ids"] = int(cache_updated_ids.numel())
-    row["bagpipe_gpu_cache_update_attempt_ids"] = int(attempted_cache_update_ids)
-    row["bagpipe_policy_cached_update_ids"] = int(policy_cached_update_ids)
-    row["bagpipe_gpu_cache_update_failures"] = int(failures)
-    row["bagpipe_gpu_cache_update_failure_reason"] = "; ".join(failure_reasons[:3])
     bagpipe_policy.on_update(
         step=int(step),
         ids=updated_ids,

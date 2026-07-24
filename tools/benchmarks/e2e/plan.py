@@ -119,7 +119,6 @@ def build_plan(profile: str, output_root: Path, overrides: PlanOverrides | None 
             recstore_index_type="DRAM_PET_HASH",
             ps_kv_backend="recstore_dram",
             nproc_per_node=2,
-            enable_single_node_fast_path=True,
             single_node_ps_backend="local_shm",
         ),
         E2ELane(

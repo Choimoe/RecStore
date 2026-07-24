@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     effective_ps_type = cfg.ps_type
     if (
         cfg.backend == "recstore"
-        and cfg.enable_single_node_distributed_fast_path
+        and cfg.nnodes == 1
         and cfg.single_node_ps_backend == "local_shm"
     ):
         effective_ps_type = "LOCAL_SHM"

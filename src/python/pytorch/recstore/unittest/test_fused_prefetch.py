@@ -303,8 +303,6 @@ class TestFusedPrefetch(unittest.TestCase):
         looked_up_ids = set(fake_client.local_lookup_calls[0][1].tolist())
         self.assertNotIn(1, looked_up_ids)
         self.assertNotIn((1 << 30) + 4, looked_up_ids)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["lookup_fallback_pull_ms"], 0.0)
 
     def test_prepared_fused_prefetch_matches_sync(self):
         configs = [
@@ -366,10 +364,6 @@ class TestFusedPrefetch(unittest.TestCase):
         out_prefetch = ebc(features).values().detach().clone()
 
         self.assertTrue(torch.allclose(out_sync, out_prefetch))
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertGreater(perf["lookup_partial_merge_ms"], 0.0)
-        self.assertEqual(perf["lookup_partial_prefetched_ids"], 2.0)
-        self.assertEqual(perf["lookup_partial_missing_ids"], 4.0)
 
     def test_invalid_fused_prefetch_ids_are_refreshed_from_local_lookup(self):
         configs = [
@@ -449,8 +443,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertTrue(torch.allclose(out_sync, out_prefetch))
         self.assertEqual(len(fake_client.local_lookup_calls), 1)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertGreater(perf["lookup_fallback_pull_ms"], 0.0)
 
     def test_partial_fused_prefetch_uses_gpu_cache_aware_pull_when_available(self):
         class _GpuCacheAwarePullClient(_FakeKVClient):
@@ -500,8 +492,6 @@ class TestFusedPrefetch(unittest.TestCase):
         self.assertTrue(torch.allclose(out_sync, out_prefetch))
         self.assertEqual(len(fake_client.local_lookup_calls), 1)
         self.assertEqual(len(fake_client.gpu_cached_pull_calls), 1)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["lookup_fallback_pull_ms"], 0.0)
 
     def test_fused_fallback_without_prefetch_uses_gpu_cache_aware_pull_when_available(self):
         class _GpuCacheAwarePullClient(_FakeKVClient):
@@ -541,9 +531,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertGreater(out.numel(), 0)
         self.assertEqual(len(fake_client.gpu_cached_pull_calls), 1)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertGreater(perf["lookup_gpu_cache_pull_ms"], 0.0)
-        self.assertEqual(perf["lookup_fallback_pull_ms"], 0.0)
 
     def test_fused_prefetch_prefills_gpu_cache_before_local_lookup(self):
         configs = [
@@ -582,10 +569,6 @@ class TestFusedPrefetch(unittest.TestCase):
         self.assertTrue(set(looked_up_ids.cpu().tolist()).issubset(set(prefill_ids.cpu().tolist())))
         self.assertEqual(out.values().shape, (2, 8))
         perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_batches"], 1.0)
-        self.assertGreater(perf["planned_gpu_cache_prefill_ids"], 0.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_successes"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 0.0)
         self.assertGreater(perf["lookup_total_ms"], 0.0)
 
     def test_fused_prefetch_prefill_disabled_on_cpu_without_test_override(self):
@@ -616,9 +599,6 @@ class TestFusedPrefetch(unittest.TestCase):
         self.assertEqual(fake_client.prefill_calls, [])
         self.assertIsNone(ebc._fused_prefetch_handle)
         self.assertEqual(ebc._fused_prefetch_slots, [])
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_no_cuda"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
 
     def test_fused_prefetch_prefill_falls_back_without_prefill_api(self):
         configs = [
@@ -646,9 +626,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertIsNone(ebc._fused_prefetch_handle)
         self.assertEqual(ebc._fused_prefetch_slots, [])
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_no_api"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
 
     def test_fused_prefetch_prefill_falls_back_to_local_lookup_on_wait_failure(self):
         configs = [
@@ -679,10 +656,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertEqual(len(fake_client.prefill_calls), 1)
         self.assertEqual(len(fake_client.local_lookup_calls), 2)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_wait_failures"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_successes"], 1.0)
 
     def test_fused_prefetch_prefill_records_size_mismatch_fallback(self):
         configs = [
@@ -709,9 +682,6 @@ class TestFusedPrefetch(unittest.TestCase):
         ebc.issue_fused_prefetch(features)
         ebc(features)
 
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_result_size_mismatches"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
 
 
 if __name__ == "__main__":

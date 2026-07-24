@@ -279,7 +279,7 @@ class TestBenchmarkE2E(unittest.TestCase):
                         "warmup_excluded",
                         "step_total_ms",
                         "embed_lookup_local_ms",
-                        "sparse_update_ms",
+                        "sparse_optimizer_ms",
                     ],
                 )
                 writer.writeheader()
@@ -289,7 +289,7 @@ class TestBenchmarkE2E(unittest.TestCase):
                         "warmup_excluded": 1,
                         "step_total_ms": 100,
                         "embed_lookup_local_ms": 20,
-                        "sparse_update_ms": 30,
+                        "sparse_optimizer_ms": 30,
                     }
                 )
                 writer.writerow(
@@ -298,7 +298,7 @@ class TestBenchmarkE2E(unittest.TestCase):
                         "warmup_excluded": 0,
                         "step_total_ms": 50,
                         "embed_lookup_local_ms": 5,
-                        "sparse_update_ms": 10,
+                        "sparse_optimizer_ms": 10,
                     }
                 )
             manifest = [
@@ -316,6 +316,7 @@ class TestBenchmarkE2E(unittest.TestCase):
             ]
 
             rows = collect_summary_rows(manifest)
+            rows.append({**rows[0], "lane": "TorchRec-HBM", "backend": "torchrec"})
             report = render_summary_md(
                 BenchmarkConfig(
                     clients=(ClientSpec(),),
@@ -331,6 +332,10 @@ class TestBenchmarkE2E(unittest.TestCase):
         self.assertIn("## Workload 说明", report)
         self.assertIn("## E2E 吞吐", report)
         self.assertIn("## E2E 延迟分解", report)
+        self.assertIn("| 指标 | BRPC | TorchRec-HBM |", report)
+        self.assertIn("| samples/s 均值 | 5.120K | 5.120K |", report)
+        self.assertIn("| step_total_ms | 50.000 | 50.000 |", report)
+        self.assertNotIn("| run_id | lane |", report)
 
     def test_collect_summary_uses_slowest_rank_for_job_throughput(self) -> None:
         from tools.benchmarks.e2e.custom import collect_summary_rows
@@ -346,15 +351,15 @@ class TestBenchmarkE2E(unittest.TestCase):
                         "warmup_excluded",
                         "step_total_ms",
                         "embed_lookup_local_ms",
-                        "sparse_update_ms",
+                        "sparse_optimizer_ms",
                     ],
                 )
                 writer.writeheader()
                 writer.writerow(
-                    {"step": 0, "rank": 0, "warmup_excluded": 0, "step_total_ms": 50, "embed_lookup_local_ms": 5, "sparse_update_ms": 10}
+                    {"step": 0, "rank": 0, "warmup_excluded": 0, "step_total_ms": 50, "embed_lookup_local_ms": 5, "sparse_optimizer_ms": 10}
                 )
                 writer.writerow(
-                    {"step": 0, "rank": 1, "warmup_excluded": 0, "step_total_ms": 100, "embed_lookup_local_ms": 5, "sparse_update_ms": 10}
+                    {"step": 0, "rank": 1, "warmup_excluded": 0, "step_total_ms": 100, "embed_lookup_local_ms": 5, "sparse_optimizer_ms": 10}
                 )
 
             rows = collect_summary_rows(

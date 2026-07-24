@@ -43,23 +43,23 @@ def summarize_recstore_csv(recstore_csv: Path) -> dict[str, float]:
     emb_stage_ms = _mean(rows, "emb_stage_ms")
     dense_fwd_ms = _mean(rows, "dense_fwd_ms")
     backward_ms = _mean(rows, "backward_ms")
-    optimizer_ms = _mean(rows, "optimizer_ms")
-    sparse_update_ms = _mean(rows, "sparse_update_ms")
+    dense_optimizer_ms = _mean(rows, "dense_optimizer_ms")
+    sparse_optimizer_ms = _mean(rows, "sparse_optimizer_ms")
     step_total_ms = _mean(rows, "step_total_ms")
     if (
         emb_stage_ms is not None
         and dense_fwd_ms is not None
         and backward_ms is not None
-        and optimizer_ms is not None
-        and sparse_update_ms is not None
+        and dense_optimizer_ms is not None
+        and sparse_optimizer_ms is not None
         and step_total_ms is not None
     ):
         return {
             "emb_stage_ms": emb_stage_ms,
             "dense_fwd_ms": dense_fwd_ms,
             "backward_ms": backward_ms,
-            "optimizer_ms": optimizer_ms,
-            "sparse_update_ms": sparse_update_ms,
+            "dense_optimizer_ms": dense_optimizer_ms,
+            "sparse_optimizer_ms": sparse_optimizer_ms,
             "step_total_ms": step_total_ms,
         }
 
@@ -104,23 +104,23 @@ def summarize_torchrec_main_csv(torchrec_main_csv: Path) -> dict[str, float]:
     )
     dense_fwd_ms = _mean(rows, "dense_fwd_ms")
     backward_ms = _mean(rows, "backward_ms")
-    optimizer_ms = _mean(rows, "optimizer_ms")
-    sparse_update_ms = _mean(rows, "sparse_update_ms")
+    dense_optimizer_ms = _mean(rows, "dense_optimizer_ms")
+    sparse_optimizer_ms = _mean(rows, "sparse_optimizer_ms")
     step_total_ms = _mean(rows, "step_total_ms")
     if (
         emb_stage_ms is not None
         and dense_fwd_ms is not None
         and backward_ms is not None
-        and optimizer_ms is not None
-        and sparse_update_ms is not None
+        and dense_optimizer_ms is not None
+        and sparse_optimizer_ms is not None
         and step_total_ms is not None
     ):
         return {
             "emb_stage_ms": emb_stage_ms,
             "dense_fwd_ms": dense_fwd_ms,
             "backward_ms": backward_ms,
-            "optimizer_ms": optimizer_ms,
-            "sparse_update_ms": sparse_update_ms,
+            "dense_optimizer_ms": dense_optimizer_ms,
+            "sparse_optimizer_ms": sparse_optimizer_ms,
             "step_total_ms": step_total_ms,
         }
 
@@ -160,8 +160,8 @@ def build_compare_rows(recstore_csv: Path, torchrec_main_csv: Path) -> list[dict
         "emb_stage_ms",
         "dense_fwd_ms",
         "backward_ms",
-        "optimizer_ms",
-        "sparse_update_ms",
+        "dense_optimizer_ms",
+        "sparse_optimizer_ms",
         "step_total_ms",
     ]
     if all(key in recstore for key in aligned_stage_keys) and all(
@@ -171,11 +171,11 @@ def build_compare_rows(recstore_csv: Path, torchrec_main_csv: Path) -> list[dict
             ("emb_stage", recstore["emb_stage_ms"], torchrec["emb_stage_ms"]),
             ("dense_fwd", recstore["dense_fwd_ms"], torchrec["dense_fwd_ms"]),
             ("backward", recstore["backward_ms"], torchrec["backward_ms"]),
-            ("optimizer", recstore["optimizer_ms"], torchrec["optimizer_ms"]),
+            ("dense_optimizer", recstore["dense_optimizer_ms"], torchrec["dense_optimizer_ms"]),
             (
-                "sparse_update",
-                recstore["sparse_update_ms"],
-                torchrec["sparse_update_ms"],
+                "sparse_optimizer",
+                recstore["sparse_optimizer_ms"],
+                torchrec["sparse_optimizer_ms"],
             ),
             ("step_total", recstore["step_total_ms"], torchrec["step_total_ms"]),
         ]
@@ -260,20 +260,14 @@ def build_exposed_gap_rows(
         _mean(rec_rows, "dense_compute_ms"),
         sum(
             _mean_or_zero(rec_rows, key)
-            for key in ("dense_fwd_ms", "backward_ms", "optimizer_ms")
+            for key in ("dense_fwd_ms", "backward_ms", "dense_optimizer_ms")
         ),
     ) or 0.0
     tr_dense = sum(
         _mean_or_zero(tr_rows, key)
-        for key in ("dense_fwd_ms", "backward_ms", "optimizer_ms")
+        for key in ("dense_fwd_ms", "backward_ms", "dense_optimizer_ms")
     )
-    rec_prefetch_wait = _first_non_none(
-        _mean(rec_rows, "prefetch_network_wait_ms"),
-        (
-            _mean_or_zero(rec_rows, "lookup_wait_ms")
-            + _mean_or_zero(rec_rows, "planned_gpu_cache_prefill_wait_ms")
-        ),
-    ) or 0.0
+    rec_prefetch_wait = _mean_or_zero(rec_rows, "lookup_wait_ms")
     rec_prefetch_exposed = max(0.0, rec_prefetch_wait - rec_dense)
 
     metrics = [
@@ -310,44 +304,12 @@ def build_exposed_gap_rows(
             "wait not hidden by dense compute window",
         ),
         (
-            "gpu_cache_query",
-            _mean_or_zero(rec_rows, "lookup_gpu_cache_query_ms"),
-            _mean_or_zero(rec_rows, "lookup_gpu_cache_query_ms"),
-            0.0,
-            0.0,
-            "RecStore GPU cache lookup overhead absent from TorchRec HBM lane",
-        ),
-        (
-            "gpu_cache_fill",
-            _mean_or_zero(rec_rows, "lookup_gpu_cache_fill_ms"),
-            _mean_or_zero(rec_rows, "lookup_gpu_cache_fill_ms"),
-            0.0,
-            0.0,
-            "cache miss fill overhead",
-        ),
-        (
-            "gpu_cache_prefill",
-            _mean_or_zero(rec_rows, "planned_gpu_cache_prefill_ms"),
-            _mean_or_zero(rec_rows, "planned_gpu_cache_prefill_ms"),
-            0.0,
-            0.0,
-            "lookahead result insertion into GPU cache",
-        ),
-        (
-            "sparse_update",
-            _mean_or_zero(rec_rows, "sparse_update_ms"),
-            _mean_or_zero(rec_rows, "sparse_update_ms"),
-            _mean_or_zero(tr_rows, "sparse_update_ms"),
-            _mean_or_zero(tr_rows, "sparse_update_ms"),
+            "sparse_optimizer",
+            _mean_or_zero(rec_rows, "sparse_optimizer_ms"),
+            _mean_or_zero(rec_rows, "sparse_optimizer_ms"),
+            _mean_or_zero(tr_rows, "sparse_optimizer_ms"),
+            _mean_or_zero(tr_rows, "sparse_optimizer_ms"),
             "sparse gradient replay/apply/flush path",
-        ),
-        (
-            "gpu_cache_invalidate",
-            _mean_or_zero(rec_rows, "update_gpu_cache_invalidate_ms"),
-            _mean_or_zero(rec_rows, "update_gpu_cache_invalidate_ms"),
-            0.0,
-            0.0,
-            "read-after-write cache invalidation cost",
         ),
         (
             "dense_compute",

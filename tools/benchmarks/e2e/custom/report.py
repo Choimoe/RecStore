@@ -26,8 +26,8 @@ LATENCY_BREAKDOWN_COLUMNS = (
     "embed_lookup_local_ms",
     "dense_fwd_ms",
     "backward_ms",
-    "optimizer_ms",
-    "sparse_update_ms",
+    "dense_optimizer_ms",
+    "sparse_optimizer_ms",
     "step_total_ms",
 )
 
@@ -97,7 +97,7 @@ def collect_summary_rows(manifest: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "p95_step_total_ms": _p95(warm, "step_total_ms"),
                 "samples_per_sec": _job_samples_per_sec(warm, batch_size),
                 "lookup_mrows_per_sec": _job_rows_per_sec(warm, batch_size, "embed_lookup_local_ms"),
-                "update_mrows_per_sec": _job_rows_per_sec(warm, batch_size, "sparse_update_ms"),
+                "update_mrows_per_sec": _job_rows_per_sec(warm, batch_size, "sparse_optimizer_ms"),
                 **{f"mean_{column}": value for column, value in latency_means.items()},
             }
         )
@@ -137,6 +137,18 @@ def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
         for client in cfg.clients
     )
     servers = "; ".join(f"{server.ip}:{server.port}/shard{server.shard_id}" for server in cfg.servers)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("lane", row.get("transport", ""))), []).append(row)
+    systems = sorted(grouped) or ["-"]
+
+    def table(metrics: list[tuple[str, list[str]]]) -> list[str]:
+        return [
+            f"| 指标 | {' | '.join(systems)} |",
+            f"| --- | {' | '.join(['---:'] * len(systems))} |",
+            *(f"| {label} | {' | '.join(values)} |" for label, values in metrics),
+        ]
+
     lines = [
         *header,
         "# Benchmark E2E Summary",
@@ -155,72 +167,44 @@ def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
             f"output={cfg.output_dir}。"
         ),
         "",
-        "| lane | backend | batch | dim | repeat_n | mean samples/s | CV |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
-    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        key = (
-            str(row.get("lane", row.get("transport", ""))),
-            str(row.get("backend", "")),
-            str(row.get("batch_size", "")),
-            str(row.get("embedding_dim", "")),
-        )
-        grouped.setdefault(key, []).append(row)
-    for key, group in sorted(grouped.items()):
-        mean, cv, count = _repeat_stats(group, "samples_per_sec")
-        lines.append(f"| {key[0]} | {key[1]} | {key[2]} | {key[3]} | {count} | {_unit(mean)} | {cv:.3f} |")
-    if not rows:
-        lines.append("| - | - | - | - | 0 | 0.000 | 0.000 |")
+    lines.extend(table([
+        ("backend", [str(grouped[name][0].get("backend", "-")) if name in grouped else "-" for name in systems]),
+        ("batch_size", [str(grouped[name][0].get("batch_size", "-")) if name in grouped else "-" for name in systems]),
+        ("embedding_dim", [str(grouped[name][0].get("embedding_dim", "-")) if name in grouped else "-" for name in systems]),
+    ]))
 
     lines.extend(
         [
             "",
             "## E2E 吞吐（samples/s，...）",
             "",
-            "| run_id | lane | backend | samples/s | lookup M rows/s | update M rows/s |",
-            "| --- | --- | --- | ---: | ---: | ---: |",
         ]
     )
-    for row in rows:
-        lines.append(
-            "| {run_id} | {lane} | {backend} | {samples} | {lookup:.3f} | {update:.3f} |".format(
-                run_id=row.get("run_id", ""),
-                lane=row.get("lane", row.get("transport", "")),
-                backend=row.get("backend", ""),
-                samples=_unit(float(row.get("samples_per_sec", 0.0) or 0.0)),
-                lookup=float(row.get("lookup_mrows_per_sec", 0.0) or 0.0),
-                update=float(row.get("update_mrows_per_sec", 0.0) or 0.0),
-            )
-        )
-    if not rows:
-        lines.append("| - | - | - | 0.000 | 0.000 | 0.000 |")
+    repeat_stats = {
+        name: _repeat_stats(group, "samples_per_sec") for name, group in grouped.items()
+    }
+    lines.extend(table([
+        ("repeat_n", [str(repeat_stats[name][2]) if name in grouped else "0" for name in systems]),
+        ("samples/s 均值", [_unit(repeat_stats[name][0]) if name in grouped else "0.000" for name in systems]),
+        ("CV", [f"{repeat_stats[name][1] * 100:.2f}%" if name in grouped else "0.00%" for name in systems]),
+        ("lookup M rows/s", [f"{_mean(grouped[name], 'lookup_mrows_per_sec'):.3f}" if name in grouped else "0.000" for name in systems]),
+        ("update M rows/s", [f"{_mean(grouped[name], 'update_mrows_per_sec'):.3f}" if name in grouped else "0.000" for name in systems]),
+    ]))
 
-    latency_headers = " | ".join(LATENCY_BREAKDOWN_COLUMNS)
-    latency_aligns = " | ".join(["---:"] * len(LATENCY_BREAKDOWN_COLUMNS))
     lines.extend(
         [
             "",
-            "## E2E 延迟分解（ms，warmup 已剔除，同一 run 内跨 rank 取均值）",
+            "## E2E 延迟分解（ms，warmup 已剔除，跨 rank 与 repeat 取均值）",
             "",
-            f"| run_id | lane | backend | {latency_headers} | p95 step_total |",
-            f"| --- | --- | --- | {latency_aligns} | ---: |",
         ]
     )
-    for row in rows:
-        latency_cells = " | ".join(
-            f"{float(row.get(f'mean_{column}', 0.0) or 0.0):.3f}" for column in LATENCY_BREAKDOWN_COLUMNS
-        )
-        lines.append(
-            "| {run_id} | {lane} | {backend} | {latency_cells} | {p95:.3f} |".format(
-                run_id=row.get("run_id", ""),
-                lane=row.get("lane", row.get("transport", "")),
-                backend=row.get("backend", ""),
-                latency_cells=latency_cells,
-                p95=float(row.get("p95_step_total_ms", 0.0) or 0.0),
-            )
-        )
-    if not rows:
-        lines.append("| - | - | - | " + " | ".join(["0.000"] * len(LATENCY_BREAKDOWN_COLUMNS)) + " | 0.000 |")
+    lines.extend(table([
+        *[
+            (column, [f"{_mean(grouped[name], f'mean_{column}'):.3f}" if name in grouped else "0.000" for name in systems])
+            for column in LATENCY_BREAKDOWN_COLUMNS
+        ],
+        ("p95 step_total", [f"{_mean(grouped[name], 'p95_step_total_ms'):.3f}" if name in grouped else "0.000" for name in systems]),
+    ]))
     lines.append("")
     return "\n".join(lines)

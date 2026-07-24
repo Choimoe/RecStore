@@ -363,12 +363,12 @@ class HpsTorchRunner(BenchmarkRunner):
                     device=device,
                 )
 
-            with stage_timer(row, "optimizer_ms"):
+            with stage_timer(row, "dense_optimizer_ms"):
                 dense_optimizer.step()
                 dense_optimizer.zero_grad(set_to_none=True)
                 sync_device(torch, device)
 
-            row["sparse_update_ms"] = 0.0
+            row["sparse_optimizer_ms"] = 0.0
             row["collective_launch_ms"] = 0.0
             row["collective_wait_ms"] = 0.0
             row["step_total_ms"] = (time.perf_counter() - step_start) * 1e3

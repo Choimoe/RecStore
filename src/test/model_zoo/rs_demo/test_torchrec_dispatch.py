@@ -10,7 +10,7 @@ import unittest
 import torch
 
 from model_zoo.rs_demo.cli import build_runner
-from model_zoo.rs_demo.config import RunConfig
+from model_zoo.rs_demo.config import RunConfig, dump_run_config, parse_config
 from model_zoo.rs_demo.runtime.report import write_stage_csv
 from model_zoo.rs_demo.runners.torchrec_runner import (
     TorchRecRunner,
@@ -291,128 +291,46 @@ class TestTorchRecDispatch(unittest.TestCase):
             torchrec_trace_csv="/nas/home/shq/docker/rs_demo/outputs/case-a/torchrec_trace.csv",
         )
         runner = TorchRecRunner(Path("/tmp/runtime"))
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
+        cmd = runner._build_torchrun_cmd(
+            Path("/app/RecStore"), cfg, Path("/tmp/worker_config.json")
+        )
         self.assertIn("--nnodes", cmd)
         self.assertIn("2", cmd)
         self.assertIn("--node_rank", cmd)
         self.assertIn("1", cmd)
         self.assertIn("--nproc_per_node", cmd)
         self.assertIn("4", cmd)
-        self.assertIn("--rdzv_backend", cmd)
-        self.assertIn("c10d", cmd)
         self.assertIn("--rdzv_endpoint", cmd)
         self.assertIn("10.0.2.191:29600", cmd)
         self.assertIn("--rdzv_id", cmd)
         self.assertIn("demo-run", cmd)
-        self.assertIn("--tee", cmd)
-        self.assertIn("3", cmd)
         self.assertNotIn("--standalone", cmd)
-        self.assertIn("--master-addr", cmd)
-        self.assertIn("--master-port", cmd)
-        self.assertIn("--rdzv-backend", cmd)
-        self.assertIn("--rdzv-id", cmd)
-        self.assertIn("--output-root", cmd)
-        self.assertIn("--run-id", cmd)
+        self.assertIn("--run-config-json", cmd)
+        self.assertIn("/tmp/worker_config.json", cmd)
 
-    def test_runner_builds_fair_remote_torchrun_command(self) -> None:
+    def test_worker_config_json_round_trips_torchrec_fields(self) -> None:
+        # Torchrec workers receive the full resolved config as JSON, so the
+        # fields the old per-flag launcher forwarded must survive dump/parse.
         cfg = RunConfig(
-            backend="torchrec",
-            steps=1,
-            nnodes=2,
-            node_rank=0,
-            nproc=1,
-            nproc_per_node=1,
-            master_addr="10.0.2.196",
-            master_port=29611,
-            rdzv_backend="c10d",
-            rdzv_id="fair-case",
-            output_root="/tmp/rs_demo",
-            run_id="fair-case",
-            torchrec_main_csv="/tmp/rs_demo/out.csv",
-            torchrec_main_agg_csv="/tmp/rs_demo/out_agg.csv",
-            torchrec_trace_dir="/tmp/rs_demo/traces",
-            torchrec_trace_csv="/tmp/rs_demo/trace.csv",
+            backend="torchrec", nnodes=2, node_rank=0, nproc_per_node=1,
+            output_root="/tmp/rs_demo", run_id="fields-case",
             torchrec_dist_mode="fair_remote",
-        )
-        runner = TorchRecRunner(Path("/tmp/runtime"))
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-        self.assertIn("--torchrec-dist-mode", cmd)
-        self.assertIn("fair_remote", cmd)
-
-    def test_runner_forwards_torchrec_memory_mode_to_worker(self) -> None:
-        cfg = RunConfig(
-            backend="torchrec",
-            steps=1,
-            nnodes=2,
-            node_rank=0,
-            nproc=1,
-            nproc_per_node=1,
-            master_addr="10.0.2.196",
-            master_port=29611,
-            rdzv_backend="c10d",
-            rdzv_id="uvm-case",
-            output_root="/tmp/rs_demo",
-            run_id="uvm-case",
-            torchrec_main_csv="/tmp/rs_demo/out.csv",
-            torchrec_main_agg_csv="/tmp/rs_demo/out_agg.csv",
-            torchrec_trace_dir="/tmp/rs_demo/traces",
-            torchrec_trace_csv="/tmp/rs_demo/trace.csv",
             torchrec_memory_mode="uvm_caching",
-        )
-        runner = TorchRecRunner(Path("/tmp/runtime"))
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-        self.assertIn("--torchrec-memory-mode", cmd)
-        self.assertIn("uvm_caching", cmd)
-
-    def test_runner_forwards_torchrec_timing_sync_mode_to_worker(self) -> None:
-        cfg = RunConfig(
-            backend="torchrec",
-            steps=1,
-            nnodes=2,
-            node_rank=0,
-            nproc=1,
-            nproc_per_node=1,
-            master_addr="10.0.2.196",
-            master_port=29611,
-            rdzv_backend="c10d",
-            rdzv_id="timing-case",
-            output_root="/tmp/rs_demo",
-            run_id="timing-case",
-            torchrec_main_csv="/tmp/rs_demo/out.csv",
-            torchrec_main_agg_csv="/tmp/rs_demo/out_agg.csv",
-            torchrec_trace_dir="/tmp/rs_demo/traces",
-            torchrec_trace_csv="/tmp/rs_demo/trace.csv",
             torchrec_timing_sync_mode="step",
-        )
-        runner = TorchRecRunner(Path("/tmp/runtime"))
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-        self.assertIn("--torchrec-timing-sync-mode", cmd)
-        self.assertIn("step", cmd)
-
-    def test_runner_forwards_torchrec_align_recstore_init_to_worker(self) -> None:
-        cfg = RunConfig(
-            backend="torchrec",
-            steps=1,
-            nnodes=2,
-            node_rank=0,
-            nproc=1,
-            nproc_per_node=1,
-            master_addr="10.0.2.196",
-            master_port=29611,
-            rdzv_backend="c10d",
-            rdzv_id="loss-case",
-            output_root="/tmp/rs_demo",
-            run_id="loss-case",
-            torchrec_main_csv="/tmp/rs_demo/out.csv",
-            torchrec_main_agg_csv="/tmp/rs_demo/out_agg.csv",
-            torchrec_trace_dir="/tmp/rs_demo/traces",
-            torchrec_trace_csv="/tmp/rs_demo/trace.csv",
             torchrec_align_recstore_init=True,
+            embedding_dim=16,
+            dense_arch_layer_sizes="64,32,16",
+            over_arch_layer_sizes="128,64,1",
         )
-        runner = TorchRecRunner(Path("/tmp/runtime"))
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-
-        self.assertIn("--torchrec-align-recstore-init", cmd)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = dump_run_config(cfg, Path(tmpdir) / "worker_config.json")
+            loaded = parse_config(["--run-config-json", str(path)])
+        self.assertEqual(loaded.torchrec_dist_mode, "fair_remote")
+        self.assertEqual(loaded.torchrec_memory_mode, "uvm_caching")
+        self.assertEqual(loaded.torchrec_timing_sync_mode, "step")
+        self.assertTrue(loaded.torchrec_align_recstore_init)
+        self.assertEqual(loaded.dense_arch_layer_sizes, "64,32,16")
+        self.assertEqual(loaded.over_arch_layer_sizes, "128,64,1")
 
     def test_build_uvm_caching_constraints_uses_all_table_names(self) -> None:
         constraints = _build_uvm_caching_constraints(
@@ -450,11 +368,11 @@ class TestTorchRecDispatch(unittest.TestCase):
             over_arch_layer_sizes="128,64,1",
         )
         runner = TorchRecRunner(Path("/tmp/runtime"))
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-        self.assertIn("--dense-arch-layer-sizes", cmd)
-        self.assertIn("64,32,16", cmd)
-        self.assertIn("--over-arch-layer-sizes", cmd)
-        self.assertIn("128,64,1", cmd)
+        cmd = runner._build_torchrun_cmd(
+            Path("/app/RecStore"), cfg, Path("/tmp/worker_config.json")
+        )
+        self.assertIn("--run-config-json", cmd)
+        self.assertIn("/tmp/worker_config.json", cmd)
 
     def test_runner_rank_output_dir_uses_shared_output_root(self) -> None:
         cfg = RunConfig(

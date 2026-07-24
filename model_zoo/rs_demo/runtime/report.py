@@ -116,30 +116,23 @@ def finalize_torchrec_row(row: dict) -> dict:
     return row
 
 
+def _row_float(row: dict, key: str) -> float:
+    value = row.get(key, 0.0)
+    if value in ("", None):
+        return 0.0
+    return float(value)
+
+
 def finalize_recstore_row(row: dict) -> dict:
     if (
         "local_update_backend_call_ms" not in row
         and "local_update_shm_call_ms" in row
     ):
-        row["local_update_backend_call_ms"] = float(
-            row.get("local_update_shm_call_ms", 0.0)
-        )
+        row["local_update_backend_call_ms"] = row["local_update_shm_call_ms"]
     row["emb_stage_ms"] = (
-        row["input_pack_ms"]
-        + row["embed_lookup_local_ms"]
-        + row["embed_pool_local_ms"]
-        + row["output_unpack_ms"]
-    )
-    row["lookup_breakdown_ms"] = (
-        float(row.get("lookup_wait_ms", 0.0))
-        + float(row.get("lookup_owner_exchange_ms", 0.0))
-        + float(row.get("lookup_local_lookup_ms", 0.0))
-        + float(row.get("lookup_reassemble_ms", 0.0))
-    )
-    row["sparse_update_breakdown_ms"] = (
-        float(row.get("update_trace_merge_ms", 0.0))
-        + float(row.get("update_owner_exchange_ms", 0.0))
-        + float(row.get("update_local_apply_ms", 0.0))
-        + float(row.get("update_flush_wait_ms", 0.0))
+        _row_float(row, "input_pack_ms")
+        + _row_float(row, "embed_lookup_local_ms")
+        + _row_float(row, "embed_pool_local_ms")
+        + _row_float(row, "output_unpack_ms")
     )
     return row

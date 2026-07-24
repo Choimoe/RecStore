@@ -197,127 +197,97 @@ def run_hybrid_backward(loss, embedded_sparse, dense_module, torch, device):
 
 
 # --------------------------------------------------------------------------
-# Model dispatcher: DLRM (default) vs RankMixer (ported)
+# Model plugin seam
+#
+# The shared harness (recstore/torchrec runners) is model-agnostic: it resolves
+# a plugin by ``cfg.model`` and calls the four methods below.  DLRM is built in
+# here; other models (e.g. RankMixer) live in their own ``model_zoo/<Model>/``
+# package and are imported lazily by ``resolve_model_plugin``.
 # --------------------------------------------------------------------------
 
-def _parse_rankmixer_segment_dims(raw: str | None, num_sparse_features: int,
-                                  embedding_dim: int) -> list[int]:
-    """Parse a comma-separated segment-dim string, or auto-partition the sparse
-    feature concat into 5 segments (matching the production RankMixer token count)."""
-    from .rankmixer_model import default_segment_dims
-    if not raw:
-        return default_segment_dims(num_sparse_features, embedding_dim, num_segments=5)
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    return [int(p) for p in parts]
 
+class DlrmModelPlugin:
+    """Default DLRM model plugin (dense arch + BCE loss)."""
 
-def build_dense_module(
-    model_type: str,
-    torch,
-    dense_in_features: int,
-    embedding_dim: int,
-    num_sparse_features: int,
-    dense_arch_layer_sizes,
-    over_arch_layer_sizes,
-    device,
-    *,
-    rankmixer_segment_dims: str | None = None,
-    rankmixer_tokens_split_dim: int = 2400,
-    rankmixer_blocks: int = 2,
-    rankmixer_gate_num: int = 6,
-    rankmixer_masked_dim: int = 56,
-):
-    """Build the dense compute module.
+    #: CLI dests this plugin owns (routed into ``cfg.model_args``); DLRM has none.
+    ARG_DESTS: tuple[str, ...] = ()
 
-    model_type == "rankmixer" returns a RankMixerArch (ported blocks);
-    otherwise the original DLRM HybridDenseArch is used.  Both consume
-    embedded_sparse [B, F, D] so the rest of the training loop (backward, sparse
-    update, bagpipe, prefetch) is unchanged.
-    """
-    if model_type == "rankmixer":
-        from .rankmixer_model import build_rankmixer_arch
-        segment_dims = _parse_rankmixer_segment_dims(
-            rankmixer_segment_dims, num_sparse_features, embedding_dim)
-        module = build_rankmixer_arch(
+    def add_arguments(self, parser) -> None:  # noqa: D401 - no extra CLI args
+        return None
+
+    def build_dense_module(self, cfg, *, num_sparse_features, embedding_dim, device):
+        module = build_hybrid_dense_arch(
+            torch=torch,
+            dense_in_features=13,
             embedding_dim=embedding_dim,
             num_sparse_features=num_sparse_features,
-            segment_dims=segment_dims,
-            tokens_split_dim=rankmixer_tokens_split_dim,
-            rankmixer_blocks=rankmixer_blocks,
-            gate_num=rankmixer_gate_num,
-            masked_dim=rankmixer_masked_dim,
+            dense_arch_layer_sizes=parse_layer_sizes(cfg.dense_arch_layer_sizes),
+            over_arch_layer_sizes=parse_layer_sizes(cfg.over_arch_layer_sizes),
             device=device,
         )
-        module.model_type = "rankmixer"
+        module.model_type = "dlrm"
         return module
-    module = build_hybrid_dense_arch(
-        torch=torch,
-        dense_in_features=dense_in_features,
-        embedding_dim=embedding_dim,
-        num_sparse_features=num_sparse_features,
-        dense_arch_layer_sizes=dense_arch_layer_sizes,
-        over_arch_layer_sizes=over_arch_layer_sizes,
-        device=device,
+
+    def build_criterion(self, cfg, dense_module):
+        return torch.nn.BCEWithLogitsLoss()
+
+    def compute_loss(self, dense_module, criterion, dense_features, embedded_sparse, labels):
+        logits = dense_module(dense_features, embedded_sparse)
+        return criterion(logits, labels), logits
+
+
+DLRM_PLUGIN = DlrmModelPlugin()
+
+#: model name -> import path of a module exposing ``PLUGIN`` (torch imported lazily).
+_MODEL_PLUGIN_MODULES = {"rankmixer": "RankMixer.plugin"}
+_PLUGIN_CACHE: dict[str, object] = {"dlrm": DLRM_PLUGIN}
+
+
+def resolve_model_plugin(name: str):
+    """Return the model plugin for ``name`` ("dlrm" built in, others imported).
+
+    Tolerates both the ``model_zoo`` on-path layout (production) and the
+    repo-root layout (tests).
+    """
+    name = name or "dlrm"
+    if name not in _PLUGIN_CACHE:
+        module_path = _MODEL_PLUGIN_MODULES.get(name)
+        if module_path is None:
+            raise ValueError(f"unknown model: {name}")
+        import importlib
+
+        module = None
+        for candidate in (module_path, f"model_zoo.{module_path}"):
+            try:
+                module = importlib.import_module(candidate)
+                break
+            except ImportError:
+                continue
+        if module is None:
+            raise ImportError(f"cannot import model plugin for {name!r} ({module_path})")
+        _PLUGIN_CACHE[name] = module.PLUGIN
+    return _PLUGIN_CACHE[name]
+
+
+# Thin model-agnostic dispatchers used by the runners.  They resolve the plugin
+# from ``cfg.model`` and forward — the runners never branch on the model.
+
+def build_dense_module(cfg, *, num_sparse_features, embedding_dim, device):
+    return resolve_model_plugin(cfg.model).build_dense_module(
+        cfg, num_sparse_features=num_sparse_features,
+        embedding_dim=embedding_dim, device=device,
     )
-    module.model_type = "dlrm"
-    return module
 
 
-def build_criterion(model_type: str, task_names: list[str] | None = None):
-    """Loss for the selected model type."""
-    if model_type == "rankmixer":
-        from .rankmixer_model import RankMixerLoss
-        return RankMixerLoss(task_names or [])
-    return torch.nn.BCEWithLogitsLoss()
+def build_criterion(cfg, dense_module):
+    return resolve_model_plugin(cfg.model).build_criterion(cfg, dense_module)
 
 
-def _labels_to_multitask(labels: torch.Tensor, task_names: list[str]):
-    """Derive deterministic per-task labels from the single binary label.
-
-    Both embedding backends receive identical labels, so forward/backward are
-    numerically comparable.  Binary tasks reuse the 0/1 label; regression (mse)
-    tasks get a deterministic float target derived from the label.
-    """
-    from .rankmixer_model import RankMixerLoss
-    base = labels.view(-1).float()
-    task_labels: dict = {}
-    for i, task in enumerate(task_names):
-        loss_type, _ = RankMixerLoss.TASK_LOSS_CFG.get(task, ("logloss", 1.0))
-        if loss_type == "mse":
-            task_labels[task] = (base * 0.5 + 0.1 * (i % 5)).clamp(0.0, 1.0)
-        else:
-            task_labels[task] = base
-    return task_labels
+def compute_dense_loss(cfg, dense_module, criterion, dense_features, embedded_sparse, labels):
+    return resolve_model_plugin(cfg.model).compute_loss(
+        dense_module, criterion, dense_features, embedded_sparse, labels,
+    )
 
 
-def compute_dense_loss(
-    model_type: str,
-    dense_module,
-    criterion,
-    dense_features: torch.Tensor,
-    embedded_sparse: torch.Tensor,
-    labels: torch.Tensor,
-):
-    """Forward + loss for the selected model type.
-
-    Returns (loss, logits) where logits is a tensor (DLRM) or dict (RankMixer).
-    """
-    if model_type == "rankmixer":
-        logits = dense_module(embedded_sparse)
-        task_names = list(logits.keys())
-        task_labels = _labels_to_multitask(labels, task_names)
-        loss = criterion(logits, task_labels)
-        return loss, logits
-    logits = dense_module(dense_features, embedded_sparse)
-    loss = criterion(logits, labels)
-    return loss, logits
-
-
-def rankmixer_task_names(dense_module) -> list[str]:
-    """Return the RankMixer task names (empty for DLRM)."""
-    if getattr(dense_module, "model_type", "") != "rankmixer":
-        return []
-    ple = getattr(dense_module, "ple", None)
-    if ple is None:
-        return []
-    return [t for g in ple.ple_groups.values() for t in g.task_group]
+def model_task_names(cfg, dense_module) -> list[str]:
+    return resolve_model_plugin(cfg.model).task_names(dense_module)

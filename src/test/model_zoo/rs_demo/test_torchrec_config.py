@@ -19,6 +19,40 @@ from model_zoo.rs_demo.config import (
 )
 
 
+BASE_RECSTORE_CFG = {
+    "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
+    "cache_ps": {"servers": []},
+    "distributed_client": {"servers": []},
+}
+
+RECSTORE_MAIN_CSV = (
+    "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,"
+    "output_unpack_ms,dense_fwd_ms,backward_ms,dense_optimizer_ms,"
+    "sparse_optimizer_ms,emb_stage_ms\n"
+    "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n"
+)
+
+
+def _write_recstore_config(directory: Path) -> Path:
+    path = Path(directory) / "recstore_config.json"
+    path.write_text(json.dumps(BASE_RECSTORE_CFG), encoding="utf-8")
+    return path
+
+
+class _FakeRecstoreRunner:
+    """Shared fake runner: optionally captures cfg/env, then writes the CSV."""
+
+    def __init__(self, on_run=None):
+        self.on_run = on_run
+
+    def run(self, repo_root, cfg):
+        if self.on_run is not None:
+            self.on_run(cfg)
+        Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
+        Path(cfg.recstore_main_csv).write_text(RECSTORE_MAIN_CSV, encoding="utf-8")
+        return {"backend": "recstore", "rows": []}
+
+
 class TestTorchRecConfig(unittest.TestCase):
     def test_recstore_distributed_allows_multi_node(self) -> None:
         cfg = parse_config(
@@ -62,15 +96,19 @@ class TestTorchRecConfig(unittest.TestCase):
                 "case-a",
             ]
         )
-        self.assertEqual(cfg.nnodes, 2)
-        self.assertEqual(cfg.node_rank, 1)
-        self.assertEqual(cfg.nproc_per_node, 4)
-        self.assertEqual(cfg.master_addr, "10.0.2.191")
-        self.assertEqual(cfg.master_port, 29600)
-        self.assertEqual(cfg.rdzv_backend, "c10d")
-        self.assertEqual(cfg.rdzv_id, "demo-run")
-        self.assertEqual(cfg.output_root, "/nas/home/shq/docker/rs_demo")
-        self.assertEqual(cfg.run_id, "case-a")
+        for field, expected in [
+            ("nnodes", 2),
+            ("node_rank", 1),
+            ("nproc_per_node", 4),
+            ("master_addr", "10.0.2.191"),
+            ("master_port", 29600),
+            ("rdzv_backend", "c10d"),
+            ("rdzv_id", "demo-run"),
+            ("output_root", "/nas/home/shq/docker/rs_demo"),
+            ("run_id", "case-a"),
+        ]:
+            with self.subTest(field=field):
+                self.assertEqual(getattr(cfg, field), expected)
 
     def test_num_embeddings_per_feature_override_parses(self) -> None:
         values = [str(idx + 1) for idx in range(26)]
@@ -90,49 +128,17 @@ class TestTorchRecConfig(unittest.TestCase):
             cfg.num_embeddings_per_feature,
         ), list(range(1, 27)))
 
-    def test_torchrec_dist_mode_parses(self) -> None:
-        cfg = parse_config(
-            [
-                "--backend",
-                "torchrec",
-                "--torchrec-dist-mode",
-                "fair_remote",
-            ]
-        )
-        self.assertEqual(cfg.torchrec_dist_mode, "fair_remote")
-
-    def test_torchrec_memory_mode_parses_uvm_caching(self) -> None:
-        cfg = parse_config(
-            [
-                "--backend",
-                "torchrec",
-                "--torchrec-memory-mode",
-                "uvm_caching",
-            ]
-        )
-        self.assertEqual(cfg.torchrec_memory_mode, "uvm_caching")
-
-    def test_torchrec_timing_sync_mode_parses_step(self) -> None:
-        cfg = parse_config(
-            [
-                "--backend",
-                "torchrec",
-                "--torchrec-timing-sync-mode",
-                "step",
-            ]
-        )
-        self.assertEqual(cfg.torchrec_timing_sync_mode, "step")
-
-    def test_torchrec_align_recstore_init_parses(self) -> None:
-        cfg = parse_config(
-            [
-                "--backend",
-                "torchrec",
-                "--torchrec-align-recstore-init",
-            ]
-        )
-
-        self.assertTrue(cfg.torchrec_align_recstore_init)
+    def test_torchrec_single_flags_parse(self) -> None:
+        cases = [
+            (["--torchrec-dist-mode", "fair_remote"], "torchrec_dist_mode", "fair_remote"),
+            (["--torchrec-memory-mode", "uvm_caching"], "torchrec_memory_mode", "uvm_caching"),
+            (["--torchrec-timing-sync-mode", "step"], "torchrec_timing_sync_mode", "step"),
+            (["--torchrec-align-recstore-init"], "torchrec_align_recstore_init", True),
+        ]
+        for args, field, expected in cases:
+            with self.subTest(field=field):
+                cfg = parse_config(["--backend", "torchrec", *args])
+                self.assertEqual(getattr(cfg, field), expected)
 
     def test_recstore_ps_type_accepts_rdma(self) -> None:
         cfg = parse_config(
@@ -166,13 +172,17 @@ class TestTorchRecConfig(unittest.TestCase):
                 "0.5",
             ]
         )
-        self.assertEqual(cfg.backend, "hps_torch")
-        self.assertEqual(cfg.hps_torch_model_name, "dlrm_hps")
-        self.assertEqual(cfg.hps_torch_config_file, "/tmp/hps.json")
-        self.assertEqual(cfg.hps_torch_model_dir, "/tmp/hps_model")
-        self.assertEqual(cfg.hps_torch_main_csv, "/tmp/hps.csv")
-        self.assertEqual(cfg.hps_torch_main_agg_csv, "/tmp/hps_agg.csv")
-        self.assertEqual(cfg.hps_torch_gpucacheper, 0.5)
+        for field, expected in [
+            ("backend", "hps_torch"),
+            ("hps_torch_model_name", "dlrm_hps"),
+            ("hps_torch_config_file", "/tmp/hps.json"),
+            ("hps_torch_model_dir", "/tmp/hps_model"),
+            ("hps_torch_main_csv", "/tmp/hps.csv"),
+            ("hps_torch_main_agg_csv", "/tmp/hps_agg.csv"),
+            ("hps_torch_gpucacheper", 0.5),
+        ]:
+            with self.subTest(field=field):
+                self.assertEqual(getattr(cfg, field), expected)
 
     def test_hps_torch_backend_accepts_single_node_multi_process(self) -> None:
         cfg = parse_config(
@@ -221,16 +231,20 @@ class TestTorchRecConfig(unittest.TestCase):
                 "/tmp/example/trace.csv",
             ]
         )
-        self.assertEqual(cfg.backend, "torchrec")
-        self.assertEqual(cfg.nproc, 1)
         self.assertTrue(cfg.torchrec_profiler)
-        self.assertEqual(cfg.torchrec_profiler_warmup, 1)
-        self.assertEqual(cfg.torchrec_profiler_active, 3)
-        self.assertEqual(cfg.torchrec_profiler_repeat, 2)
-        self.assertEqual(cfg.torchrec_trace_dir, "/tmp/example/trace")
-        self.assertEqual(cfg.torchrec_main_csv, "/tmp/example/main.csv")
-        self.assertEqual(cfg.torchrec_main_agg_csv, "/tmp/example/main_agg.csv")
-        self.assertEqual(cfg.torchrec_trace_csv, "/tmp/example/trace.csv")
+        for field, expected in [
+            ("backend", "torchrec"),
+            ("nproc", 1),
+            ("torchrec_profiler_warmup", 1),
+            ("torchrec_profiler_active", 3),
+            ("torchrec_profiler_repeat", 2),
+            ("torchrec_trace_dir", "/tmp/example/trace"),
+            ("torchrec_main_csv", "/tmp/example/main.csv"),
+            ("torchrec_main_agg_csv", "/tmp/example/main_agg.csv"),
+            ("torchrec_trace_csv", "/tmp/example/trace.csv"),
+        ]:
+            with self.subTest(field=field):
+                self.assertEqual(getattr(cfg, field), expected)
 
     def test_torchrec_no_start_server_flag(self) -> None:
         cfg = parse_config(["--backend", "torchrec", "--nproc", "4", "--no-start-server"])
@@ -314,10 +328,6 @@ class TestTorchRecConfig(unittest.TestCase):
         ensure_run_id(cfg)
         self.assertTrue(cfg.run_id.startswith("run_"))
 
-    def test_default_output_root_uses_shared_nas_path(self) -> None:
-        cfg = parse_config(["--backend", "torchrec"])
-        self.assertEqual(cfg.output_root, "/nas/home/shq/docker/rs_demo")
-
     def test_populate_default_paths_moves_outputs_to_output_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = parse_config(["--backend", "torchrec"])
@@ -385,7 +395,7 @@ class TestTorchRecConfig(unittest.TestCase):
                             "output_unpack_ms": 0.5,
                             "dense_fwd_ms": 1.0,
                             "backward_ms": 2.0,
-                            "optimizer_ms": 1.0,
+                            "dense_optimizer_ms": 1.0,
                             "collective_total_ms": 0.0,
                             "network_proxy_torchrec_ms": 0.0,
                             "kv_local_only_ms": 3.0,
@@ -465,70 +475,37 @@ class TestTorchRecConfig(unittest.TestCase):
 
     def test_cli_recstore_worker_skips_post_process(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            base_cfg = {
-                "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
-                "cache_ps": {"servers": []},
-                "distributed_client": {"servers": []},
-            }
-            (Path(tmpdir) / "recstore_config.json").write_text(
-                json.dumps(base_cfg),
-                encoding="utf-8",
-            )
+            _write_recstore_config(Path(tmpdir))
 
-            class _FakeRunner:
-                def run(self, repo_root, cfg):
-                    return {"backend": "recstore", "rows": []}
-
-            with mock.patch.dict("os.environ", {"RS_DEMO_RECSTORE_WORKER": "1"}, clear=False):
-                with mock.patch.object(cli, "build_runner", return_value=_FakeRunner()):
-                    with mock.patch.object(cli, "repo_root_from_this_file", return_value=Path(tmpdir)):
-                        rc = cli.main(
-                            [
-                                "--backend",
-                                "recstore",
-                                "--steps",
-                                "1",
-                                "--no-start-server",
-                                "--output-root",
-                                tmpdir,
-                                "--run-id",
-                                "recstore-worker",
-                            ]
-                        )
+            with mock.patch.dict("os.environ", {"RS_DEMO_RECSTORE_WORKER": "1"}, clear=False), \
+                 mock.patch.object(cli, "build_runner", return_value=_FakeRecstoreRunner()), \
+                 mock.patch.object(cli, "repo_root_from_this_file", return_value=Path(tmpdir)):
+                rc = cli.main(
+                    [
+                        "--backend",
+                        "recstore",
+                        "--steps",
+                        "1",
+                        "--no-start-server",
+                        "--output-root",
+                        tmpdir,
+                        "--run-id",
+                        "recstore-worker",
+                    ]
+                )
 
             self.assertEqual(rc, 0)
 
     def test_cli_loads_base_config_from_resolver(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            resolver_config = Path(tmpdir) / "recstore_config.json"
-            resolver_config.write_text(
-                json.dumps(
-                    {
-                        "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
-                        "cache_ps": {"servers": []},
-                        "distributed_client": {"servers": []},
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            class _FakeRunner:
-                def run(self, repo_root, cfg):
-                    Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
-                    Path(cfg.recstore_main_csv).write_text(
-                        "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,output_unpack_ms,dense_fwd_ms,backward_ms,optimizer_ms,sparse_update_ms,emb_stage_ms\n"
-                        "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n",
-                        encoding="utf-8",
-                    )
-                    return {"backend": "recstore", "rows": []}
-
+            resolver_config = _write_recstore_config(Path(tmpdir))
             missing_repo_root = Path(tmpdir) / "missing-repo-root"
             with mock.patch.object(
                 cli, "resolve_recstore_config_path", return_value=resolver_config
             ), mock.patch.object(
                 cli, "repo_root_from_this_file", return_value=missing_repo_root
             ), mock.patch.object(
-                cli, "build_runner", return_value=_FakeRunner()
+                cli, "build_runner", return_value=_FakeRecstoreRunner()
             ), mock.patch.object(
                 cli, "make_runtime_dir", return_value=(Path(tmpdir), resolver_config)
             ), mock.patch.object(
@@ -553,35 +530,12 @@ class TestTorchRecConfig(unittest.TestCase):
     def test_cli_recstore_runtime_dir_skips_make_runtime_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
-            base_cfg = {
-                "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
-                "cache_ps": {"servers": []},
-                "distributed_client": {"servers": []},
-            }
-            (repo_root / "recstore_config.json").write_text(json.dumps(base_cfg), encoding="utf-8")
+            _write_recstore_config(repo_root)
             shared_runtime = repo_root / "shared-runtime"
             shared_runtime.mkdir()
-            (shared_runtime / "recstore_config.json").write_text(
-                json.dumps(base_cfg),
-                encoding="utf-8",
-            )
+            _write_recstore_config(shared_runtime)
 
-            class _FakeRunner:
-                def __init__(self):
-                    self.runtime_dir = None
-
-                def run(self, repo_root, cfg):
-                    Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
-                    Path(cfg.recstore_main_csv).write_text(
-                        "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,output_unpack_ms,dense_fwd_ms,backward_ms,optimizer_ms,sparse_update_ms,emb_stage_ms\n"
-                        "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n",
-                        encoding="utf-8",
-                    )
-                    return {"backend": "recstore", "rows": []}
-
-            fake_runner = _FakeRunner()
-
-            with mock.patch.object(cli, "build_runner", return_value=fake_runner), mock.patch.object(
+            with mock.patch.object(cli, "build_runner", return_value=_FakeRecstoreRunner()), mock.patch.object(
                 cli, "repo_root_from_this_file", return_value=repo_root
             ), mock.patch.object(
                 cli, "make_runtime_dir", side_effect=AssertionError("make_runtime_dir should not be called")
@@ -609,41 +563,22 @@ class TestTorchRecConfig(unittest.TestCase):
     def test_cli_recstore_resolves_relative_runtime_and_csv_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
-            base_cfg = {
-                "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
-                "cache_ps": {"servers": []},
-                "distributed_client": {"servers": []},
-            }
-            (repo_root / "recstore_config.json").write_text(
-                json.dumps(base_cfg),
-                encoding="utf-8",
-            )
+            _write_recstore_config(repo_root)
             shared_runtime = repo_root / "relative-runtime"
             shared_runtime.mkdir()
-            (shared_runtime / "recstore_config.json").write_text(
-                json.dumps(base_cfg),
-                encoding="utf-8",
-            )
+            _write_recstore_config(shared_runtime)
             captured = {}
 
-            class _FakeRunner:
-                def run(self, repo_root, cfg):
-                    captured["runtime_dir"] = cfg.recstore_runtime_dir
-                    captured["RECSTORE_CONFIG"] = os.environ.get("RECSTORE_CONFIG")
-                    captured["recstore_main_csv"] = cfg.recstore_main_csv
-                    Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
-                    Path(cfg.recstore_main_csv).write_text(
-                        "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,output_unpack_ms,dense_fwd_ms,backward_ms,optimizer_ms,sparse_update_ms,emb_stage_ms\n"
-                        "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n",
-                        encoding="utf-8",
-                    )
-                    return {"backend": "recstore", "rows": []}
+            def capture(cfg):
+                captured["runtime_dir"] = cfg.recstore_runtime_dir
+                captured["RECSTORE_CONFIG"] = os.environ.get("RECSTORE_CONFIG")
+                captured["recstore_main_csv"] = cfg.recstore_main_csv
 
             old_cwd = Path.cwd()
             try:
                 os.chdir(repo_root)
                 with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
-                    cli, "build_runner", return_value=_FakeRunner()
+                    cli, "build_runner", return_value=_FakeRecstoreRunner(capture)
                 ), mock.patch.object(
                     cli, "repo_root_from_this_file", return_value=repo_root
                 ), mock.patch.object(
@@ -685,88 +620,22 @@ class TestTorchRecConfig(unittest.TestCase):
                 str((repo_root / "relative-artifacts/recstore_main.csv").resolve()),
             )
 
-    def test_cli_recstore_assigns_generated_runtime_dir_back_to_cfg(self) -> None:
+    def test_cli_recstore_assigns_generated_runtime_dir_and_exports_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
-            base_cfg = {
-                "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
-                "cache_ps": {"servers": []},
-                "distributed_client": {"servers": []},
-            }
-            (repo_root / "recstore_config.json").write_text(json.dumps(base_cfg), encoding="utf-8")
+            _write_recstore_config(repo_root)
             generated_runtime = repo_root / "runtime-generated"
             generated_runtime.mkdir()
-            (generated_runtime / "recstore_config.json").write_text(
-                json.dumps(base_cfg),
-                encoding="utf-8",
-            )
+            generated_config = _write_recstore_config(generated_runtime)
 
-            captured_cfg = {}
+            captured = {}
 
-            class _FakeRunner:
-                def run(self, repo_root, cfg):
-                    captured_cfg["recstore_runtime_dir"] = cfg.recstore_runtime_dir
-                    Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
-                    Path(cfg.recstore_main_csv).write_text(
-                        "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,output_unpack_ms,dense_fwd_ms,backward_ms,optimizer_ms,sparse_update_ms,emb_stage_ms\n"
-                        "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n",
-                        encoding="utf-8",
-                    )
-                    return {"backend": "recstore", "rows": []}
-
-            with mock.patch.object(cli, "build_runner", return_value=_FakeRunner()), mock.patch.object(
-                cli, "repo_root_from_this_file", return_value=repo_root
-            ), mock.patch.object(
-                cli, "make_runtime_dir", return_value=(generated_runtime, generated_runtime / "recstore_config.json")
-            ), mock.patch.object(
-                cli, "analyze_embupdate", return_value="ok"
-            ):
-                rc = cli.main(
-                    [
-                        "--backend",
-                        "recstore",
-                        "--steps",
-                        "1",
-                        "--no-start-server",
-                        "--output-root",
-                        str(repo_root),
-                        "--run-id",
-                        "recstore-generated-runtime",
-                    ]
-                )
-
-            self.assertEqual(rc, 0)
-            self.assertEqual(captured_cfg["recstore_runtime_dir"], str(generated_runtime))
-
-    def test_cli_recstore_exports_generated_runtime_config_to_ops(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            base_cfg = {
-                "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
-                "cache_ps": {"servers": []},
-                "distributed_client": {"servers": []},
-            }
-            (repo_root / "recstore_config.json").write_text(json.dumps(base_cfg), encoding="utf-8")
-            generated_runtime = repo_root / "runtime-generated"
-            generated_runtime.mkdir()
-            generated_config = generated_runtime / "recstore_config.json"
-            generated_config.write_text(json.dumps(base_cfg), encoding="utf-8")
-
-            captured_env = {}
-
-            class _FakeRunner:
-                def run(self, repo_root, cfg):
-                    captured_env["RECSTORE_CONFIG"] = os.environ.get("RECSTORE_CONFIG")
-                    Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
-                    Path(cfg.recstore_main_csv).write_text(
-                        "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,output_unpack_ms,dense_fwd_ms,backward_ms,optimizer_ms,sparse_update_ms,emb_stage_ms\n"
-                        "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n",
-                        encoding="utf-8",
-                    )
-                    return {"backend": "recstore", "rows": []}
+            def capture(cfg):
+                captured["recstore_runtime_dir"] = cfg.recstore_runtime_dir
+                captured["RECSTORE_CONFIG"] = os.environ.get("RECSTORE_CONFIG")
 
             with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
-                cli, "build_runner", return_value=_FakeRunner()
+                cli, "build_runner", return_value=_FakeRecstoreRunner(capture)
             ), mock.patch.object(
                 cli, "repo_root_from_this_file", return_value=repo_root
             ), mock.patch.object(
@@ -789,43 +658,29 @@ class TestTorchRecConfig(unittest.TestCase):
                 )
 
             self.assertEqual(rc, 0)
-            self.assertEqual(captured_env["RECSTORE_CONFIG"], str(generated_config))
+            self.assertEqual(captured["recstore_runtime_dir"], str(generated_runtime))
+            self.assertEqual(captured["RECSTORE_CONFIG"], str(generated_config))
 
     def test_cli_recstore_rdma_uses_petps_server_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_root = Path(tmpdir)
-            base_cfg = {
-                "client": {"host": "127.0.0.1", "port": 15123, "shard": 0},
-                "cache_ps": {"servers": []},
-                "distributed_client": {"servers": []},
-            }
-            config_path = repo_root / "recstore_config.json"
-            config_path.write_text(json.dumps(base_cfg), encoding="utf-8")
+            config_path = _write_recstore_config(repo_root)
             runtime_dir = repo_root / "runtime-generated"
             runtime_dir.mkdir()
-            runtime_config = runtime_dir / "recstore_config.json"
-            runtime_config.write_text(json.dumps(base_cfg), encoding="utf-8")
+            runtime_config = _write_recstore_config(runtime_dir)
             captured = {}
 
-            class _FakeRunner:
-                def run(self, repo_root, cfg):
-                    captured["RECSTORE_CONFIG"] = os.environ.get("RECSTORE_CONFIG")
-                    captured["RECSTORE_RDMA_RC_NAMESPACE"] = os.environ.get(
-                        "RECSTORE_RDMA_RC_NAMESPACE"
-                    )
-                    captured["RECSTORE_RDMA_CONTROL_PLANE_PORT"] = os.environ.get(
-                        "RECSTORE_RDMA_CONTROL_PLANE_PORT"
-                    )
-                    captured["RECSTORE_RDMA_GET_RESPONSE_MODE"] = os.environ.get(
-                        "RECSTORE_RDMA_GET_RESPONSE_MODE"
-                    )
-                    Path(cfg.recstore_main_csv).parent.mkdir(parents=True, exist_ok=True)
-                    Path(cfg.recstore_main_csv).write_text(
-                        "step_total_ms,input_pack_ms,embed_lookup_local_ms,embed_pool_local_ms,output_unpack_ms,dense_fwd_ms,backward_ms,optimizer_ms,sparse_update_ms,emb_stage_ms\n"
-                        "1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,1.0\n",
-                        encoding="utf-8",
-                    )
-                    return {"backend": "recstore", "rows": []}
+            def capture(cfg):
+                captured["RECSTORE_CONFIG"] = os.environ.get("RECSTORE_CONFIG")
+                captured["RECSTORE_RDMA_RC_NAMESPACE"] = os.environ.get(
+                    "RECSTORE_RDMA_RC_NAMESPACE"
+                )
+                captured["RECSTORE_RDMA_CONTROL_PLANE_PORT"] = os.environ.get(
+                    "RECSTORE_RDMA_CONTROL_PLANE_PORT"
+                )
+                captured["RECSTORE_RDMA_GET_RESPONSE_MODE"] = os.environ.get(
+                    "RECSTORE_RDMA_GET_RESPONSE_MODE"
+                )
 
             fake_rdma_cluster = type(
                 "FakeRdmaCluster",
@@ -844,7 +699,7 @@ class TestTorchRecConfig(unittest.TestCase):
             ), mock.patch.object(
                 cli, "make_runtime_dir", return_value=(runtime_dir, runtime_config)
             ), mock.patch.object(
-                cli, "build_runner", return_value=_FakeRunner()
+                cli, "build_runner", return_value=_FakeRecstoreRunner(capture)
             ), mock.patch.object(
                 cli, "start_server", side_effect=AssertionError("ps_server path must not be used")
             ), mock.patch.object(

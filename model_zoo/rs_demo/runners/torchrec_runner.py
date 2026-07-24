@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ from typing import Any
 
 from ..config import (
     RunConfig,
+    dump_run_config,
     ensure_shared_dir,
     resolve_num_embeddings_per_feature,
     validate_torchrec_config,
@@ -24,7 +26,6 @@ from ..runtime.hybrid_dlrm import (
     compute_dense_loss,
     parse_layer_sizes,
     prepare_hybrid_dlrm_input,
-    rankmixer_task_names,
     reshape_torchrec_embeddings_for_dlrm,
     run_hybrid_backward,
 )
@@ -468,21 +469,11 @@ def _run_single_or_dist_worker(
         torch.manual_seed(cfg.seed)
         _append_worker_debug(cfg, rank, "torchrec_align_recstore_init=1")
 
-    model_type = getattr(cfg, "model", "dlrm")
     dense_module = build_dense_module(
-        model_type=model_type,
-        torch=torch,
-        dense_in_features=13,
-        embedding_dim=cfg.embedding_dim,
+        cfg,
         num_sparse_features=len(DEFAULT_CAT_NAMES),
-        dense_arch_layer_sizes=parse_layer_sizes(cfg.dense_arch_layer_sizes),
-        over_arch_layer_sizes=parse_layer_sizes(cfg.over_arch_layer_sizes),
+        embedding_dim=cfg.embedding_dim,
         device=device,
-        rankmixer_segment_dims=getattr(cfg, "rankmixer_segment_dims", None),
-        rankmixer_tokens_split_dim=getattr(cfg, "rankmixer_tokens_split_dim", 2400),
-        rankmixer_blocks=getattr(cfg, "rankmixer_blocks", 2),
-        rankmixer_gate_num=getattr(cfg, "rankmixer_gate_num", 6),
-        rankmixer_masked_dim=getattr(cfg, "rankmixer_masked_dim", 56),
     )
     dense_module = _maybe_wrap_dense_module_for_dist(
         dense_module=dense_module,
@@ -497,10 +488,7 @@ def _run_single_or_dist_worker(
 
     _dispatch_module = dense_module.module if isinstance(
         dense_module, torch.nn.parallel.DistributedDataParallel) else dense_module
-    criterion = build_criterion(
-        getattr(_dispatch_module, "model_type", "dlrm"),
-        rankmixer_task_names(_dispatch_module),
-    )
+    criterion = build_criterion(cfg, _dispatch_module)
     _append_worker_debug(cfg, rank, "after_criterion")
     _append_worker_debug(cfg, rank, "before_optimizer_init")
     dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
@@ -584,8 +572,8 @@ def _run_single_or_dist_worker(
             if is_trainer_rank:
                 _append_worker_debug(cfg, rank, f"before_dense_fwd step={step}")
                 with timer.gpu("dense_fwd_ms"):
-                    loss, logits = compute_dense_loss(
-                        model_type, dense_module, criterion,
+                    loss, _ = compute_dense_loss(
+                        cfg, dense_module, criterion,
                         dense_features, embedded_sparse, labels)
                 row["loss"] = float(loss.detach().float().cpu().item())
 
@@ -600,19 +588,19 @@ def _run_single_or_dist_worker(
                     )
 
                 _append_worker_debug(cfg, rank, f"before_optimizer step={step}")
-                with timer.gpu("optimizer_ms"):
+                with timer.gpu("dense_optimizer_ms"):
                     dense_optimizer.step()
                     dense_optimizer.zero_grad(set_to_none=True)
             else:
                 row["dense_fwd_ms"] = 0.0
                 row["backward_ms"] = 0.0
-                row["optimizer_ms"] = 0.0
+                row["dense_optimizer_ms"] = 0.0
                 embedded_sparse_grad = torch.zeros_like(embedded_sparse)
 
             embedded_sparse_grad = embedded_sparse_grad.contiguous()
 
             _append_worker_debug(cfg, rank, f"before_sparse_update step={step}")
-            with timer.gpu("sparse_update_ms"):
+            with timer.gpu("sparse_optimizer_ms"):
                 if fair_remote_mode and use_dist:
                     dist.broadcast(embedded_sparse_grad, src=0)
                 embedded_sparse_source.backward(
@@ -664,122 +652,21 @@ class TorchRecRunner(BenchmarkRunner):
     def _rank_output_dir(self, cfg: RunConfig) -> Path:
         return Path(cfg.output_root) / "outputs" / cfg.run_id / "torchrec_ranks"
 
-    def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig) -> list[str]:
-        rdzv_endpoint = f"{cfg.master_addr}:{cfg.master_port}"
-        cmd = [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            "--nnodes",
-            str(cfg.nnodes),
-            "--node_rank",
-            str(cfg.node_rank),
-            "--nproc_per_node",
-            str(cfg.nproc_per_node),
-            "--rdzv_backend",
-            str(cfg.rdzv_backend),
-            "--rdzv_endpoint",
-            rdzv_endpoint,
-            "--rdzv_id",
-            str(cfg.rdzv_id),
-            "--tee",
-            "3",
+    def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig, config_json: Path) -> list[str]:
+        # The whole resolved config (incl. model_args) is handed to each worker
+        # as JSON, so the launcher argv stays tiny and schema-drift free.
+        return [
+            sys.executable, "-m", "torch.distributed.run",
+            "--nnodes", str(cfg.nnodes),
+            "--node_rank", str(cfg.node_rank),
+            "--nproc_per_node", str(cfg.nproc_per_node),
+            "--rdzv_backend", str(cfg.rdzv_backend),
+            "--rdzv_endpoint", f"{cfg.master_addr}:{cfg.master_port}",
+            "--rdzv_id", str(cfg.rdzv_id),
+            "--tee", "3",
             str(repo_root / "model_zoo/rs_demo/run_mock_stress.py"),
-            "--backend",
-            "torchrec",
-            "--nnodes",
-            str(cfg.nnodes),
-            "--node-rank",
-            str(cfg.node_rank),
-            "--nproc-per-node",
-            str(cfg.nproc_per_node),
-            "--master-addr",
-            str(cfg.master_addr),
-            "--master-port",
-            str(cfg.master_port),
-            "--rdzv-backend",
-            str(cfg.rdzv_backend),
-            "--rdzv-id",
-            str(cfg.rdzv_id),
-            "--run-id",
-            str(cfg.run_id),
-            "--output-root",
-            str(cfg.output_root),
-            "--steps",
-            str(cfg.steps),
-            "--warmup-steps",
-            str(cfg.warmup_steps),
-            "--batch-size",
-            str(cfg.batch_size),
-            "--num-embeddings",
-            str(cfg.num_embeddings),
-            "--embedding-dim",
-            str(cfg.embedding_dim),
-            "--dense-arch-layer-sizes",
-            str(cfg.dense_arch_layer_sizes),
-            "--over-arch-layer-sizes",
-            str(cfg.over_arch_layer_sizes),
-            "--model",
-            str(cfg.model),
-            "--seed",
-            str(cfg.seed),
-            "--data-dir",
-            cfg.data_dir,
-            "--train-ratio",
-            str(cfg.train_ratio),
-            "--torchrec-main-csv",
-            str(Path(cfg.torchrec_main_csv)),
-            "--torchrec-main-agg-csv",
-            str(Path(cfg.torchrec_main_agg_csv)),
-            "--torchrec-trace-dir",
-            str(Path(cfg.torchrec_trace_dir)),
-            "--torchrec-trace-csv",
-            str(Path(cfg.torchrec_trace_csv)),
-            "--torchrec-dist-mode",
-            str(cfg.torchrec_dist_mode),
-            "--torchrec-memory-mode",
-            str(cfg.torchrec_memory_mode),
-            "--torchrec-timing-sync-mode",
-            str(cfg.torchrec_timing_sync_mode),
-            "--no-start-server",
+            "--run-config-json", str(config_json),
         ]
-        if cfg.torchrec_align_recstore_init:
-            cmd.append("--torchrec-align-recstore-init")
-        if cfg.num_embeddings_per_feature:
-            cmd.extend(
-                [
-                    "--num-embeddings-per-feature",
-                    str(cfg.num_embeddings_per_feature),
-                ]
-            )
-        if cfg.torchrec_profiler:
-            cmd.extend(
-                [
-                    "--torchrec-profiler",
-                    "--torchrec-profiler-warmup",
-                    str(cfg.torchrec_profiler_warmup),
-                    "--torchrec-profiler-active",
-                    str(cfg.torchrec_profiler_active),
-                    "--torchrec-profiler-repeat",
-                    str(cfg.torchrec_profiler_repeat),
-                ]
-            )
-        if cfg.model == "rankmixer":
-            cmd.extend(
-                [
-                    "--rankmixer-tokens-split-dim",
-                    str(cfg.rankmixer_tokens_split_dim),
-                    "--rankmixer-blocks",
-                    str(cfg.rankmixer_blocks),
-                    "--rankmixer-gate-num",
-                    str(cfg.rankmixer_gate_num),
-                    "--rankmixer-masked-dim",
-                    str(cfg.rankmixer_masked_dim),
-                    "--rankmixer-segment-dims",
-                    str(cfg.rankmixer_segment_dims),
-                ]
-            )
-        return cmd
 
     def _run_single_process(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
         rows = _run_single_or_dist_worker(
@@ -797,7 +684,9 @@ class TorchRecRunner(BenchmarkRunner):
         ensure_shared_dir(rank_dir)
         _remove_stale_distributed_outputs(cfg, rank_dir)
 
-        cmd = self._build_torchrun_cmd(repo_root, cfg)
+        worker_cfg = dataclasses.replace(cfg, start_server=False)
+        config_json = dump_run_config(worker_cfg, rank_dir / "worker_config.json")
+        cmd = self._build_torchrun_cmd(repo_root, cfg, config_json)
 
         env = os.environ.copy()
         env["RS_DEMO_TORCHREC_WORKER"] = "1"

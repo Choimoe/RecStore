@@ -67,7 +67,7 @@ def collect_e2e_summary(
         batch_size = int(item["batch_size"])
         mean_step = _mean(warm, "step_total_ms")
         mean_lookup = _mean(warm, "embed_lookup_local_ms")
-        mean_update = _mean(warm, "sparse_update_ms")
+        mean_update = _mean(warm, "sparse_optimizer_ms")
         samples_per_sec = (
             batch_size * 1000.0 / mean_step if mean_step > 0.0 else 0.0
         )
@@ -88,7 +88,7 @@ def collect_e2e_summary(
                 "mean_step_total_ms": mean_step,
                 "p95_step_total_ms": _p95(warm, "step_total_ms"),
                 "mean_embed_lookup_ms": mean_lookup,
-                "mean_sparse_update_ms": mean_update,
+                "mean_sparse_optimizer_ms": mean_update,
                 "samples_per_sec": samples_per_sec,
                 "lookup_mrows_per_sec": lookup_mrows,
                 "update_mrows_per_sec": update_mrows,

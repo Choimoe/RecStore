@@ -25,7 +25,6 @@ class E2ELane:
     nproc_per_node: int = 1
     torchrec_memory_mode: str = "hbm"
     prefetch_depth: int = 0
-    enable_single_node_fast_path: bool = False
     single_node_ps_backend: str = "local_shm"
     extra_args: tuple[str, ...] = field(default_factory=tuple)
 

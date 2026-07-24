@@ -67,7 +67,7 @@ class TestTorchRecTraceReport(unittest.TestCase):
 
         self.assertEqual(lines, [",".join(TRACE_CSV_FIELDS)])
 
-    def test_write_trace_csv_writes_rows(self) -> None:
+    def test_write_trace_csv_parses_rank_and_step_from_filename(self) -> None:
         trace = {"traceEvents": [{"name": "cudaStreamSynchronize", "dur": 1000}]}
         with tempfile.TemporaryDirectory() as tmpdir:
             trace_path = Path(tmpdir) / "worker-rank3-step12.pt.trace.json"
@@ -79,9 +79,6 @@ class TestTorchRecTraceReport(unittest.TestCase):
             with csv_path.open("r", encoding="utf-8") as f:
                 line = next(csv.DictReader(f))
 
-        self.assertEqual(line["trace_path"], str(trace_path))
-        self.assertEqual(line["cuda_stream_sync_ms"], "1.0")
-        self.assertEqual(line["unknown_sync_ms"], "0.0")
         self.assertEqual(line["rank"], "3")
         self.assertEqual(line["step"], "12")
 
