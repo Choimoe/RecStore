@@ -72,7 +72,8 @@
               "type": "string",
               "enum": [
                 "SGD",
-                "RowWiseAdagrad"
+                "RowWiseAdagrad",
+                "AdamW"
               ]
             },
             "learning_rate": {
@@ -83,6 +84,23 @@
               "type": "number",
               "minimum": 0,
               "default": 1e-10
+            },
+            "beta1": {
+              "type": "number",
+              "minimum": 0,
+              "exclusiveMaximum": 1,
+              "default": 0.9
+            },
+            "beta2": {
+              "type": "number",
+              "minimum": 0,
+              "exclusiveMaximum": 1,
+              "default": 0.98
+            },
+            "weight_decay": {
+              "type": "number",
+              "minimum": 0,
+              "default": 0
             }
           }
         },

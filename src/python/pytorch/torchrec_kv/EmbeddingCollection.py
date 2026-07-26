@@ -1,7 +1,7 @@
 import inspect
 import torch
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 try:
     from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
@@ -121,6 +121,7 @@ class RecStoreEmbeddingCollection(torch.nn.Module):
         kv_client: Optional[RecStoreClient] = None,
         initialize_tables: bool = True,
         initialize_values: bool = False,
+        init_func: Optional[Callable[[Any, torch.dtype], torch.Tensor]] = None,
         clamp_ids: bool = False,
     ) -> None:
         super().__init__()
@@ -188,15 +189,24 @@ class RecStoreEmbeddingCollection(torch.nn.Module):
                     )
 
         if initialize_tables:
-            self._initialize_tables(initialize_values=initialize_values)
+            self._initialize_tables(
+                initialize_values=initialize_values,
+                init_func=init_func,
+            )
 
-    def _initialize_tables(self, *, initialize_values: bool) -> None:
+    def _initialize_tables(
+        self,
+        *,
+        initialize_values: bool,
+        init_func: Optional[Callable[[Any, torch.dtype], torch.Tensor]],
+    ) -> None:
         for table_idx, config in enumerate(self._embedding_configs):
             base_offset = (table_idx << self._fusion_k) if self._enable_fusion else 0
             self._initialize_table(
                 config,
                 base_offset=base_offset,
                 initialize_values=initialize_values,
+                init_func=init_func,
             )
 
     def _initialize_table(
@@ -205,6 +215,7 @@ class RecStoreEmbeddingCollection(torch.nn.Module):
         *,
         base_offset: int,
         initialize_values: bool,
+        init_func: Optional[Callable[[Any, torch.dtype], torch.Tensor]],
     ) -> None:
         if self._init_data_supports_initialize_values():
             self.kv_client.init_data(
@@ -212,11 +223,17 @@ class RecStoreEmbeddingCollection(torch.nn.Module):
                 shape=(config.num_embeddings, config.embedding_dim),
                 dtype=torch.float32,
                 base_offset=base_offset,
+                init_func=init_func,
                 initialize_values=initialize_values,
             )
             return
 
         if initialize_values:
+            if init_func is not None:
+                raise RuntimeError(
+                    "Custom initialization requires kv_client.init_data(..., "
+                    "init_func=..., initialize_values=True) support."
+                )
             self.kv_client.init_data(
                 name=config.name,
                 shape=(config.num_embeddings, config.embedding_dim),

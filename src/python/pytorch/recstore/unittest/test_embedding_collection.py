@@ -113,6 +113,29 @@ class _LegacyMetadataKVClient:
 
 
 class TestRecStoreEmbeddingCollection(unittest.TestCase):
+    def test_passes_custom_initializer_to_kv_client(self):
+        fake = _FakeKVClient()
+
+        def initializer(shape, dtype):
+            return torch.ones(shape, dtype=dtype)
+
+        RecStoreEmbeddingCollection(
+            [
+                {
+                    "name": "t0",
+                    "embedding_dim": 4,
+                    "num_embeddings": 8,
+                    "feature_names": ["f1"],
+                }
+            ],
+            kv_client=fake,
+            initialize_values=True,
+            init_func=initializer,
+        )
+
+        self.assertTrue(fake.init_data_calls[0]["initialize_values"])
+        self.assertIs(fake.init_data_calls[0]["init_func"], initializer)
+
     def test_forward_returns_jagged_tensors_with_fused_ids(self):
         fake = _FakeKVClient()
         configs = [

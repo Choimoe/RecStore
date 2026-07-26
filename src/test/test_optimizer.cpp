@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -61,9 +62,85 @@ TEST(OptimizerFactoryTest, SelectsConfiguredOptimizerAndRejectsUnknownType) {
       {"epsilon", 1e-8},
   });
   EXPECT_NE(dynamic_cast<RowWiseAdaGrad*>(optimizer.get()), nullptr);
+  auto adamw = CreateOptimizer(json{
+      {"type", "AdamW"},
+      {"learning_rate", 0.001},
+      {"beta1", 0.9},
+      {"beta2", 0.98},
+      {"epsilon", 1e-8},
+      {"weight_decay", 0.1},
+  });
+  EXPECT_NE(dynamic_cast<AdamW*>(adamw.get()), nullptr);
   EXPECT_THROW(
       CreateOptimizer(json{{"type", "Adam"}, {"learning_rate", 0.001}}),
       std::invalid_argument);
+}
+
+TEST(AdamWTest, MatchesTwoStepBiasCorrectedFormulaAndPersistsState) {
+  constexpr float learning_rate   = 0.001f;
+  constexpr float beta1           = 0.9f;
+  constexpr float beta2           = 0.98f;
+  constexpr float epsilon         = 1e-8f;
+  constexpr float weight_decay    = 0.1f;
+  constexpr int64_t embedding_dim = 2;
+  constexpr uint64_t key          = 7;
+  constexpr uint64_t step_key     = (std::numeric_limits<uint64_t>::max() >> 8);
+
+  InMemoryKV kv;
+  const std::vector<float> initial{1.0f, -2.0f};
+  kv.Put(key,
+         std::string(reinterpret_cast<const char*>(initial.data()),
+                     initial.size() * sizeof(float)),
+         0);
+
+  const std::vector<uint64_t> keys{key};
+  const std::vector<float> first_grad{3.0f, 4.0f};
+  {
+    AdamW optimizer(learning_rate, beta1, beta2, epsilon, weight_decay);
+    optimizer.Init({"table"}, EmbeddingTableConfig{16, embedding_dim}, &kv);
+    optimizer.UpdateFlat("table", keys, first_grad.data(), 1, embedding_dim, 0);
+  }
+
+  std::vector<float> m(embedding_dim), v(embedding_dim), expected = initial;
+  for (int i = 0; i < embedding_dim; ++i) {
+    m[i]        = (1.0f - beta1) * first_grad[i];
+    v[i]        = (1.0f - beta2) * first_grad[i] * first_grad[i];
+    expected[i] = (1.0f - learning_rate * weight_decay) * expected[i] -
+                  learning_rate * (m[i] / (1.0f - beta1)) /
+                      (std::sqrt(v[i] / (1.0f - beta2)) + epsilon);
+  }
+  auto actual = kv.ReadFloats(key);
+  ASSERT_EQ(actual.size(), expected.size());
+  for (int i = 0; i < embedding_dim; ++i) {
+    EXPECT_NEAR(actual[i], expected[i], 1e-6);
+  }
+  EXPECT_FLOAT_EQ(
+      kv.ReadFloats(TaggedKey(step_key, static_cast<TAG_TYPE>(MOMENT_1)))[0],
+      1.0f);
+
+  // Recreating the optimizer models a PS restart after its KV checkpoint is
+  // restored. The next update must resume at step 2.
+  AdamW restarted_optimizer(learning_rate, beta1, beta2, epsilon, weight_decay);
+  restarted_optimizer.Init(
+      {"table"}, EmbeddingTableConfig{16, embedding_dim}, &kv);
+  const std::vector<float> second_grad{1.0f, -2.0f};
+  restarted_optimizer.UpdateFlat(
+      "table", keys, second_grad.data(), 1, embedding_dim, 0);
+  for (int i = 0; i < embedding_dim; ++i) {
+    m[i] = beta1 * m[i] + (1.0f - beta1) * second_grad[i];
+    v[i] = beta2 * v[i] + (1.0f - beta2) * second_grad[i] * second_grad[i];
+    expected[i] =
+        (1.0f - learning_rate * weight_decay) * expected[i] -
+        learning_rate * (m[i] / (1.0f - std::pow(beta1, 2.0f))) /
+            (std::sqrt(v[i] / (1.0f - std::pow(beta2, 2.0f))) + epsilon);
+  }
+  actual = kv.ReadFloats(key);
+  for (int i = 0; i < embedding_dim; ++i) {
+    EXPECT_NEAR(actual[i], expected[i], 1e-6);
+  }
+  EXPECT_FLOAT_EQ(
+      kv.ReadFloats(TaggedKey(step_key, static_cast<TAG_TYPE>(MOMENT_1)))[0],
+      2.0f);
 }
 
 TEST(RowWiseAdaGradTest, MatchesTwoStepFormulaAndInitializesMissingRows) {

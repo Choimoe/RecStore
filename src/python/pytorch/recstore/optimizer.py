@@ -4,7 +4,7 @@ import os
 import time
 
 import torch
-from typing import List, Union, Dict, Tuple, Any
+from typing import List, Union, Dict, Tuple, Any, Optional
 from time import perf_counter
 from .single_node_exchange import SparseGradPayload, exchange_sparse_grads
 
@@ -14,7 +14,14 @@ _LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
 def _server_sparse_optimizer_config() -> Dict[str, Any]:
     config_path = os.environ.get("RECSTORE_CONFIG")
     if not config_path:
-        return {"type": "SGD", "learning_rate": 0.01, "epsilon": 1e-10}
+        return {
+            "type": "SGD",
+            "learning_rate": 0.01,
+            "epsilon": 1e-10,
+            "beta1": 0.9,
+            "beta2": 0.98,
+            "weight_decay": 0.0,
+        }
     try:
         with open(config_path, "r", encoding="utf-8") as config_file:
             root_config = json.load(config_file)
@@ -25,10 +32,15 @@ def _server_sparse_optimizer_config() -> Dict[str, Any]:
         ) from error
     if not isinstance(optimizer_config, dict):
         raise RuntimeError("cache_ps.optimizer must be an object")
+    optimizer_type = optimizer_config.get("type", "SGD")
+    default_epsilon = 1e-8 if optimizer_type == "AdamW" else 1e-10
     return {
-        "type": optimizer_config.get("type", "SGD"),
+        "type": optimizer_type,
         "learning_rate": float(optimizer_config.get("learning_rate", 0.01)),
-        "epsilon": float(optimizer_config.get("epsilon", 1e-10)),
+        "epsilon": float(optimizer_config.get("epsilon", default_epsilon)),
+        "beta1": float(optimizer_config.get("beta1", 0.9)),
+        "beta2": float(optimizer_config.get("beta2", 0.98)),
+        "weight_decay": float(optimizer_config.get("weight_decay", 0.0)),
     }
 
 
@@ -36,6 +48,9 @@ def _validate_server_sparse_optimizer(
     expected_type: str,
     learning_rate: float,
     epsilon: float,
+    beta1: Optional[float] = None,
+    beta2: Optional[float] = None,
+    weight_decay: Optional[float] = None,
 ) -> None:
     actual = _server_sparse_optimizer_config()
     matches = (
@@ -45,12 +60,24 @@ def _validate_server_sparse_optimizer(
         )
         and math.isclose(actual["epsilon"], float(epsilon), rel_tol=1e-12, abs_tol=0.0)
     )
+    expected_values = {
+        "beta1": beta1,
+        "beta2": beta2,
+        "weight_decay": weight_decay,
+    }
+    for key, expected in expected_values.items():
+        if expected is not None:
+            matches = matches and math.isclose(
+                actual[key], float(expected), rel_tol=1e-12, abs_tol=0.0
+            )
     if not matches:
         raise RuntimeError(
             "RecStore sparse optimizer mismatch: "
             f"requested type={expected_type}, learning_rate={learning_rate}, "
             f"epsilon={epsilon}; cache_ps config has type={actual['type']}, "
-            f"learning_rate={actual['learning_rate']}, epsilon={actual['epsilon']}"
+            f"learning_rate={actual['learning_rate']}, epsilon={actual['epsilon']}, "
+            f"beta1={actual['beta1']}, beta2={actual['beta2']}, "
+            f"weight_decay={actual['weight_decay']}"
         )
 
 class DistEmbedding:
@@ -578,3 +605,29 @@ class SparseRowWiseAdagrad(SparseSGD):
         _validate_server_sparse_optimizer("RowWiseAdagrad", lr, eps)
         super().__init__(params, lr)
         self.eps = float(eps)
+
+
+class SparseAdamW(SparseSGD):
+    """Submit raw sparse gradients to the RecStore server-owned AdamW."""
+
+    def __init__(
+        self,
+        params: List[torch.nn.Module],
+        lr: float = 0.001,
+        betas: Tuple[float, float] = (0.9, 0.98),
+        eps: float = 1e-8,
+        weight_decay: float = 0.0,
+    ) -> None:
+        if not all(
+            hasattr(module, "_config_names") and hasattr(module, "_trace")
+            for module in params
+        ):
+            raise TypeError("SparseAdamW only supports RecStore sparse modules")
+        beta1, beta2 = betas
+        _validate_server_sparse_optimizer(
+            "AdamW", lr, eps, beta1=beta1, beta2=beta2, weight_decay=weight_decay
+        )
+        super().__init__(params, lr)
+        self.betas = (float(beta1), float(beta2))
+        self.eps = float(eps)
+        self.weight_decay = float(weight_decay)

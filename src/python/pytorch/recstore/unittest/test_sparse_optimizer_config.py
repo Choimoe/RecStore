@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from ..optimizer import SparseRowWiseAdagrad
+from ..optimizer import SparseAdamW, SparseRowWiseAdagrad
 
 
 class _FakeRecStoreModule:
@@ -50,6 +50,28 @@ class SparseOptimizerConfigTest(unittest.TestCase):
                 SparseRowWiseAdagrad(
                     [_FakeRecStoreModule()], lr=0.001, eps=1e-8
                 )
+
+    def test_accepts_matching_adamw_config(self) -> None:
+        path = self._config_path(
+            {
+                "type": "AdamW",
+                "learning_rate": 0.001,
+                "epsilon": 1e-8,
+                "beta1": 0.9,
+                "beta2": 0.98,
+                "weight_decay": 0.0,
+            }
+        )
+        with mock.patch.dict(os.environ, {"RECSTORE_CONFIG": path}):
+            optimizer = SparseAdamW(
+                [_FakeRecStoreModule()],
+                lr=0.001,
+                betas=(0.9, 0.98),
+                eps=1e-8,
+                weight_decay=0.0,
+            )
+        self.assertEqual(optimizer.param_groups[0]["lr"], 0.001)
+        self.assertEqual(optimizer.betas, (0.9, 0.98))
 
 
 if __name__ == "__main__":
