@@ -934,6 +934,27 @@ bool init_embedding_table_torch(const std::string& table_name,
   return ok;
 }
 
+bool save_checkpoint_torch(const std::string& path,
+                           const std::string& metadata) {
+  TORCH_CHECK(!path.empty(), "checkpoint path must be non-empty");
+  TORCH_CHECK(!metadata.empty(), "checkpoint metadata must be non-empty");
+  return GetKVClientOp()->SaveCheckpoint(path, metadata);
+}
+
+bool load_checkpoint_torch(const std::string& path,
+                           const std::string& metadata) {
+  TORCH_CHECK(!path.empty(), "checkpoint path must be non-empty");
+  TORCH_CHECK(!metadata.empty(), "checkpoint metadata must be non-empty");
+  const bool ok = GetKVClientOp()->LoadCheckpoint(path, metadata);
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  if (ok && gpu::IsGpuCacheEnabled()) {
+    SafeClearGpuCacheNoThrow();
+    gpu::ResetLastGpuCacheProfile();
+  }
+#endif
+  return ok;
+}
+
 void emb_write_torch(const torch::Tensor& keys, const torch::Tensor& values) {
   TORCH_CHECK(keys.dim() == 1, "Keys tensor must be 1-dimensional");
   TORCH_CHECK(keys.scalar_type() == torch::kInt64,
@@ -1262,6 +1283,8 @@ TORCH_LIBRARY(recstore_ops, m) {
   m.def("emb_update_table", emb_update_table_torch);
   m.def("local_update_flat", local_update_flat_torch);
   m.def("init_embedding_table", init_embedding_table_torch);
+  m.def("save_checkpoint", save_checkpoint_torch);
+  m.def("load_checkpoint", load_checkpoint_torch);
   m.def("emb_write", emb_write_torch);
   m.def("emb_write_values", emb_write_values_torch);
   m.def("emb_prefetch", emb_prefetch_torch);

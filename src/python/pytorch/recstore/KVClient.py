@@ -2,6 +2,7 @@ import torch
 import os
 import time
 import ctypes
+import json
 from typing import Optional, Tuple, List, Dict, Any, Callable
 
 _LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
@@ -118,7 +119,54 @@ class RecStoreClient:
         """Register UDF pull function."""
         raise NotImplementedError("register_pull_handler is not implemented for the ops-based client.")
 
-    def init_data(self, name: str, shape: Tuple[int, int], dtype: torch.dtype, part_policy: Any = None, init_func: Optional[Callable] = None, is_gdata: bool = True, base_offset: int = 0):
+    def register_tensor_meta(
+        self,
+        name: str,
+        shape: Tuple[int, int],
+        dtype: torch.dtype,
+        part_policy: Any = None,
+        is_gdata: bool = True,
+        base_offset: int = 0,
+        initialize_backend: bool = False,
+    ):
+        """Register tensor metadata and optionally initialize the backend table."""
+        if name in self._tensor_meta:
+            print(f"Tensor '{name}' already exists. Skipping initialization.")
+            return
+
+        num_embeddings, embedding_dim = shape
+        if initialize_backend:
+            success = self.ops.init_embedding_table(
+                name, int(num_embeddings), int(embedding_dim)
+            )
+            self._clear_gpu_cache_if_available()
+            if not success:
+                raise RuntimeError(
+                    f"Failed to initialize embedding table '{name}' on backend."
+                )
+
+        self._tensor_meta[name] = {
+            'shape': shape,
+            'dtype': dtype,
+            'base_offset': int(base_offset),
+            'part_policy': part_policy,
+        }
+        self._full_data_shape[name] = shape
+        self._data_name_list.add(name)
+        if is_gdata:
+            self._gdata_name_list.add(name)
+
+    def init_data(
+        self,
+        name: str,
+        shape: Tuple[int, int],
+        dtype: torch.dtype,
+        part_policy: Any = None,
+        init_func: Optional[Callable] = None,
+        is_gdata: bool = True,
+        base_offset: int = 0,
+        initialize_values: bool = True,
+    ):
         """Send message to kvserver to initialize new data tensor and mapping this
         data from server side to client side.
 
@@ -137,26 +185,25 @@ class RecStoreClient:
         is_gdata : bool
             Whether the created tensor is a ndata/edata or not.
         """
+        # print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype} (base_offset={base_offset}).")
+
         if name in self._tensor_meta:
             print(f"Tensor '{name}' already exists. Skipping initialization.")
             return
 
-        # print(f"Initializing tensor '{name}' with shape {shape} and dtype {dtype} (base_offset={base_offset}).")
-        
-        num_embeddings, embedding_dim = shape
-        # print(f"[DEBUG] Calling init_embedding_table for '{name}' with num_embeddings={num_embeddings}, embedding_dim={embedding_dim}")
-        success = self.ops.init_embedding_table(name, int(num_embeddings), int(embedding_dim))
-        self._clear_gpu_cache_if_available()
-        # print(f"[DEBUG] init_embedding_table returned: {success}")
-        if not success:
-            raise RuntimeError(f"Failed to initialize embedding table '{name}' on backend.")
-        
-        self._tensor_meta[name] = {'shape': shape, 'dtype': dtype}
-        self._full_data_shape[name] = shape
-        self._data_name_list.add(name)
-        if is_gdata:
-            self._gdata_name_list.add(name)
-        
+        self.register_tensor_meta(
+            name=name,
+            shape=shape,
+            dtype=dtype,
+            part_policy=part_policy,
+            is_gdata=is_gdata,
+            base_offset=base_offset,
+            initialize_backend=True,
+        )
+
+        if not initialize_values:
+            return
+
         # Avoid materializing a full dense tensor for large embedding tables
         # unless the caller explicitly requests custom initialization data.
         if init_func is not None:
@@ -749,16 +796,73 @@ class RecStoreClient:
 
     def wait(self, handle: int) -> None:
         """Wait for a queued async operation and apply it if still pending."""
-        pending = self._pending_async_ops.pop(int(handle), None)
+        handle = int(handle)
+        pending = self._pending_async_ops.get(handle)
         if pending is None:
-            return
+            raise RuntimeError(f"Unknown async update handle: {handle}")
         name, ids, grads = pending
         self.ops.emb_update_table(name, ids, grads)
+        del self._pending_async_ops[handle]
 
     def flush_async_updates(self) -> None:
         """Synchronously apply all queued async update operations."""
         for handle in list(self._pending_async_ops.keys()):
             self.wait(handle)
+
+    @staticmethod
+    def _checkpoint_metadata_json(metadata: Any) -> str:
+        if isinstance(metadata, str):
+            payload = metadata
+        elif isinstance(metadata, dict):
+            payload = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+        else:
+            raise TypeError("checkpoint metadata must be a JSON string or dict")
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as error:
+            raise ValueError("checkpoint metadata must be valid JSON") from error
+        if (
+            not isinstance(parsed, dict)
+            or not isinstance(parsed.get("identity"), dict)
+            or not isinstance(parsed.get("checkpoint_id"), str)
+            or not parsed["checkpoint_id"]
+        ):
+            raise ValueError(
+                "checkpoint metadata requires identity and non-empty checkpoint_id"
+            )
+        return payload
+
+    def save_checkpoint(self, path: str, metadata: Any) -> None:
+        """Save all RecStore shards after applying queued sparse updates."""
+        checkpoint_path = os.fspath(path)
+        if not checkpoint_path:
+            raise ValueError("checkpoint path must be non-empty")
+        self.flush_async_updates()
+        payload = self._checkpoint_metadata_json(metadata)
+        save = getattr(self.ops, "save_checkpoint", None)
+        if not callable(save):
+            raise RuntimeError(
+                "save_checkpoint requires an ops library exposing save_checkpoint()."
+            )
+        if not bool(save(checkpoint_path, payload)):
+            raise RuntimeError("RecStore checkpoint save failed")
+
+    def load_checkpoint(self, path: str, metadata: Any) -> None:
+        """Load all RecStore shards into a fresh, unmodified parameter server."""
+        checkpoint_path = os.fspath(path)
+        if not checkpoint_path:
+            raise ValueError("checkpoint path must be non-empty")
+        if self._pending_async_ops:
+            raise RuntimeError("cannot load a checkpoint with pending sparse updates")
+        payload = self._checkpoint_metadata_json(metadata)
+        load = getattr(self.ops, "load_checkpoint", None)
+        if not callable(load):
+            raise RuntimeError(
+                "load_checkpoint requires an ops library exposing load_checkpoint()."
+            )
+        if not bool(load(checkpoint_path, payload)):
+            raise RuntimeError("RecStore checkpoint load failed")
+        self._clear_gpu_cache_if_available()
 
     def get_data_meta(self, name: str) -> Tuple[torch.dtype, Tuple[int, ...], None]:
         """Get meta data (data_type, data_shape, partition_policy)"""
