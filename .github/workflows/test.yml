@@ -351,6 +351,23 @@ jobs:
           '
           echo "===== END FAILED TESTS ====="
 
+      - name: Post failed tests to PR
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FAILED_TESTS=$(docker exec "${TEST_CONTAINER}" bash -lc '
+            if [ -f /workspace/runner/logs/ctest.log ]; then
+              grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log || true
+            fi
+          ')
+          curl -s -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\":\"CI failed with the following tests:\\n\\n\${FAILED_TESTS}\"}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${GITHUB_EVENT_NUMBER}/comments" || true
+
       - name: Print ctest log summary
         if: always()
         run: |
