@@ -372,8 +372,9 @@ jobs:
               echo "ctest.log not found" > /workspace/ci-failure.txt
             fi
           '
-          if [ -f /workspace/ci-failure.txt ] && [ -s /workspace/ci-failure.txt ]; then
-            cd /workspace
+          FAILURE_LOG="${GITHUB_WORKSPACE}/ci-failure.txt"
+          if [ -f "${FAILURE_LOG}" ] && [ -s "${FAILURE_LOG}" ]; then
+            cd "${GITHUB_WORKSPACE}"
             git config user.email "ci-bot@example.com"
             git config user.name "CI Bot"
             git add ci-failure.txt
