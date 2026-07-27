@@ -15,7 +15,7 @@ from python.pytorch.recstore.optim.config import OptimizationConfig
 # ``RunConfig.model_args``).  DLRM is built in and needs none; others live in
 # their own ``model_zoo/<Model>/`` package.  Missing packages are skipped so the
 # CLI still works when only a subset of models is present.
-_MODEL_ARG_PLUGIN_MODULES = ("RankMixer.plugin",)
+_MODEL_ARG_PLUGIN_MODULES = ()
 
 
 def _import_model_plugin(path: str):
@@ -159,9 +159,7 @@ class RunConfig:
     fuse_k: int = 30
     dense_arch_layer_sizes: str = "512,256,128"
     over_arch_layer_sizes: str = "1024,1024,512,256,1"
-    # Dense compute model: "dlrm" (default) or another registered model such as
-    # "rankmixer" (model_zoo/RankMixer). Model-specific tuning parameters live in
-    # ``model_args`` so this shared config stays model-agnostic.
+    # Dense compute model: "dlrm" (default).
     model: str = "dlrm"
     model_args: dict = field(default_factory=dict)
     backend: str = "recstore"
@@ -420,14 +418,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         type=str,
         default="dlrm",
-        choices=["dlrm", "rankmixer"],
-        help="Dense compute model. Non-DLRM models live in model_zoo/<Model>/ "
-             "and contribute their own tuning args (see --help).",
+        choices=["dlrm"],
+        help="Dense compute model.",
     )
-    # Model-specific args (e.g. --rankmixer-*) are contributed by the model
-    # packages and routed into cfg.model_args at parse time.
-    for _plugin in _iter_model_arg_plugins():
-        _plugin.add_arguments(parser)
     parser.add_argument("--torchrec-profiler", action="store_true", default=False)
     parser.add_argument(
         "--torchrec-dist-mode",
@@ -578,7 +571,7 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
     )
     cfg_kwargs["optimization"] = optimization
 
-    # Route model-specific args (e.g. --rankmixer-*) into model_args.
+    # Route model-specific args into model_args.
     model_args = {d: cfg_kwargs.pop(d) for d in _model_arg_dests() if d in cfg_kwargs}
     if cfg_kwargs["nproc_per_node"] is None:
         cfg_kwargs["nproc_per_node"] = cfg_kwargs.get("nproc", 1)

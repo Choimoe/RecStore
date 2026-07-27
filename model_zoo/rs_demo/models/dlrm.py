@@ -201,7 +201,7 @@ def run_hybrid_backward(loss, embedded_sparse, dense_module, torch, device):
 #
 # The shared harness (recstore/torchrec runners) is model-agnostic: it resolves
 # a plugin by ``cfg.model`` and calls the four methods below.  DLRM is built in
-# here; other models (e.g. RankMixer) live in their own ``model_zoo/<Model>/``
+# here; other models live in their own ``model_zoo/<Model>/``
 # package and are imported lazily by ``resolve_model_plugin``.
 # --------------------------------------------------------------------------
 
@@ -239,7 +239,7 @@ class DlrmModelPlugin:
 DLRM_PLUGIN = DlrmModelPlugin()
 
 #: model name -> import path of a module exposing ``PLUGIN`` (torch imported lazily).
-_MODEL_PLUGIN_MODULES = {"rankmixer": "RankMixer.plugin"}
+_MODEL_PLUGIN_MODULES = {}
 _PLUGIN_CACHE: dict[str, object] = {"dlrm": DLRM_PLUGIN}
 
 
