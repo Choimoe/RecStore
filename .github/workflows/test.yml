@@ -23,6 +23,7 @@ on:
 
 permissions:
   actions: read
+  checks: write
   contents: write
   packages: read
   statuses: write
@@ -353,7 +354,7 @@ jobs:
           '
           echo "===== END FAILED TESTS ====="
 
-      - name: Upload failure log via GitHub API
+      - name: Create check run with failure details
         if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -363,51 +364,41 @@ jobs:
           set -euo pipefail
           docker exec "${TEST_CONTAINER}" bash -lc '
             if [ -f /workspace/runner/logs/ctest.log ]; then
-              {
-                echo "=== FAILED TESTS ==="
-                grep -E "Test #.*Failed|FAIL:|ERROR:" /workspace/runner/logs/ctest.log || true
-                echo ""
-                echo "=== LAST 100 LINES ==="
-                tail -n 100 /workspace/runner/logs/ctest.log
-              } > /workspace/ci-failure.txt
+              tail -n 200 /workspace/runner/logs/ctest.log > /workspace/ci-failure.txt
             else
               echo "ctest.log not found" > /workspace/ci-failure.txt
             fi
           '
           FAILURE_LOG="${GITHUB_WORKSPACE}/ci-failure.txt"
           if [ -f "${FAILURE_LOG}" ] && [ -s "${FAILURE_LOG}" ]; then
-            CONTENT=$(base64 -w 0 "${FAILURE_LOG}")
+            SUMMARY=$(cat "${FAILURE_LOG}")
             python3 -c "
-import json, os, sys, urllib.request
+import json, os, urllib.request
 sha = os.environ['GITHUB_SHA']
 repo = os.environ['GITHUB_REPOSITORY']
 token = os.environ['GITHUB_TOKEN']
-path = 'ci-failure.txt'
-content = sys.argv[1]
-message = f'ci: log test failures for {sha[:7]} [skip ci]'
-url = f\"https://api.github.com/repos/{repo}/contents/{path}\"
-req = urllib.request.Request(url, headers={'Authorization': f'token {token}'})
-file_sha = None
-try:
-    resp = urllib.request.urlopen(req)
-    data = json.loads(resp.read().decode())
-    file_sha = data.get('sha')
-except urllib.error.HTTPError as e:
-    if e.code != 404:
-        print('Error getting file:', e.code, e.read().decode())
-body = {'message': message, 'content': content, 'branch': 'fix/ci-torchrec-import'}
-if file_sha:
-    body['sha'] = file_sha
+url = f\"https://api.github.com/repos/{repo}/check-runs\"
+body = {
+    'name': 'CI Failure Details',
+    'head_sha': sha,
+    'status': 'completed',
+    'conclusion': 'failure',
+    'output': {
+        'title': 'CTest Failure Log',
+        'summary': f'```\\n{os.environ[\"FAILURE_SUMMARY\"]}\\n```'
+    }
+}
 req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
     'Authorization': f'token {token}',
     'Content-Type': 'application/json',
-}, method='PUT')
+    'Accept': 'application/vnd.github.antiope-preview+json',
+})
 try:
     resp = urllib.request.urlopen(req)
-    print('File uploaded:', resp.status)
+    print('Check run created:', resp.status)
 except urllib.error.HTTPError as e:
     print('HTTPError:', e.code, e.read().decode())
-" "${CONTENT}"
+"
           fi
 
       - name: Print ctest log summary
