@@ -23,11 +23,8 @@ on:
 
 permissions:
   actions: read
-  checks: write
   contents: write
   packages: read
-  statuses: write
-  issues: write
 
 jobs:
   test-image:
@@ -353,53 +350,6 @@ jobs:
             fi
           '
           echo "===== END FAILED TESTS ====="
-
-      - name: Create check run with failure details
-        if: failure()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          docker exec "${TEST_CONTAINER}" bash -lc '
-            if [ -f /workspace/runner/logs/ctest.log ]; then
-              tail -n 200 /workspace/runner/logs/ctest.log > /workspace/ci-failure.txt
-            else
-              echo "ctest.log not found" > /workspace/ci-failure.txt
-            fi
-          '
-          FAILURE_LOG="${GITHUB_WORKSPACE}/ci-failure.txt"
-          if [ -f "${FAILURE_LOG}" ] && [ -s "${FAILURE_LOG}" ]; then
-            SUMMARY=$(cat "${FAILURE_LOG}")
-            python3 -c "
-import json, os, urllib.request
-sha = os.environ['GITHUB_SHA']
-repo = os.environ['GITHUB_REPOSITORY']
-token = os.environ['GITHUB_TOKEN']
-url = f\"https://api.github.com/repos/{repo}/check-runs\"
-body = {
-    'name': 'CI Failure Details',
-    'head_sha': sha,
-    'status': 'completed',
-    'conclusion': 'failure',
-    'output': {
-        'title': 'CTest Failure Log',
-        'summary': f'```\\n{os.environ[\"FAILURE_SUMMARY\"]}\\n```'
-    }
-}
-req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
-    'Authorization': f'token {token}',
-    'Content-Type': 'application/json',
-    'Accept': 'application/vnd.github.antiope-preview+json',
-})
-try:
-    resp = urllib.request.urlopen(req)
-    print('Check run created:', resp.status)
-except urllib.error.HTTPError as e:
-    print('HTTPError:', e.code, e.read().decode())
-"
-          fi
 
       - name: Print ctest log summary
         if: always()
