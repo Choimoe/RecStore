@@ -355,6 +355,10 @@ jobs:
         if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NUMBER: ${{ github.event.number }}
+          GITHUB_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           FAILED_TESTS=$(docker exec "${TEST_CONTAINER}" bash -lc '
@@ -362,19 +366,25 @@ jobs:
               grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log || true
             fi
           ')
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            curl -s -X POST \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"body\":\"CI failed with the following tests:\\n\\n${FAILED_TESTS}\"}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${GITHUB_EVENT_NUMBER}/comments" || true
-          else
-            curl -s -X POST \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Content-Type: application/json" \
-              -d "{\"body\":\"CI failed with the following tests:\\n\\n${FAILED_TESTS}\"}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" || true
-          fi
+          python3 -c "
+import json, os, sys, urllib.request
+failed_tests = sys.argv[1] if len(sys.argv) > 1 else '(none)'
+body = 'CI failed with the following tests:\n\n' + failed_tests
+data = json.dumps({'body': body}).encode()
+if os.environ.get('GITHUB_EVENT_NAME') == 'pull_request':
+    url = f\"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/{os.environ['GITHUB_EVENT_NUMBER']}/comments\"
+else:
+    url = f\"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/commits/{os.environ['GITHUB_SHA']}/comments\"
+req = urllib.request.Request(url, data=data, headers={
+    'Authorization': f\"token {os.environ['GITHUB_TOKEN']}\",
+    'Content-Type': 'application/json',
+})
+try:
+    resp = urllib.request.urlopen(req)
+    print('Comment created:', resp.status)
+except urllib.error.HTTPError as e:
+    print('HTTPError:', e.code, e.read().decode())
+" "${FAILED_TESTS}"
 
       - name: Print ctest log summary
         if: always()
