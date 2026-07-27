@@ -49,7 +49,11 @@ def resolve_ps_endpoint(config_path: Optional[Path | str] = None) -> tuple[str, 
 
 
 def configure_src_paths() -> None:
-    recstore_path = os.path.abspath(str(SRC_ROOT))
-    if recstore_path not in sys.path:
-        sys.path.insert(0, recstore_path)
+    # Prefer the canonical package roots used by EmbeddingBag (`recstore`,
+    # `torchrec_kv`). Putting `src/` on the path alone yields a second package
+    # identity (`python.pytorch.recstore`) and split KVClient singletons.
+    pytorch_root = os.path.abspath(str(Path(__file__).resolve().parents[3]))
+    for path in (pytorch_root, os.path.abspath(str(SRC_ROOT))):
+        if path not in sys.path:
+            sys.path.insert(0, path)
 

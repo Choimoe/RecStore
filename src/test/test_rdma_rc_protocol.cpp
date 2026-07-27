@@ -38,18 +38,13 @@ TEST(RdmaRcProtocolTest, PutPayloadRoundTripBuildsValidReader) {
   EXPECT_FLOAT_EQ(reader->item(1)->data()[1], 4.0f);
 }
 
-TEST(RdmaRcProtocolTest, FlatUpdatePayloadMatchesRowPayload) {
+TEST(RdmaRcProtocolTest, FlatUpdatePayloadStoresContiguousKeysAndValues) {
   std::vector<std::uint64_t> keys        = {10, 20};
   std::vector<std::vector<float>> values = {{1.0f, 2.0f}, {3.0f, 4.0f}};
   const std::vector<float> flat_values   = {1.0f, 2.0f, 3.0f, 4.0f};
-  std::string row_payload;
   std::string flat_payload;
   std::string error;
 
-  ASSERT_GT(petps::UpdatePayloadBytes(
-                keys, values, &row_payload, &error),
-            0u)
-      << error;
   ASSERT_GT(petps::UpdatePayloadBytesFlat(
                 base::ConstArray<std::uint64_t>(keys),
                 flat_values.data(),
@@ -58,7 +53,74 @@ TEST(RdmaRcProtocolTest, FlatUpdatePayloadMatchesRowPayload) {
                 &error),
             0u)
       << error;
-  EXPECT_EQ(flat_payload, row_payload);
+  ASSERT_EQ(flat_payload.size(), petps::FlatUpdatePayloadBytes(2, 2));
+  const auto* payload_keys =
+      reinterpret_cast<const std::uint64_t*>(flat_payload.data());
+  const auto* payload_values = reinterpret_cast<const float*>(
+      flat_payload.data() + keys.size() * sizeof(std::uint64_t));
+  EXPECT_EQ(std::vector<std::uint64_t>(payload_keys, payload_keys + keys.size()), keys);
+  EXPECT_EQ(
+      std::vector<float>(payload_values, payload_values + flat_values.size()),
+      flat_values);
+}
+
+TEST(RdmaRcProtocolTest, FlatUpdatePayloadRejectsOverflow) {
+  const std::size_t max_size = std::numeric_limits<std::size_t>::max();
+  EXPECT_EQ(petps::FlatUpdatePayloadBytes(1, max_size), 0u);
+  EXPECT_EQ(petps::FlatUpdatePayloadBytes(max_size, 1), 0u);
+}
+
+TEST(RdmaRcProtocolTest, FlatUpdateGatherPacksSelectedRowsInOrder) {
+  const std::vector<std::uint64_t> keys = {10, 20, 30};
+  const std::vector<float> values = {
+      1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  const std::vector<std::size_t> rows = {2, 0};
+  std::vector<char> payload(petps::FlatUpdatePayloadBytes(rows.size(), 2));
+  std::string error;
+
+  ASSERT_EQ(
+      petps::PackFlatUpdatePayloadGather(
+          keys.data(),
+          values.data(),
+          keys.size(),
+          2,
+          rows.data(),
+          rows.size(),
+          payload.data(),
+          payload.size(),
+          &error),
+      payload.size())
+      << error;
+  const auto* payload_keys =
+      reinterpret_cast<const std::uint64_t*>(payload.data());
+  const auto* payload_values = reinterpret_cast<const float*>(
+      payload.data() + rows.size() * sizeof(std::uint64_t));
+  EXPECT_EQ(std::vector<std::uint64_t>(payload_keys, payload_keys + 2),
+            (std::vector<std::uint64_t>{30, 10}));
+  EXPECT_EQ(std::vector<float>(payload_values, payload_values + 4),
+            (std::vector<float>{5.0f, 6.0f, 1.0f, 2.0f}));
+}
+
+TEST(RdmaRcProtocolTest, FlatUpdateGatherRejectsOutOfRangeRows) {
+  const std::vector<std::uint64_t> keys = {10};
+  const std::vector<float> values = {1.0f, 2.0f};
+  const std::size_t row = 1;
+  std::vector<char> payload(petps::FlatUpdatePayloadBytes(1, 2));
+  std::string error;
+
+  EXPECT_EQ(
+      petps::PackFlatUpdatePayloadGather(
+          keys.data(),
+          values.data(),
+          keys.size(),
+          2,
+          &row,
+          1,
+          payload.data(),
+          payload.size(),
+          &error),
+      0u);
+  EXPECT_EQ(error, "flat update gather row index is out of range");
 }
 
 TEST(RdmaRcProtocolTest, StatusWordDoneRequiresMatchingSeq) {

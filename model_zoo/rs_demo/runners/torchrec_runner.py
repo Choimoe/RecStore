@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-import csv
+import dataclasses
 import fcntl
 import hashlib
 import json
 import os
 import pickle
-import re
 import subprocess
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from ..config import (
     RunConfig,
+    dump_run_config,
     ensure_shared_dir,
     resolve_num_embeddings_per_feature,
     validate_torchrec_config,
@@ -23,16 +23,22 @@ from ..config import (
 from ..runtime.hybrid_dlrm import (
     build_criterion,
     build_dense_module,
-    build_hybrid_dense_arch,
     compute_dense_loss,
     parse_layer_sizes,
     prepare_hybrid_dlrm_input,
-    rankmixer_task_names,
     reshape_torchrec_embeddings_for_dlrm,
     run_hybrid_backward,
-    sync_device,
 )
-from ..runtime.report import finalize_torchrec_row, write_stage_csv
+from ..runtime.report import finalize_torchrec_row
+from ..runtime.timing import StepTimer
+from ..runtime.worker_common import (
+    barrier_for_step_alignment as _barrier_for_step_alignment,
+    bool_int as _bool_int,
+    load_rows as _load_rows,
+    parse_nccl_transport_log as _parse_nccl_transport_log,
+    pick_socket_ifname as _pick_socket_ifname,
+    write_rows as _write_rows,
+)
 from ..runtime.torchrec_profile import build_torchrec_profiler
 from .base import BenchmarkRunner
 
@@ -47,52 +53,6 @@ def ensure_torchrec_available() -> None:
         raise RuntimeError(
             "TorchRec backend requires the `torchrec` package to be installed."
         ) from exc
-
-
-@contextmanager
-def stage_timer(row: dict[str, Any], key: str):
-    start = time.perf_counter()
-    try:
-        yield
-    finally:
-        row[key] = (time.perf_counter() - start) * 1e3
-
-
-def _bool_int(flag: bool) -> int:
-    return 1 if flag else 0
-
-
-def _load_rows(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
-
-
-def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
-    write_stage_csv(path, rows)
-
-
-def _pick_socket_ifname() -> str | None:
-    preferred = ("eno1", "eno8303")
-    try:
-        available = set(os.listdir("/sys/class/net"))
-    except OSError:
-        return None
-    for name in preferred:
-        if name in available:
-            return name
-    return None
-
-
-def _parse_nccl_transport_log(log_path: Path | None) -> str:
-    if log_path is None or not log_path.exists():
-        return "unknown"
-    match = re.search(
-        r"NCCL INFO NET/(IB|Socket)\s*:\s*Using",
-        log_path.read_text(errors="replace"),
-    )
-    if not match:
-        return "unknown"
-    return "RDMA" if match.group(1) == "IB" else "TCP"
 
 
 def _debug_log_path(cfg: RunConfig, rank: int) -> Path:
@@ -188,8 +148,12 @@ def _compute_or_load_shared_sharding_plan(
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     if rank == 0:
         plan = planner.plan(embedding_module, sharders)
-        with plan_path.open("wb") as f:
+        pending_path = plan_path.with_suffix(plan_path.suffix + ".tmp")
+        with pending_path.open("wb") as f:
             pickle.dump(plan, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(pending_path, plan_path)
     else:
         wait_deadline = time.monotonic() + 60.0
         while not plan_path.exists():
@@ -259,25 +223,8 @@ def _make_trace_handler(cfg: RunConfig, rank: int):
     return _handler
 
 
-def _barrier_for_step_alignment(dist, device, local_rank: int, use_dist: bool) -> None:
-    if not use_dist:
-        return
-    if device.type == "cuda":
-        dist.barrier(device_ids=[local_rank])
-    else:
-        dist.barrier()
-
-
 def _is_fair_remote_mode(cfg: RunConfig, world_size: int) -> bool:
     return cfg.torchrec_dist_mode == "fair_remote" and world_size > 1
-
-
-def _sync_for_timing(torch, device, cfg: RunConfig, boundary: str) -> None:
-    mode = cfg.torchrec_timing_sync_mode
-    if mode == "stage":
-        sync_device(torch, device)
-    elif mode == "step" and boundary == "step":
-        sync_device(torch, device)
 
 
 def _build_uvm_caching_constraints(
@@ -526,21 +473,11 @@ def _run_single_or_dist_worker(
         torch.manual_seed(cfg.seed)
         _append_worker_debug(cfg, rank, "torchrec_align_recstore_init=1")
 
-    model_type = getattr(cfg, "model", "dlrm")
     dense_module = build_dense_module(
-        model_type=model_type,
-        torch=torch,
-        dense_in_features=13,
-        embedding_dim=cfg.embedding_dim,
+        cfg,
         num_sparse_features=len(DEFAULT_CAT_NAMES),
-        dense_arch_layer_sizes=parse_layer_sizes(cfg.dense_arch_layer_sizes),
-        over_arch_layer_sizes=parse_layer_sizes(cfg.over_arch_layer_sizes),
+        embedding_dim=cfg.embedding_dim,
         device=device,
-        rankmixer_segment_dims=getattr(cfg, "rankmixer_segment_dims", None),
-        rankmixer_tokens_split_dim=getattr(cfg, "rankmixer_tokens_split_dim", 2400),
-        rankmixer_blocks=getattr(cfg, "rankmixer_blocks", 2),
-        rankmixer_gate_num=getattr(cfg, "rankmixer_gate_num", 6),
-        rankmixer_masked_dim=getattr(cfg, "rankmixer_masked_dim", 56),
     )
     dense_module = _maybe_wrap_dense_module_for_dist(
         dense_module=dense_module,
@@ -555,10 +492,7 @@ def _run_single_or_dist_worker(
 
     _dispatch_module = dense_module.module if isinstance(
         dense_module, torch.nn.parallel.DistributedDataParallel) else dense_module
-    criterion = build_criterion(
-        getattr(_dispatch_module, "model_type", "dlrm"),
-        rankmixer_task_names(_dispatch_module),
-    )
+    criterion = build_criterion(cfg, _dispatch_module)
     _append_worker_debug(cfg, rank, "after_criterion")
     _append_worker_debug(cfg, rank, "before_optimizer_init")
     dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
@@ -596,57 +530,40 @@ def _run_single_or_dist_worker(
                 "torchrec_role": "trainer" if is_trainer_rank else "embedding_worker",
                 "torchrec_is_trainer": _bool_int(is_trainer_rank),
             }
-            _sync_for_timing(torch, device, cfg, "step")
             step_start = time.perf_counter()
+            timer = StepTimer(row, torch, device)
 
-            with stage_timer(row, "batch_prepare_ms"):
-                _append_worker_debug(cfg, rank, f"before_batch_prepare step={step}")
+            _append_worker_debug(cfg, rank, f"before_batch_prepare step={step}")
+            with timer.cpu("batch_prepare_ms"):
                 try:
                     dense_batch, sparse_batch, labels_batch = next(data_iter)
                 except StopIteration:
                     data_iter = iter(dataloader)
                     dense_batch, sparse_batch, labels_batch = next(data_iter)
-                _append_worker_debug(cfg, rank, f"after_batch_prepare step={step}")
 
             _append_worker_debug(cfg, rank, f"before_input_pack step={step}")
-            with stage_timer(row, "input_pack_ms"):
+            with timer.cpu("input_pack_ms"):
                 dense_batch, sparse_features = build_kjt_batch_from_dense_sparse_labels(
                     dense_batch,
                     sparse_batch,
                     labels_batch,
                 )
-                sparse_features = sparse_features.to(device)
-                _sync_for_timing(torch, device, cfg, "stage")
-            _append_worker_debug(cfg, rank, f"after_input_pack step={step}")
+                sparse_features = sparse_features.to(device, non_blocking=True)
 
             _append_worker_debug(cfg, rank, f"before_embedding step={step}")
-            collective_start = time.perf_counter()
-            with stage_timer(row, "embed_lookup_local_ms"):
-                _sync_for_timing(torch, device, cfg, "stage")
+            with timer.gpu("embed_lookup_local_ms"):
                 embeddings = embedding_module(sparse_features)
-                _sync_for_timing(torch, device, cfg, "stage")
-            collective_elapsed_ms = (time.perf_counter() - collective_start) * 1e3
-            _append_worker_debug(cfg, rank, f"after_embedding step={step}")
 
             _append_worker_debug(cfg, rank, f"before_pool step={step}")
-            with stage_timer(row, "embed_pool_local_ms"):
+            with timer.gpu("embed_pool_local_ms"):
                 embedded_sparse_source = reshape_torchrec_embeddings_for_dlrm(
                     embeddings=embeddings,
                     feature_names=DEFAULT_CAT_NAMES,
                     torch=torch,
                 )
-                _sync_for_timing(torch, device, cfg, "stage")
-            _append_worker_debug(cfg, rank, f"after_pool step={step}")
-
-            if use_dist:
-                row["collective_launch_ms"] = 0.0
-                row["collective_wait_ms"] = collective_elapsed_ms
-            else:
-                row["collective_launch_ms"] = 0.0
-                row["collective_wait_ms"] = 0.0
 
             _append_worker_debug(cfg, rank, f"before_output_unpack step={step}")
-            with stage_timer(row, "output_unpack_ms"):
+            with timer.gpu("output_unpack_ms"):
                 dense_features, embedded_sparse, labels = prepare_hybrid_dlrm_input(
                     dense_batch=dense_batch,
                     embedded_sparse_source=embedded_sparse_source,
@@ -655,21 +572,17 @@ def _run_single_or_dist_worker(
                     device=device,
                     detach_sparse=True,
                 )
-            _append_worker_debug(cfg, rank, f"after_output_unpack step={step}")
 
             if is_trainer_rank:
                 _append_worker_debug(cfg, rank, f"before_dense_fwd step={step}")
-                with stage_timer(row, "dense_fwd_ms"):
-                    _sync_for_timing(torch, device, cfg, "stage")
-                    loss, logits = compute_dense_loss(
-                        model_type, dense_module, criterion,
+                with timer.gpu("dense_fwd_ms"):
+                    loss, _ = compute_dense_loss(
+                        cfg, dense_module, criterion,
                         dense_features, embedded_sparse, labels)
-                    _sync_for_timing(torch, device, cfg, "stage")
                 row["loss"] = float(loss.detach().float().cpu().item())
-                _append_worker_debug(cfg, rank, f"after_dense_fwd step={step}")
 
                 _append_worker_debug(cfg, rank, f"before_backward step={step}")
-                with stage_timer(row, "backward_ms"):
+                with timer.gpu("backward_ms"):
                     embedded_sparse_grad = run_hybrid_backward(
                         loss=loss,
                         embedded_sparse=embedded_sparse,
@@ -677,44 +590,42 @@ def _run_single_or_dist_worker(
                         torch=torch,
                         device=device,
                     )
-                _append_worker_debug(cfg, rank, f"after_backward step={step}")
 
                 _append_worker_debug(cfg, rank, f"before_optimizer step={step}")
-                with stage_timer(row, "optimizer_ms"):
-                    _sync_for_timing(torch, device, cfg, "stage")
+                with timer.gpu("dense_optimizer_ms"):
                     dense_optimizer.step()
                     dense_optimizer.zero_grad(set_to_none=True)
-                    _sync_for_timing(torch, device, cfg, "stage")
-                _append_worker_debug(cfg, rank, f"after_optimizer step={step}")
             else:
                 row["dense_fwd_ms"] = 0.0
                 row["backward_ms"] = 0.0
-                row["optimizer_ms"] = 0.0
+                row["dense_optimizer_ms"] = 0.0
                 embedded_sparse_grad = torch.zeros_like(embedded_sparse)
 
             embedded_sparse_grad = embedded_sparse_grad.contiguous()
 
-            with stage_timer(row, "sparse_update_ms"):
-                _append_worker_debug(cfg, rank, f"before_sparse_update step={step}")
-                _sync_for_timing(torch, device, cfg, "stage")
+            _append_worker_debug(cfg, rank, f"before_sparse_update step={step}")
+            with timer.gpu("sparse_optimizer_ms"):
                 if fair_remote_mode and use_dist:
-                    dist.broadcast(
-                        embedded_sparse_grad,
-                        src=0,
-                    )
+                    dist.broadcast(embedded_sparse_grad, src=0)
                 embedded_sparse_source.backward(
                     embedded_sparse_grad.to(embedded_sparse_source.device)
                 )
                 sparse_optimizer.step()
                 sparse_optimizer.zero_grad(set_to_none=True)
-                _sync_for_timing(torch, device, cfg, "stage")
-                _append_worker_debug(cfg, rank, f"after_sparse_update step={step}")
 
             if profiler is not None:
                 profiler.step()
 
-            _sync_for_timing(torch, device, cfg, "step")
+            # GPU stages are timed with CUDA events and resolved in finish() after
+            # a single device drain, so no stage absorbs a neighbor's un-drained
+            # tail. finish() returns that drain wait (the cross-rank straggler
+            # cost) instead of letting it vanish into the step_total gap.
+            row["step_sync_wait_ms"] = timer.finish()
             row["step_total_ms"] = (time.perf_counter() - step_start) * 1e3
+            row["collective_launch_ms"] = 0.0
+            row["collective_wait_ms"] = (
+                row["embed_lookup_local_ms"] if use_dist else 0.0
+            )
             rows.append(finalize_torchrec_row(row))
             _append_worker_debug(cfg, rank, f"before_step_barrier step={step}")
             _barrier_for_step_alignment(
@@ -745,122 +656,21 @@ class TorchRecRunner(BenchmarkRunner):
     def _rank_output_dir(self, cfg: RunConfig) -> Path:
         return Path(cfg.output_root) / "outputs" / cfg.run_id / "torchrec_ranks"
 
-    def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig) -> list[str]:
-        rdzv_endpoint = f"{cfg.master_addr}:{cfg.master_port}"
-        cmd = [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            "--nnodes",
-            str(cfg.nnodes),
-            "--node_rank",
-            str(cfg.node_rank),
-            "--nproc_per_node",
-            str(cfg.nproc_per_node),
-            "--rdzv_backend",
-            str(cfg.rdzv_backend),
-            "--rdzv_endpoint",
-            rdzv_endpoint,
-            "--rdzv_id",
-            str(cfg.rdzv_id),
-            "--tee",
-            "3",
+    def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig, config_json: Path) -> list[str]:
+        # The whole resolved config (incl. model_args) is handed to each worker
+        # as JSON, so the launcher argv stays tiny and schema-drift free.
+        return [
+            sys.executable, "-m", "torch.distributed.run",
+            "--nnodes", str(cfg.nnodes),
+            "--node_rank", str(cfg.node_rank),
+            "--nproc_per_node", str(cfg.nproc_per_node),
+            "--rdzv_backend", str(cfg.rdzv_backend),
+            "--rdzv_endpoint", f"{cfg.master_addr}:{cfg.master_port}",
+            "--rdzv_id", str(cfg.rdzv_id),
+            "--tee", "3",
             str(repo_root / "model_zoo/rs_demo/run_mock_stress.py"),
-            "--backend",
-            "torchrec",
-            "--nnodes",
-            str(cfg.nnodes),
-            "--node-rank",
-            str(cfg.node_rank),
-            "--nproc-per-node",
-            str(cfg.nproc_per_node),
-            "--master-addr",
-            str(cfg.master_addr),
-            "--master-port",
-            str(cfg.master_port),
-            "--rdzv-backend",
-            str(cfg.rdzv_backend),
-            "--rdzv-id",
-            str(cfg.rdzv_id),
-            "--run-id",
-            str(cfg.run_id),
-            "--output-root",
-            str(cfg.output_root),
-            "--steps",
-            str(cfg.steps),
-            "--warmup-steps",
-            str(cfg.warmup_steps),
-            "--batch-size",
-            str(cfg.batch_size),
-            "--num-embeddings",
-            str(cfg.num_embeddings),
-            "--embedding-dim",
-            str(cfg.embedding_dim),
-            "--dense-arch-layer-sizes",
-            str(cfg.dense_arch_layer_sizes),
-            "--over-arch-layer-sizes",
-            str(cfg.over_arch_layer_sizes),
-            "--model",
-            str(cfg.model),
-            "--seed",
-            str(cfg.seed),
-            "--data-dir",
-            cfg.data_dir,
-            "--train-ratio",
-            str(cfg.train_ratio),
-            "--torchrec-main-csv",
-            str(Path(cfg.torchrec_main_csv)),
-            "--torchrec-main-agg-csv",
-            str(Path(cfg.torchrec_main_agg_csv)),
-            "--torchrec-trace-dir",
-            str(Path(cfg.torchrec_trace_dir)),
-            "--torchrec-trace-csv",
-            str(Path(cfg.torchrec_trace_csv)),
-            "--torchrec-dist-mode",
-            str(cfg.torchrec_dist_mode),
-            "--torchrec-memory-mode",
-            str(cfg.torchrec_memory_mode),
-            "--torchrec-timing-sync-mode",
-            str(cfg.torchrec_timing_sync_mode),
-            "--no-start-server",
+            "--run-config-json", str(config_json),
         ]
-        if cfg.torchrec_align_recstore_init:
-            cmd.append("--torchrec-align-recstore-init")
-        if cfg.num_embeddings_per_feature:
-            cmd.extend(
-                [
-                    "--num-embeddings-per-feature",
-                    str(cfg.num_embeddings_per_feature),
-                ]
-            )
-        if cfg.torchrec_profiler:
-            cmd.extend(
-                [
-                    "--torchrec-profiler",
-                    "--torchrec-profiler-warmup",
-                    str(cfg.torchrec_profiler_warmup),
-                    "--torchrec-profiler-active",
-                    str(cfg.torchrec_profiler_active),
-                    "--torchrec-profiler-repeat",
-                    str(cfg.torchrec_profiler_repeat),
-                ]
-            )
-        if cfg.model == "rankmixer":
-            cmd.extend(
-                [
-                    "--rankmixer-tokens-split-dim",
-                    str(cfg.rankmixer_tokens_split_dim),
-                    "--rankmixer-blocks",
-                    str(cfg.rankmixer_blocks),
-                    "--rankmixer-gate-num",
-                    str(cfg.rankmixer_gate_num),
-                    "--rankmixer-masked-dim",
-                    str(cfg.rankmixer_masked_dim),
-                    "--rankmixer-segment-dims",
-                    str(cfg.rankmixer_segment_dims),
-                ]
-            )
-        return cmd
 
     def _run_single_process(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
         rows = _run_single_or_dist_worker(
@@ -878,7 +688,9 @@ class TorchRecRunner(BenchmarkRunner):
         ensure_shared_dir(rank_dir)
         _remove_stale_distributed_outputs(cfg, rank_dir)
 
-        cmd = self._build_torchrun_cmd(repo_root, cfg)
+        worker_cfg = dataclasses.replace(cfg, start_server=False)
+        config_json = dump_run_config(worker_cfg, rank_dir / "worker_config.json")
+        cmd = self._build_torchrun_cmd(repo_root, cfg, config_json)
 
         env = os.environ.copy()
         env["RS_DEMO_TORCHREC_WORKER"] = "1"

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -30,6 +31,7 @@ enum class RcOp : std::uint16_t {
   kPut       = 2,
   kUpdate    = 3,
   kInitTable = 4,
+  kUpdateFlat = 5,
 };
 
 enum class RcHashMethod : std::uint8_t {
@@ -168,6 +170,18 @@ inline std::size_t UpdatePayloadBytes(
   return PutPayloadBytes(keys, values, payload, error);
 }
 
+inline std::size_t FlatUpdatePayloadBytes(
+    std::size_t key_count, std::size_t embedding_dim) {
+  constexpr std::size_t kKeyBytes = sizeof(std::uint64_t);
+  constexpr std::size_t kFloatBytes = sizeof(float);
+  const std::size_t max_size = std::numeric_limits<std::size_t>::max();
+  if (embedding_dim == 0 || embedding_dim > (max_size - kKeyBytes) / kFloatBytes) {
+    return 0;
+  }
+  const std::size_t row_bytes = kKeyBytes + embedding_dim * kFloatBytes;
+  return key_count > max_size / row_bytes ? 0 : key_count * row_bytes;
+}
+
 inline std::size_t UpdatePayloadBytesFlat(
     base::ConstArray<std::uint64_t> keys,
     const float* values,
@@ -181,16 +195,70 @@ inline std::size_t UpdatePayloadBytesFlat(
     return 0;
   }
 
-  ParameterCompressor compressor;
-  for (std::size_t i = 0; i < keys.Size(); ++i) {
-    compressor.AddItem(
-        ParameterPack(keys[i], static_cast<int>(embedding_dim),
-                      values + i * embedding_dim),
-        nullptr);
+  const std::size_t payload_bytes =
+      FlatUpdatePayloadBytes(keys.Size(), embedding_dim);
+  if (payload_bytes == 0) {
+    if (error != nullptr) {
+      *error = "invalid flat update shape";
+    }
+    return 0;
   }
-  payload->clear();
-  compressor.ToBlock(payload);
+  const std::size_t key_bytes = keys.Size() * sizeof(std::uint64_t);
+  const std::size_t value_bytes = keys.Size() * embedding_dim * sizeof(float);
+  payload->resize(payload_bytes);
+  if (key_bytes > 0) {
+    std::memcpy(payload->data(), keys.Data(), key_bytes);
+    std::memcpy(payload->data() + key_bytes, values, value_bytes);
+  }
   return payload->size();
+}
+
+inline std::size_t PackFlatUpdatePayloadGather(
+    const std::uint64_t* keys,
+    const float* values,
+    std::size_t num_rows,
+    std::size_t embedding_dim,
+    const std::size_t* row_indices,
+    std::size_t row_count,
+    void* payload,
+    std::size_t payload_capacity,
+    std::string* error = nullptr) {
+  if ((row_count > 0 &&
+       (keys == nullptr || values == nullptr || row_indices == nullptr)) ||
+      payload == nullptr) {
+    if (error != nullptr) {
+      *error = "flat update gather input is null";
+    }
+    return 0;
+  }
+  const std::size_t payload_bytes =
+      FlatUpdatePayloadBytes(row_count, embedding_dim);
+  if (payload_bytes == 0 || payload_bytes > payload_capacity) {
+    if (error != nullptr) {
+      *error = "flat update gather payload does not fit";
+    }
+    return 0;
+  }
+
+  auto* payload_keys = static_cast<std::uint64_t*>(payload);
+  auto* payload_values = reinterpret_cast<float*>(
+      static_cast<char*>(payload) + row_count * sizeof(std::uint64_t));
+  const std::size_t row_bytes = embedding_dim * sizeof(float);
+  for (std::size_t row = 0; row < row_count; ++row) {
+    const std::size_t source_row = row_indices[row];
+    if (source_row >= num_rows) {
+      if (error != nullptr) {
+        *error = "flat update gather row index is out of range";
+      }
+      return 0;
+    }
+    payload_keys[row] = keys[source_row];
+    std::memcpy(
+        payload_values + row * embedding_dim,
+        values + source_row * embedding_dim,
+        row_bytes);
+  }
+  return payload_bytes;
 }
 
 inline bool CopyTableName(std::string_view table_name,

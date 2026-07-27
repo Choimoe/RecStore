@@ -153,16 +153,10 @@ def build_rs_demo_command(
                 lane.allocator,
                 "--prefetch-depth",
                 str(lane.prefetch_depth),
+                "--single-node-ps-backend",
+                lane.single_node_ps_backend,
             ]
         )
-        if lane.enable_single_node_fast_path:
-            cmd.extend(
-                [
-                    "--enable-single-node-distributed-fast-path",
-                    "--single-node-ps-backend",
-                    lane.single_node_ps_backend,
-                ]
-            )
         if context.external_recstore_runtime_dir is not None:
             cmd.extend(["--recstore-runtime-dir", str(context.external_recstore_runtime_dir)])
         if context.no_start_recstore_server:

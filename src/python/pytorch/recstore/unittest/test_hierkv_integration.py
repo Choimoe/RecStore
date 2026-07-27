@@ -16,17 +16,14 @@ class TestHierKVIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo_root = Path("/app/RecStore")
-        cls.library_path = cls.repo_root / "build/lib/lib_recstore_ops.so"
         cls.config_path = resolve_recstore_config_path()
-        if not cls.library_path.exists():
-            raise unittest.SkipTest(f"missing ops library: {cls.library_path}")
         if not cls.config_path.exists():
             raise unittest.SkipTest(f"missing config file: {cls.config_path}")
 
     def setUp(self) -> None:
         os.environ["RECSTORE_CONFIG"] = str(self.config_path)
         RecStoreClient._instance = None
-        self.client = RecStoreClient(str(self.library_path))
+        self.client = RecStoreClient()
         self.client.set_ps_backend("hierkv")
 
     def tearDown(self) -> None:

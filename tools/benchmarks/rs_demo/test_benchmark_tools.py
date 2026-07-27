@@ -84,13 +84,12 @@ class TestBenchmarkTools(unittest.TestCase):
             backend="recstore",
             nnodes=1,
             nproc_per_node=2,
-            enable_single_node_distributed_fast_path=True,
             single_node_owner_policy="rank_zero",
         )
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "single-node distributed fast path only supports --single-node-owner-policy=hash_mod_world_size",
+            "single-node path only supports --single-node-owner-policy=hash_mod_world_size",
         ):
             config.validate_recstore_config(cfg)
 

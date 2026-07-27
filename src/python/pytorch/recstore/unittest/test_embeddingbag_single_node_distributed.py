@@ -2,6 +2,7 @@ import importlib
 import sys
 import types
 import unittest
+from unittest import mock
 
 import torch
 
@@ -66,6 +67,7 @@ class _FakeKVClient:
         self.set_ps_backend_calls = []
         self.activate_shard_calls = []
         self.embedding_dim = 2
+        self.backend = "local_shm"
 
     def init_data(self, **kwargs):
         self.init_data_calls.append(kwargs)
@@ -83,7 +85,11 @@ class _FakeKVClient:
         return torch.tensor(rows, dtype=torch.float32)
 
     def set_ps_backend(self, backend):
+        self.backend = str(backend)
         self.set_ps_backend_calls.append(str(backend))
+
+    def current_ps_backend(self):
+        return self.backend
 
     def activate_shard(self, shard):
         self.activate_shard_calls.append(int(shard))
@@ -159,13 +165,16 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
         self._original_get_kv_client = self.embeddingbag_module.get_kv_client
         self.embeddingbag_module.get_kv_client = lambda: _FakeKVClient()
         self._original_dist = self.embeddingbag_module.torch.distributed
+        self._env_patch = mock.patch.dict("os.environ", {"LOCAL_WORLD_SIZE": "2"})
+        self._env_patch.start()
 
     def tearDown(self):
+        self._env_patch.stop()
         self.embeddingbag_module.get_kv_client = self._original_get_kv_client
         self.embeddingbag_module.torch.distributed = self._original_dist
         _restore_modules(self._saved_modules)
 
-    def _build_ebc(self):
+    def _build_ebc(self, **kwargs):
         return self.embeddingbag_module.RecStoreEmbeddingBagCollection(
             [
                 {
@@ -176,6 +185,7 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
                 }
             ],
             enable_fusion=True,
+            **kwargs,
         )
 
     def _build_features(self, values):
@@ -189,8 +199,8 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
         )
 
     def test_forward_keeps_legacy_pull_path_when_fast_path_disabled(self):
-        ebc = self._build_ebc()
-        ebc.enable_single_node_distributed_fast_path = False
+        ebc = self._build_ebc(fast_path_mode="off")
+        ebc.kv_client.is_shared_local_shm_table = lambda: True
         self.embeddingbag_module.torch.distributed = _FakeDist(
             initialized=True,
             rank=0,
@@ -209,10 +219,36 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
             )
         )
 
-    def test_forward_uses_owner_lookup_fast_path_when_explicitly_enabled(self):
+    def test_rejects_invalid_fast_path_mode(self):
+        with self.assertRaisesRegex(ValueError, "fast_path_mode"):
+            self._build_ebc(fast_path_mode="on")
+
+    def test_fast_path_auto_enables_for_single_node_local_backend(self):
         ebc = self._build_ebc()
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
+        ebc.kv_client.current_ps_backend = lambda: "hierkv"
+        self.embeddingbag_module.torch.distributed = _FakeDist(
+            initialized=True,
+            rank=0,
+            world_size=2,
+        )
+
+        with mock.patch.dict("os.environ", {"LOCAL_WORLD_SIZE": "2"}):
+            self.assertEqual(ebc.resolve_fast_path_backend(), "hierkv")
+
+    def test_fast_path_auto_rejects_multi_node_process_group(self):
+        ebc = self._build_ebc()
+        ebc.kv_client.current_ps_backend = lambda: "local_shm"
+        self.embeddingbag_module.torch.distributed = _FakeDist(
+            initialized=True,
+            rank=0,
+            world_size=4,
+        )
+
+        with mock.patch.dict("os.environ", {"LOCAL_WORLD_SIZE": "2"}):
+            self.assertIsNone(ebc.resolve_fast_path_backend())
+
+    def test_forward_uses_owner_lookup_fast_path_when_auto_enabled(self):
+        ebc = self._build_ebc()
         self.embeddingbag_module.torch.distributed = _FakeDist(
             initialized=True,
             rank=0,
@@ -282,7 +318,7 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
         self.assertEqual(len(responses), 1)
         self.assertEqual(len(ebc.kv_client.pull_calls), 0)
         self.assertEqual(len(ebc.kv_client.local_lookup_calls), 1)
-        self.assertEqual(ebc.kv_client.set_ps_backend_calls, ["local_shm"])
+        self.assertEqual(ebc.kv_client.set_ps_backend_calls, [])
         self.assertEqual(ebc.kv_client.activate_shard_calls, [0])
         self.assertTrue(
             torch.equal(
@@ -299,8 +335,6 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
 
     def test_forward_uses_direct_local_lookup_for_shared_local_shm_single_table(self):
         ebc = self._build_ebc()
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         ebc.kv_client.is_shared_local_shm_table = lambda: True
         self.embeddingbag_module.torch.distributed = _FakeDist(
             initialized=True,
@@ -341,7 +375,7 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
 
         self.assertEqual(len(ebc.kv_client.pull_calls), 0)
         self.assertEqual(len(ebc.kv_client.local_lookup_calls), 1)
-        self.assertEqual(ebc.kv_client.set_ps_backend_calls, ["local_shm"])
+        self.assertEqual(ebc.kv_client.set_ps_backend_calls, [])
         self.assertEqual(ebc.kv_client.activate_shard_calls, [0])
         self.assertTrue(
             torch.equal(
@@ -358,9 +392,7 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
 
     def test_forward_uses_owner_lookup_fast_path_with_hierkv_backend(self):
         ebc = self._build_ebc()
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
-        ebc.single_node_ps_backend = "hierkv"
+        ebc.kv_client.backend = "hierkv"
         self.embeddingbag_module.torch.distributed = _FakeDist(
             initialized=True,
             rank=0,
@@ -410,6 +442,7 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
 
         self.assertEqual(len(ebc.kv_client.pull_calls), 0)
         self.assertEqual(len(ebc.kv_client.local_lookup_calls), 1)
+        self.assertEqual(ebc.kv_client.set_ps_backend_calls, [])
         self.assertTrue(
             torch.equal(
                 out.values(),
@@ -419,8 +452,6 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
 
     def test_forward_fast_path_restores_original_order_for_repeated_fused_ids(self):
         ebc = self._build_ebc()
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         self.embeddingbag_module.torch.distributed = _FakeDist(
             initialized=True,
             rank=0,
@@ -494,8 +525,6 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required for GPU-resident lookup fast path coverage")
     def test_forward_fast_path_keeps_owner_lookup_ids_on_cuda(self):
         ebc = self._build_ebc()
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         self.embeddingbag_module.torch.distributed = _FakeDist(
             initialized=True,
             rank=0,

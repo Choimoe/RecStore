@@ -6,6 +6,20 @@ from ..bagpipe_cache import BagPipeCachePolicy
 
 
 class TestBagPipeCachePolicy(unittest.TestCase):
+    def test_zero_capacity_prefetches_without_tracking_cache_residency(self):
+        policy = BagPipeCachePolicy(lookahead_depth=2, cache_capacity=0)
+        policy.observe_batch(0, torch.tensor([1, 2], dtype=torch.int64))
+        policy.observe_batch(1, torch.tensor([2, 3], dtype=torch.int64))
+
+        first = policy.plan_for_step(0)
+        second = policy.plan_for_step(1)
+
+        self.assertEqual(first.prefetch_ids.tolist(), [1, 2])
+        self.assertEqual(first.cache_insert_ids.tolist(), [])
+        self.assertEqual(first.ttl_updates, {})
+        self.assertEqual(second.prefetch_ids.tolist(), [2, 3])
+        self.assertEqual(policy.cached_ids(), set())
+
     def test_lookahead_ttl_and_prefetch_ids_follow_future_last_use(self):
         policy = BagPipeCachePolicy(lookahead_depth=3, cache_capacity=8)
         policy.observe_batch(0, torch.tensor([1, 2], dtype=torch.int64))

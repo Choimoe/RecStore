@@ -80,15 +80,16 @@ class TestHpsTorchEmbedding(unittest.TestCase):
 
         self.assertEqual(module.__name__, "hps_torch")
 
-    def test_forward_rejects_mismatched_sparse_lengths(self) -> None:
+    def _make_embedding(self, table_specs=None) -> HpsTorchEmbeddingBagCollection:
         fake_module = types.SimpleNamespace(
             LookupLayer=lambda **kwargs: torch.nn.Identity()
         )
+        extra = {"table_specs": table_specs} if table_specs is not None else {}
         with mock.patch(
             "model_zoo.rs_demo.runtime.hps_torch_embedding.import_hps_torch_module",
             return_value=fake_module,
         ):
-            embedding = HpsTorchEmbeddingBagCollection(
+            return HpsTorchEmbeddingBagCollection(
                 [
                     {
                         "name": "t_cat_0",
@@ -99,17 +100,22 @@ class TestHpsTorchEmbedding(unittest.TestCase):
                 ],
                 ps_config_file="/tmp/hps.json",
                 model_name="demo",
-                table_specs=[
-                    HpsTableSpec(
-                        name="t_cat_0",
-                        feature_name="cat_0",
-                        num_embeddings=16,
-                        embedding_dim=4,
-                        key_offset=0,
-                        sparse_file="/tmp/table",
-                    )
-                ],
+                **extra,
             )
+
+    def test_forward_rejects_mismatched_sparse_lengths(self) -> None:
+        embedding = self._make_embedding(
+            table_specs=[
+                HpsTableSpec(
+                    name="t_cat_0",
+                    feature_name="cat_0",
+                    num_embeddings=16,
+                    embedding_dim=4,
+                    key_offset=0,
+                    sparse_file="/tmp/table",
+                )
+            ]
+        )
 
         with self.assertRaisesRegex(ValueError, "mismatched lengths and values"):
             embedding(
@@ -124,25 +130,7 @@ class TestHpsTorchEmbedding(unittest.TestCase):
             )
 
     def test_forward_rejects_unknown_features(self) -> None:
-        fake_module = types.SimpleNamespace(
-            LookupLayer=lambda **kwargs: torch.nn.Identity()
-        )
-        with mock.patch(
-            "model_zoo.rs_demo.runtime.hps_torch_embedding.import_hps_torch_module",
-            return_value=fake_module,
-        ):
-            embedding = HpsTorchEmbeddingBagCollection(
-                [
-                    {
-                        "name": "t_cat_0",
-                        "num_embeddings": 16,
-                        "embedding_dim": 4,
-                        "feature_names": ["cat_0"],
-                    }
-                ],
-                ps_config_file="/tmp/hps.json",
-                model_name="demo",
-            )
+        embedding = self._make_embedding()
 
         with self.assertRaisesRegex(KeyError, "unknown feature: cat_1"):
             embedding(

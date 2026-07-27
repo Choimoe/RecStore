@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -110,6 +111,9 @@ class _FakeKVClient:
     def is_shared_local_shm_table(self) -> bool:
         return False
 
+    def current_ps_backend(self) -> str:
+        return "local_shm"
+
 
 class _FakeKVClientWithoutPrefill(_FakeKVClient):
     prefill_gpu_cache = None
@@ -132,6 +136,74 @@ class TestFusedPrefetch(unittest.TestCase):
         lengths = torch.cat([lengths_f1, lengths_f2], dim=0)
         kjt = build_sparse_features(keys=keys, values=values, lengths=lengths)
         return kjt
+
+    def test_fused_prefetch_reuses_slot_deduplication_metadata(self):
+        configs = [
+            dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
+        ]
+        fake = _FakeOps()
+        ebc = RecStoreEmbeddingBagCollection(
+            configs,
+            enable_fusion=True,
+            fusion_k=30,
+            kv_client=_FakeKVClient(fake),
+        )
+        fused_ids = torch.tensor([1, 1, 3], dtype=torch.int64)
+        result = ebc.issue_fused_id_prefetch(fused_ids, record_handle=False)
+        handle, num_ids, issue_ts, unique_ids, inverse = result
+        ebc.set_fused_prefetch_handle(
+            handle,
+            num_ids=num_ids,
+            issue_ts=issue_ts,
+            fused_ids_cpu=unique_ids,
+            fused_inverse=inverse,
+            full_batch=True,
+        )
+
+        with mock.patch.object(
+            torch,
+            "unique",
+            side_effect=AssertionError("consume must reuse prefetch metadata"),
+        ):
+            embeddings, used = ebc._consume_fused_prefetch_embeddings(
+                fused_ids,
+                fused_ids,
+                compute_device=torch.device("cpu"),
+            )
+
+        self.assertTrue(used)
+        self.assertEqual(embeddings.shape, (3, 4))
+
+    def test_fused_prefetch_rejects_mismatched_slot(self):
+        configs = [
+            dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
+        ]
+        fake = _FakeOps()
+        ebc = RecStoreEmbeddingBagCollection(
+            configs,
+            enable_fusion=True,
+            fusion_k=30,
+            kv_client=_FakeKVClient(fake),
+        )
+        prefetched_ids = torch.tensor([1, 1, 3], dtype=torch.int64)
+        current_ids = torch.tensor([1, 3, 3], dtype=torch.int64)
+        result = ebc.issue_fused_id_prefetch(prefetched_ids, record_handle=False)
+        handle, num_ids, issue_ts, unique_ids, inverse = result
+        ebc.set_fused_prefetch_handle(
+            handle,
+            num_ids=num_ids,
+            issue_ts=issue_ts,
+            fused_ids_cpu=unique_ids,
+            fused_inverse=inverse,
+            full_batch=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            ebc._consume_fused_prefetch_embeddings(
+                current_ids,
+                current_ids,
+                compute_device=torch.device("cpu"),
+            )
 
     def test_fused_prefetch_matches_sync(self):
         configs = [
@@ -231,8 +303,34 @@ class TestFusedPrefetch(unittest.TestCase):
         looked_up_ids = set(fake_client.local_lookup_calls[0][1].tolist())
         self.assertNotIn(1, looked_up_ids)
         self.assertNotIn((1 << 30) + 4, looked_up_ids)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["lookup_fallback_pull_ms"], 0.0)
+
+    def test_prepared_fused_prefetch_matches_sync(self):
+        configs = [
+            dict(name="t0", embedding_dim=4, num_embeddings=16, feature_names=["f1"]),
+            dict(name="t1", embedding_dim=4, num_embeddings=16, feature_names=["f2"]),
+        ]
+        fake = _FakeOps()
+        ebc = RecStoreEmbeddingBagCollection(
+            configs,
+            enable_fusion=True,
+            fusion_k=30,
+            kv_client=_FakeKVClient(fake),
+        )
+        for idx, cfg in enumerate(configs):
+            base_offset = idx << 30
+            keys = torch.arange(cfg["num_embeddings"], dtype=torch.int64) + base_offset
+            values = torch.arange(
+                cfg["num_embeddings"] * cfg["embedding_dim"], dtype=torch.float32
+            ).view(cfg["num_embeddings"], cfg["embedding_dim"])
+            fake.emb_write(keys, values + idx * 1000)
+
+        features = self._build_features()
+        expected = ebc(features).values().detach().clone()
+        prepared = ebc.prepare_fused_prefetch(features)
+        ebc.issue_prepared_fused_prefetch(*prepared)
+        actual = ebc(features).values().detach()
+
+        self.assertTrue(torch.allclose(expected, actual))
 
     def test_partial_fused_prefetch_records_merge_stats(self):
         configs = [
@@ -266,10 +364,6 @@ class TestFusedPrefetch(unittest.TestCase):
         out_prefetch = ebc(features).values().detach().clone()
 
         self.assertTrue(torch.allclose(out_sync, out_prefetch))
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertGreater(perf["lookup_partial_merge_ms"], 0.0)
-        self.assertEqual(perf["lookup_partial_prefetched_ids"], 2.0)
-        self.assertEqual(perf["lookup_partial_missing_ids"], 4.0)
 
     def test_invalid_fused_prefetch_ids_are_refreshed_from_local_lookup(self):
         configs = [
@@ -349,8 +443,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertTrue(torch.allclose(out_sync, out_prefetch))
         self.assertEqual(len(fake_client.local_lookup_calls), 1)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertGreater(perf["lookup_fallback_pull_ms"], 0.0)
 
     def test_partial_fused_prefetch_uses_gpu_cache_aware_pull_when_available(self):
         class _GpuCacheAwarePullClient(_FakeKVClient):
@@ -400,8 +492,6 @@ class TestFusedPrefetch(unittest.TestCase):
         self.assertTrue(torch.allclose(out_sync, out_prefetch))
         self.assertEqual(len(fake_client.local_lookup_calls), 1)
         self.assertEqual(len(fake_client.gpu_cached_pull_calls), 1)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["lookup_fallback_pull_ms"], 0.0)
 
     def test_fused_fallback_without_prefetch_uses_gpu_cache_aware_pull_when_available(self):
         class _GpuCacheAwarePullClient(_FakeKVClient):
@@ -441,9 +531,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertGreater(out.numel(), 0)
         self.assertEqual(len(fake_client.gpu_cached_pull_calls), 1)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertGreater(perf["lookup_gpu_cache_pull_ms"], 0.0)
-        self.assertEqual(perf["lookup_fallback_pull_ms"], 0.0)
 
     def test_fused_prefetch_prefills_gpu_cache_before_local_lookup(self):
         configs = [
@@ -459,8 +546,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = (idx << 30)
@@ -484,10 +569,6 @@ class TestFusedPrefetch(unittest.TestCase):
         self.assertTrue(set(looked_up_ids.cpu().tolist()).issubset(set(prefill_ids.cpu().tolist())))
         self.assertEqual(out.values().shape, (2, 8))
         perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_batches"], 1.0)
-        self.assertGreater(perf["planned_gpu_cache_prefill_ids"], 0.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_successes"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 0.0)
         self.assertGreater(perf["lookup_total_ms"], 0.0)
 
     def test_fused_prefetch_prefill_disabled_on_cpu_without_test_override(self):
@@ -509,8 +590,6 @@ class TestFusedPrefetch(unittest.TestCase):
             keys = torch.arange(cfg["num_embeddings"], dtype=torch.int64) + base_offset
             vals = torch.zeros((cfg["num_embeddings"], cfg["embedding_dim"]), dtype=torch.float32)
             fake.emb_write(keys, vals)
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
 
         features = self._build_features()
@@ -520,9 +599,6 @@ class TestFusedPrefetch(unittest.TestCase):
         self.assertEqual(fake_client.prefill_calls, [])
         self.assertIsNone(ebc._fused_prefetch_handle)
         self.assertEqual(ebc._fused_prefetch_slots, [])
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_no_cuda"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
 
     def test_fused_prefetch_prefill_falls_back_without_prefill_api(self):
         configs = [
@@ -537,8 +613,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = idx << 30
@@ -552,9 +626,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertIsNone(ebc._fused_prefetch_handle)
         self.assertEqual(ebc._fused_prefetch_slots, [])
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_no_api"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
 
     def test_fused_prefetch_prefill_falls_back_to_local_lookup_on_wait_failure(self):
         configs = [
@@ -570,8 +641,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = (idx << 30)
@@ -587,10 +656,6 @@ class TestFusedPrefetch(unittest.TestCase):
 
         self.assertEqual(len(fake_client.prefill_calls), 1)
         self.assertEqual(len(fake_client.local_lookup_calls), 2)
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_wait_failures"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_successes"], 1.0)
 
     def test_fused_prefetch_prefill_records_size_mismatch_fallback(self):
         configs = [
@@ -606,8 +671,6 @@ class TestFusedPrefetch(unittest.TestCase):
             fusion_k=30,
             kv_client=fake_client,
         )
-        ebc.enable_single_node_distributed_fast_path = True
-        ebc.single_node_distributed_mode = "single_node"
         fake_client.is_shared_local_shm_table = lambda: True
         for idx, cfg in enumerate(configs):
             base_offset = (idx << 30)
@@ -619,9 +682,6 @@ class TestFusedPrefetch(unittest.TestCase):
         ebc.issue_fused_prefetch(features)
         ebc(features)
 
-        perf = ebc.consume_perf_stats(reset=True)
-        self.assertEqual(perf["planned_gpu_cache_prefill_result_size_mismatches"], 1.0)
-        self.assertEqual(perf["planned_gpu_cache_prefill_fallbacks"], 1.0)
 
 
 if __name__ == "__main__":

@@ -1,10 +1,44 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import importlib
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
+
+
+# Model plugins that contribute their own CLI arguments (routed into
+# ``RunConfig.model_args``).  DLRM is built in and needs none; others live in
+# their own ``model_zoo/<Model>/`` package.  Missing packages are skipped so the
+# CLI still works when only a subset of models is present.
+_MODEL_ARG_PLUGIN_MODULES = ("RankMixer.plugin",)
+
+
+def _import_model_plugin(path: str):
+    """Import a model plugin module, tolerating both the ``model_zoo`` on-path
+    layout (production) and the repo-root layout (tests)."""
+    for candidate in (path, f"model_zoo.{path}"):
+        try:
+            return importlib.import_module(candidate)
+        except ImportError:
+            continue
+    return None
+
+
+def _iter_model_arg_plugins():
+    for path in _MODEL_ARG_PLUGIN_MODULES:
+        module = _import_model_plugin(path)
+        if module is not None:
+            yield module.PLUGIN
+
+
+def _model_arg_dests() -> list[str]:
+    dests: list[str] = []
+    for plugin in _iter_model_arg_plugins():
+        dests.extend(getattr(plugin, "ARG_DESTS", ()))
+    return dests
 
 
 DEFAULT_NUM_EMBEDDINGS_PER_FEATURE = [
@@ -99,7 +133,6 @@ class RunConfig:
     seed: int = 20260330
     table_name: str = "mock_perf_table"
     init_rows: int = 50000
-    read_before_update: bool = True
     read_mode: str = "prefetch"
     prefetch_depth: int = 0
     prefetch_issue_depth: int = 20
@@ -110,14 +143,13 @@ class RunConfig:
     server_port1: int | None = None
     server_wait_seconds: float = 20.0
     allocator: str = "R2ShmMalloc"
-    output_root: str = "/nas/home/shq/docker/rs_demo"
+    output_root: str = "/tmp/rs_demo"
     run_id: str = ""
     jsonl: str = ""
     csv: str = ""
     local_shm_server_csv: str = ""
     recstore_main_csv: str = ""
     recstore_main_agg_csv: str = ""
-    library_path: str = ""
     recstore_runtime_dir: str = ""
     server_log: str = ""
     data_dir: str = "model_zoo/torchrec_dlrm/processed_day_0_data"
@@ -125,20 +157,16 @@ class RunConfig:
     fuse_k: int = 30
     dense_arch_layer_sizes: str = "512,256,128"
     over_arch_layer_sizes: str = "1024,1024,512,256,1"
-    # Dense compute model: "dlrm" (default DLRM interaction) or "rankmixer"
-    # (ported RankMixer blocks: MaskBlock + LT + TokenMixer/PFFN + PLE).
+    # Dense compute model: "dlrm" (default) or another registered model such as
+    # "rankmixer" (model_zoo/RankMixer). Model-specific tuning parameters live in
+    # ``model_args`` so this shared config stays model-agnostic.
     model: str = "dlrm"
-    rankmixer_tokens_split_dim: int = 2400
-    rankmixer_blocks: int = 2
-    rankmixer_gate_num: int = 6
-    rankmixer_masked_dim: int = 56
-    rankmixer_segment_dims: str = ""
+    model_args: dict = field(default_factory=dict)
     backend: str = "recstore"
     nproc: int = 1
     nnodes: int = 1
     node_rank: int = 0
     nproc_per_node: int = 1
-    enable_single_node_distributed_fast_path: bool = False
     single_node_ps_backend: str = "local_shm"
     single_node_owner_policy: str = "hash_mod_world_size"
     enable_gpu_cache: bool = False
@@ -185,6 +213,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Modular benchmark demo based on DLRM-style data path."
     )
     parser.add_argument(
+        "--run-config-json",
+        type=str,
+        default="",
+        help=(
+            "Path to a JSON dump of a RunConfig. When set, all other CLI args are "
+            "ignored and the config is loaded verbatim. Used to hand a fully "
+            "resolved config to distributed workers."
+        ),
+    )
+    parser.add_argument(
         "--backend",
         type=str,
         default="recstore",
@@ -195,15 +233,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--node-rank", type=int, default=0)
     parser.add_argument("--nproc-per-node", type=int, default=None)
     parser.add_argument(
-        "--enable-single-node-distributed-fast-path",
-        action="store_true",
-        default=False,
-    )
-    parser.add_argument(
         "--single-node-ps-backend",
         type=str,
         default="local_shm",
         choices=["local_shm", "hierkv"],
+        help="PS backend when --nnodes=1 (auto). Ignored for multi-node.",
     )
     parser.add_argument(
         "--single-node-owner-policy",
@@ -258,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--master-port", type=int, default=29500)
     parser.add_argument("--rdzv-backend", type=str, default="c10d")
     parser.add_argument("--rdzv-id", type=str, default="")
-    parser.add_argument("--output-root", type=str, default="/nas/home/shq/docker/rs_demo")
+    parser.add_argument("--output-root", type=str, default="/tmp/rs_demo")
     parser.add_argument("--run-id", type=str, default="")
     parser.add_argument(
         "--ps-type",
@@ -309,22 +343,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260330)
     parser.add_argument("--table-name", type=str, default="mock_perf_table")
     parser.add_argument("--init-rows", type=int, default=50000)
-    parser.add_argument("--read-before-update", action="store_true", default=True)
-    parser.add_argument("--no-read-before-update", action="store_true")
     parser.add_argument(
         "--read-mode",
         type=str,
         default="prefetch",
-        choices=["prefetch", "direct"],
-        help="read path mode when read-before-update is enabled",
+        choices=["direct", "prefetch", "bagpipe"],
+        help=(
+            "Embedding read strategy: direct=sync pull; prefetch=async with "
+            "prefetch_depth window (may observe stale updates); bagpipe=async "
+            "with update-aware stalls (not wired yet)."
+        ),
     )
     parser.add_argument(
         "--prefetch-depth",
         type=int,
         default=0,
         help=(
-            "Number of future batches to issue fused embedding prefetches ahead. "
-            "0 keeps the legacy issue-and-immediate-wait path."
+            "For read_mode=prefetch|bagpipe: number of future batches to issue "
+            "ahead. 0 means same-step async get only."
         ),
     )
     parser.add_argument(
@@ -356,7 +392,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-shm-server-csv", type=str, default="")
     parser.add_argument("--recstore-main-csv", type=str, default="")
     parser.add_argument("--recstore-main-agg-csv", type=str, default="")
-    parser.add_argument("--library-path", type=str, default="")
     parser.add_argument("--recstore-runtime-dir", type=str, default="")
     parser.add_argument("--server-log", type=str, default="")
     parser.add_argument(
@@ -381,30 +416,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="dlrm",
         choices=["dlrm", "rankmixer"],
-        help="Dense compute model. 'rankmixer' uses the ported RankMixer "
-             "blocks (MaskBlock + LT + TokenMixer/PFFN + PLE) instead of DLRM.",
+        help="Dense compute model. Non-DLRM models live in model_zoo/<Model>/ "
+             "and contribute their own tuning args (see --help).",
     )
-    parser.add_argument(
-        "--rankmixer-tokens-split-dim", type=int, default=2400,
-        help="RankMixer LT projection output dim (token dim). Production: 2400.",
-    )
-    parser.add_argument(
-        "--rankmixer-blocks", type=int, default=2,
-        help="Number of TokenMixer+PFFN blocks. Production: 2.",
-    )
-    parser.add_argument(
-        "--rankmixer-gate-num", type=int, default=6,
-        help="PLE expert (gate) count = 1 base + task groups. Production: 6.",
-    )
-    parser.add_argument(
-        "--rankmixer-masked-dim", type=int, default=56,
-        help="Mask feature dim for PLE/MMoE gate. Production: 4*(6+8)=56.",
-    )
-    parser.add_argument(
-        "--rankmixer-segment-dims", type=str, default="",
-        help="Comma-separated per-segment deep-input dims. Empty = auto-partition "
-             "num_sparse_features*embedding_dim into 5 segments.",
-    )
+    # Model-specific args (e.g. --rankmixer-*) are contributed by the model
+    # packages and routed into cfg.model_args at parse time.
+    for _plugin in _iter_model_arg_plugins():
+        _plugin.add_arguments(parser)
     parser.add_argument("--torchrec-profiler", action="store_true", default=False)
     parser.add_argument(
         "--torchrec-dist-mode",
@@ -495,17 +513,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_config(argv: list[str] | None = None) -> RunConfig:
     ns = build_parser().parse_args(argv)
+    if getattr(ns, "run_config_json", ""):
+        with open(ns.run_config_json, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        # Drop removed fields so older worker JSON still loads.
+        raw.pop("enable_single_node_distributed_fast_path", None)
+        raw.pop("read_before_update", None)
+        return RunConfig(**raw)
     cfg_kwargs = vars(ns).copy()
-    cfg_kwargs.pop("no_read_before_update", None)
+    cfg_kwargs.pop("run_config_json", None)
     cfg_kwargs.pop("no_start_server", None)
+    cfg_kwargs.pop("read_before_update", None)
+    cfg_kwargs.pop("no_read_before_update", None)
     disable_recstore_fusion = bool(cfg_kwargs.pop("disable_recstore_fusion", False))
     hps_no_materialize = bool(cfg_kwargs.pop("hps_torch_no_materialize_embeddings", False))
     hps_disable_gpucache = bool(cfg_kwargs.pop("hps_torch_disable_gpucache", False))
+    # Route model-specific args (e.g. --rankmixer-*) into model_args.
+    model_args = {d: cfg_kwargs.pop(d) for d in _model_arg_dests() if d in cfg_kwargs}
     if cfg_kwargs["nproc_per_node"] is None:
         cfg_kwargs["nproc_per_node"] = cfg_kwargs.get("nproc", 1)
     cfg = RunConfig(**cfg_kwargs)
-    if ns.no_read_before_update:
-        cfg.read_before_update = False
+    cfg.model_args = model_args
     if disable_recstore_fusion:
         cfg.recstore_enable_fusion = False
     if ns.no_start_server:
@@ -515,6 +543,13 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
     if hps_disable_gpucache:
         cfg.hps_torch_gpucache = False
     return cfg
+
+
+def dump_run_config(cfg: RunConfig, path: Path) -> Path:
+    """Serialize a fully-resolved RunConfig to JSON for a distributed worker."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
+    return path
 
 
 def validate_hps_torch_config(cfg: RunConfig) -> None:
@@ -572,48 +607,41 @@ def validate_recstore_config(cfg: RunConfig) -> None:
         raise RuntimeError("--nproc-per-node must be greater than 0.")
     if cfg.node_rank < 0 or cfg.node_rank >= cfg.nnodes:
         raise RuntimeError("--node-rank must be within [0, nnodes).")
-    if cfg.enable_gpu_cache and cfg.gpu_cache_capacity <= 0:
+    read_mode = str(cfg.read_mode).strip().lower()
+    if read_mode not in {"direct", "prefetch", "bagpipe"}:
         raise RuntimeError(
-            "--gpu-cache-capacity must be positive when --enable-gpu-cache is set"
+            "--read-mode must be one of: direct, prefetch, bagpipe"
+        )
+    cfg.read_mode = read_mode
+    if read_mode == "bagpipe":
+        raise RuntimeError(
+            "read_mode=bagpipe is not wired in recstore_runner yet; "
+            "use --read-mode=direct or --read-mode=prefetch"
+        )
+    if cfg.enable_gpu_cache:
+        raise RuntimeError(
+            "--enable-gpu-cache is not supported by recstore_runner; "
+            "use --read-mode=bagpipe when that path is wired"
+        )
+    if cfg.enable_bagpipe_cache:
+        raise RuntimeError(
+            "--enable-bagpipe-cache is not supported; use --read-mode=bagpipe "
+            "when that path is wired"
         )
     if cfg.prefetch_depth < 0:
         raise RuntimeError("--prefetch-depth must be non-negative")
     if cfg.prefetch_issue_depth < 0:
         raise RuntimeError("--prefetch-issue-depth must be non-negative")
-    if cfg.enable_bagpipe_cache:
-        if not cfg.enable_gpu_cache:
-            raise RuntimeError(
-                "--enable-bagpipe-cache requires --enable-gpu-cache"
-            )
-        # BagPipe relies on the GPU cache being queried on every forward;
-        # disable the low-hit bypass so the prefilled cache is not cleared.
-        cfg.disable_gpu_cache_lookup_bypass = True
-        if cfg.bagpipe_lookahead <= 0:
-            raise RuntimeError(
-                "--bagpipe-lookahead must be positive when --enable-bagpipe-cache is set"
-            )
-        if cfg.bagpipe_cleanup_proportion <= 0 or cfg.bagpipe_cleanup_proportion > 1:
-            raise RuntimeError(
-                "--bagpipe-cleanup-proportion must be within (0, 1]"
-            )
     if cfg.tiered_dram_capacity_multiplier < 0:
         raise RuntimeError("--tiered-dram-capacity-multiplier must be non-negative")
-    if cfg.enable_single_node_distributed_fast_path:
-        if cfg.nnodes != 1:
-            raise RuntimeError(
-                "RecStore single-node distributed fast path requires --nnodes=1."
-            )
-        if cfg.nproc_per_node <= 1:
-            raise RuntimeError(
-                "RecStore single-node distributed fast path requires --nproc-per-node greater than 1."
-            )
+    if cfg.nnodes == 1:
         if cfg.single_node_ps_backend not in {"local_shm", "hierkv"}:
             raise RuntimeError(
-                "RecStore single-node distributed fast path only supports --single-node-ps-backend=local_shm or hierkv."
+                "RecStore single-node path only supports --single-node-ps-backend=local_shm or hierkv."
             )
         if cfg.single_node_owner_policy != "hash_mod_world_size":
             raise RuntimeError(
-                "RecStore single-node distributed fast path only supports --single-node-owner-policy=hash_mod_world_size."
+                "RecStore single-node path only supports --single-node-owner-policy=hash_mod_world_size."
             )
     if cfg.nnodes > 1 and not cfg.recstore_runtime_dir:
         raise RuntimeError(

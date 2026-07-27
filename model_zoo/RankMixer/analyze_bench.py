@@ -16,8 +16,8 @@ TIMING_COLS = [
     ("embed_pool_local_ms", "embedding pool/reshape"),
     ("dense_fwd_ms", "dense forward (RankMixer)"),
     ("backward_ms", "backward"),
-    ("optimizer_ms", "dense optimizer"),
-    ("sparse_update_ms", "sparse update + writeback"),
+    ("dense_optimizer_ms", "dense optimizer"),
+    ("sparse_optimizer_ms", "sparse optimizer + writeback"),
     ("batch_prepare_ms", "batch prepare"),
 ]
 STEP_TOTAL_HINT = "dense_fwd_ms"  # used only for sanity

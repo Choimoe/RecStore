@@ -412,22 +412,46 @@ public:
     const int shift         = static_cast<int>(sizeof(uint64_t) * 8) - tag_bits;
     const uint64_t key_mask = ~0ULL >> tag_bits;
     const size_t row_bytes = static_cast<size_t>(embedding_dim) * sizeof(float);
-    std::vector<float> row(embedding_dim);
+
+    thread_local std::vector<uint64_t> tagged_keys;
+    tagged_keys.resize(static_cast<size_t>(num_rows));
     for (int64_t r = 0; r < num_rows; ++r) {
-      const uint64_t key = (static_cast<uint64_t>(tag) << shift) |
-                           (keys[static_cast<size_t>(r)] & key_mask);
-      std::string current;
-      Get(key, current, tid);
-      if (current.size() == row_bytes) {
-        std::memcpy(row.data(), current.data(), row_bytes);
-      } else {
-        std::fill(row.begin(), row.end(), 0.0f);
-      }
+      tagged_keys[static_cast<size_t>(r)] =
+          (static_cast<uint64_t>(tag) << shift) |
+          (keys[static_cast<size_t>(r)] & key_mask);
+    }
+
+    thread_local std::vector<DirectFixedRow> rows;
+    if (!BatchGetDirectFixedRows(
+            base::ConstArray<uint64_t>(tagged_keys),
+            num_rows,
+            embedding_dim,
+            tid,
+            &rows)) {
+      return false;
+    }
+
+    std::vector<float> missing_row(static_cast<size_t>(embedding_dim));
+    for (int64_t r = 0; r < num_rows; ++r) {
+      const auto& row   = rows[static_cast<size_t>(r)];
       const float* grad = grads + r * embedding_dim;
-      for (int64_t c = 0; c < embedding_dim; ++c) {
-        row[c] -= learning_rate * grad[c];
+      if (row.missing) {
+        for (int64_t c = 0; c < embedding_dim; ++c) {
+          missing_row[static_cast<size_t>(c)] = -learning_rate * grad[c];
+        }
+        PutInternal(tagged_keys[static_cast<size_t>(r)],
+                    missing_row.data(),
+                    row_bytes,
+                    tid,
+                    false);
+        continue;
       }
-      PutInternal(key, row.data(), row_bytes, tid, false);
+
+      float* value = reinterpret_cast<float*>(const_cast<char*>(row.data));
+#pragma omp simd
+      for (int64_t c = 0; c < embedding_dim; ++c) {
+        value[c] -= learning_rate * grad[c];
+      }
     }
     return true;
   }

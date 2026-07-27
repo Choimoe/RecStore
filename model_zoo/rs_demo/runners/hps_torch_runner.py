@@ -36,11 +36,11 @@ from ..runtime.hybrid_dlrm import (
 )
 from ..runtime.report import finalize_torchrec_row, write_stage_csv
 from .base import BenchmarkRunner
+from ..runtime.timing import stage_timer
 from .torchrec_runner import (
     _barrier_for_step_alignment,
     _merge_rank_outputs,
     _pick_socket_ifname,
-    stage_timer,
 )
 
 
@@ -363,12 +363,12 @@ class HpsTorchRunner(BenchmarkRunner):
                     device=device,
                 )
 
-            with stage_timer(row, "optimizer_ms"):
+            with stage_timer(row, "dense_optimizer_ms"):
                 dense_optimizer.step()
                 dense_optimizer.zero_grad(set_to_none=True)
                 sync_device(torch, device)
 
-            row["sparse_update_ms"] = 0.0
+            row["sparse_optimizer_ms"] = 0.0
             row["collective_launch_ms"] = 0.0
             row["collective_wait_ms"] = 0.0
             row["step_total_ms"] = (time.perf_counter() - step_start) * 1e3

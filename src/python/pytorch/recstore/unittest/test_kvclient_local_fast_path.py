@@ -69,6 +69,10 @@ class TestKVClientLocalFastPath(unittest.TestCase):
         client._next_async_handle = 1
         client._pending_async_ops = {}
         client._gpu_cache_table_name = None
+        client._gpu_cache_enabled = False
+        client._gpu_cache_clear_count = 0
+        client._clear_gpu_cache_after_cpu_update = True
+        client._prefetch_table_name = None
         client._initialized = True
         return client
 
@@ -261,7 +265,6 @@ class TestKVClientLocalFastPath(unittest.TestCase):
         ) or True
         client.ops.disable_gpu_cache = lambda: client.ops.gpu_cache_calls.append(("disable",))
         client.ops.clear_gpu_cache = lambda: client.ops.gpu_cache_calls.append(("clear",))
-        client.ops.get_last_gpu_cache_profile = lambda: [1.0, 2.0, 3.0, 4.0, 5.0]
         client.ops.set_gpu_cache_lookup_bypass_enabled = (
             lambda enabled: client.ops.gpu_cache_calls.append(("bypass", bool(enabled)))
         )
@@ -278,8 +281,6 @@ class TestKVClientLocalFastPath(unittest.TestCase):
         client.reset_gpu_cache_bypass_state()
         client.clear_gpu_cache()
         client.disable_gpu_cache()
-        profile = client.get_last_gpu_cache_profile()
-
         self.assertEqual(
             client.ops.gpu_cache_calls,
             [
@@ -289,19 +290,6 @@ class TestKVClientLocalFastPath(unittest.TestCase):
                 ("clear",),
                 ("disable",),
             ],
-        )
-        self.assertEqual(
-            profile,
-            {
-                "gpu_cache_query_ms": 1.0,
-                "gpu_cache_backend_lookup_ms": 2.0,
-                "gpu_cache_fill_ms": 3.0,
-                "gpu_cache_update_ms": 4.0,
-                "gpu_cache_hit_count": 5.0,
-                "gpu_cache_invalidate_ms": 0.0,
-                "gpu_cache_request_count": 0.0,
-                "gpu_cache_miss_count": 0.0,
-            },
         )
 
     def test_gpu_cache_clears_when_local_lookup_switches_tables(self):
@@ -323,35 +311,34 @@ class TestKVClientLocalFastPath(unittest.TestCase):
 
     def test_gpu_cache_control_requires_ops_support(self):
         client = self._build_client()
-        client.ops.clear_gpu_cache = None
-        client.ops.prefill_gpu_cache = None
-        client.ops.set_gpu_cache_lookup_bypass_enabled = None
-        client.ops.is_gpu_cache_lookup_bypass_enabled = None
-        client.ops.is_gpu_cache_lookup_bypassed = None
-        client.ops.reset_gpu_cache_bypass_state = None
-
-        with self.assertRaisesRegex(RuntimeError, "enable_gpu_cache"):
+        # Missing / None ops surface as AttributeError / TypeError (no getattr wrapper).
+        with self.assertRaises(AttributeError):
             client.enable_gpu_cache(capacity=1024, embedding_dim=4)
-        with self.assertRaisesRegex(RuntimeError, "disable_gpu_cache"):
+        with self.assertRaises(AttributeError):
             client.disable_gpu_cache()
-        with self.assertRaisesRegex(RuntimeError, "clear_gpu_cache"):
+        client.ops.clear_gpu_cache = None
+        with self.assertRaises(TypeError):
             client.clear_gpu_cache()
-        with self.assertRaisesRegex(RuntimeError, "prefill_gpu_cache"):
+        client.ops.prefill_gpu_cache = None
+        with self.assertRaises(TypeError):
             client.prefill_gpu_cache(
                 "table_a",
                 torch.tensor([1], dtype=torch.int64),
                 torch.ones((1, 4), dtype=torch.float32),
             )
-        with self.assertRaisesRegex(RuntimeError, "set_gpu_cache_lookup_bypass_enabled"):
+        client.ops.set_gpu_cache_lookup_bypass_enabled = None
+        with self.assertRaises(TypeError):
             client.set_gpu_cache_lookup_bypass_enabled(False)
-        with self.assertRaisesRegex(RuntimeError, "is_gpu_cache_lookup_bypass_enabled"):
+        client.ops.is_gpu_cache_lookup_bypass_enabled = None
+        with self.assertRaises(TypeError):
             client.is_gpu_cache_lookup_bypass_enabled()
-        with self.assertRaisesRegex(RuntimeError, "is_gpu_cache_lookup_bypassed"):
+        client.ops.is_gpu_cache_lookup_bypassed = None
+        with self.assertRaises(TypeError):
             client.is_gpu_cache_lookup_bypassed()
-        with self.assertRaisesRegex(RuntimeError, "reset_gpu_cache_bypass_state"):
+        client.ops.reset_gpu_cache_bypass_state = None
+        with self.assertRaises(TypeError):
             client.reset_gpu_cache_bypass_state()
 
-        self.assertEqual(client.get_last_gpu_cache_profile(), {})
 
     def test_enable_gpu_cache_rejects_invalid_parameters_before_ops_call(self):
         client = self._build_client()

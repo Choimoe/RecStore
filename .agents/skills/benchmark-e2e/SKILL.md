@@ -261,8 +261,8 @@ mean and CV columns only when repeat >= 3.
 
 For any RecStore vs TorchRec comparison, include an E2E latency breakdown, not
 only throughput. At minimum report `batch_prepare_ms`, `input_pack_ms`,
-`embed_lookup_local_ms`, `dense_fwd_ms`, `backward_ms`, `optimizer_ms`,
-`sparse_update_ms`, and `step_total_ms` where available. This breakdown is
+`embed_lookup_local_ms`, `dense_fwd_ms`, `backward_ms`, `dense_optimizer_ms`,
+`sparse_optimizer_ms`, and `step_total_ms` where available. This breakdown is
 required even when the throughput ordering looks reasonable, because RecStore
 and TorchRec runner paths can differ in sparse update, ID deduplication, and
 batch preparation work.

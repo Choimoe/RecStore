@@ -80,6 +80,7 @@ def _validate_server_sparse_optimizer(
             f"weight_decay={actual['weight_decay']}"
         )
 
+
 class DistEmbedding:
     pass
 
@@ -170,36 +171,13 @@ def _process_generic_module_with_trace(mod: Any, lr: float, kv_client: Any):
     return handles
 
 
-def _can_use_single_node_distributed_fast_path(mod: Any) -> bool:
-    if not getattr(mod, "enable_single_node_distributed_fast_path", False):
-        return False
-    if getattr(mod, "single_node_distributed_mode", None) != "single_node":
-        return False
-    if getattr(mod, "single_node_owner_policy", None) != "hash_mod_world_size":
-        return False
-    if getattr(mod, "single_node_ps_backend", None) not in _LOCAL_FAST_PATH_BACKENDS:
-        return False
-    dist = getattr(torch, "distributed", None)
-    if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
-        return False
-    if not hasattr(dist, "get_world_size") or dist.get_world_size() <= 1:
-        return False
-    return True
-
-
 def _uses_shared_local_shm_single_table(mod: Any) -> bool:
-    if not getattr(mod, "_enable_fusion", False):
+    if mod.fast_path_mode == "off" or not mod._enable_fusion:
         return False
-    if getattr(mod, "_master_config", None) is None:
-        return False
-    module_kv_client = getattr(mod, "kv_client", None)
-    if module_kv_client is None:
-        return False
-    probe = getattr(module_kv_client, "is_shared_local_shm_table", None)
-    if not callable(probe):
+    if mod._master_config is None:
         return False
     try:
-        return bool(probe())
+        return bool(mod.kv_client.is_shared_local_shm_table())
     except Exception:
         return False
 
@@ -238,17 +216,10 @@ def _aggregate_ids_and_grads(
     return unique_ids, summed_grads
 
 
-def _merge_numeric_profile(dst: Dict[str, float], src: Dict[str, Any] | None) -> None:
-    if not isinstance(src, dict):
-        return
-    for key, value in src.items():
-        if isinstance(value, (int, float)):
-            dst[key] = dst.get(key, 0.0) + float(value)
-
-
 def _process_generic_module_with_trace_single_node_distributed(
     mod: Any,
     lr: float,
+    backend: str,
 ) -> List[Dict[str, Any]]:
     if not mod._trace:
         return []
@@ -260,36 +231,23 @@ def _process_generic_module_with_trace_single_node_distributed(
     module_kv_client = getattr(mod, "kv_client", None)
     if module_kv_client is None:
         raise RuntimeError("single-node distributed sparse update requires module kv_client")
-    current_backend = None
-    if hasattr(module_kv_client, "current_ps_backend"):
-        current_backend = module_kv_client.current_ps_backend()
-    target_backend = getattr(mod, "single_node_ps_backend", "local_shm")
+    # ponytail: legacy clients may lack current_ps_backend / activate_shard
+    current_backend = (
+        module_kv_client.current_ps_backend()
+        if hasattr(module_kv_client, "current_ps_backend")
+        else None
+    )
     if hasattr(module_kv_client, "activate_shard"):
         module_kv_client.activate_shard(rank)
-    if current_backend != target_backend:
-        if hasattr(module_kv_client, "set_ps_backend"):
-            module_kv_client.set_ps_backend(target_backend)
+    if current_backend != backend and hasattr(module_kv_client, "set_ps_backend"):
+        module_kv_client.set_ps_backend(backend)
 
-    profile = {
-        "trace_collect_ms": 0.0,
-        "trace_aggregate_ms": 0.0,
-        "exchange_ms": 0.0,
-        "owner_aggregate_ms": 0.0,
-        "local_update_ms": 0.0,
-    }
     payloads: List[Dict[str, Any]] = []
-    collect_start = time.perf_counter()
     traces_by_name = _collect_traces_by_name(mod)
-    profile["trace_collect_ms"] += (time.perf_counter() - collect_start) * 1e3
     for name, entries in traces_by_name.items():
-        aggregate_start = time.perf_counter()
         all_ids = torch.cat([ids for ids, _ in entries], dim=0)
         all_grads = torch.cat([grads for _, grads in entries], dim=0)
         unique_ids, summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
-        profile["trace_aggregate_ms"] += (time.perf_counter() - aggregate_start) * 1e3
-        if getattr(mod, "single_node_owner_policy", "hash_mod_world_size") != "hash_mod_world_size":
-            raise RuntimeError("single-node distributed sparse update currently requires hash_mod_world_size")
-
         normalized_ids = unique_ids.detach().to(dtype=torch.int64)
         normalized_grads = summed_grads.detach().to(dtype=torch.float32)
         destination_ranks = torch.remainder(normalized_ids, world_size)
@@ -312,18 +270,15 @@ def _process_generic_module_with_trace_single_node_distributed(
             fused_ids=normalized_ids,
             grads=normalized_grads,
         )
-        exchange_start = time.perf_counter()
         gathered_payloads = exchange_sparse_grads(
             local_payload,
             world_size=world_size,
             backend=exchange_backend,
         )
-        profile["exchange_ms"] += (time.perf_counter() - exchange_start) * 1e3
 
         owner_ids: List[torch.Tensor] = []
         owner_grads: List[torch.Tensor] = []
         target_device = None
-        aggregate_start = time.perf_counter()
         for payload in gathered_payloads:
             if target_device is None and payload.grads.numel() > 0:
                 target_device = payload.grads.device
@@ -356,8 +311,6 @@ def _process_generic_module_with_trace_single_node_distributed(
             owner_ids_tensor,
             owner_grads_tensor,
         )
-        profile["owner_aggregate_ms"] += (time.perf_counter() - aggregate_start) * 1e3
-        local_update_start = time.perf_counter()
         module_kv_client.local_update_flat(
             name=name,
             ids=owner_unique_ids,
@@ -372,13 +325,7 @@ def _process_generic_module_with_trace_single_node_distributed(
                 "lr": float(lr),
             }
         )
-        profile["local_update_ms"] += (time.perf_counter() - local_update_start) * 1e3
-        _merge_numeric_profile(
-            profile,
-            getattr(module_kv_client, "get_last_local_shm_update_profile", lambda: {})(),
-        )
 
-    setattr(mod, "_single_node_fast_path_profile", profile)
     return payloads
 
 
@@ -400,34 +347,24 @@ def _process_generic_module_with_trace_shared_local_shm_single_table(
     module_kv_client = getattr(mod, "kv_client", None)
     if module_kv_client is None:
         raise RuntimeError("shared local_shm single-table sparse update requires module kv_client")
-    current_backend = None
-    if hasattr(module_kv_client, "current_ps_backend"):
-        current_backend = module_kv_client.current_ps_backend()
-    target_backend = getattr(mod, "single_node_ps_backend", "local_shm")
+    # ponytail: legacy clients may lack current_ps_backend / activate_shard
+    current_backend = (
+        module_kv_client.current_ps_backend()
+        if hasattr(module_kv_client, "current_ps_backend")
+        else None
+    )
+    target_backend = "local_shm"
     if hasattr(module_kv_client, "activate_shard"):
         module_kv_client.activate_shard(rank)
-    if current_backend != target_backend:
-        if hasattr(module_kv_client, "set_ps_backend"):
-            module_kv_client.set_ps_backend(target_backend)
+    if current_backend != target_backend and hasattr(module_kv_client, "set_ps_backend"):
+        module_kv_client.set_ps_backend(target_backend)
 
-    profile = {
-        "trace_collect_ms": 0.0,
-        "trace_aggregate_ms": 0.0,
-        "exchange_ms": 0.0,
-        "owner_aggregate_ms": 0.0,
-        "local_update_ms": 0.0,
-    }
     payloads: List[Dict[str, Any]] = []
-    collect_start = time.perf_counter()
     traces_by_name = _collect_traces_by_name(mod)
-    profile["trace_collect_ms"] += (time.perf_counter() - collect_start) * 1e3
     for name, entries in traces_by_name.items():
-        aggregate_start = time.perf_counter()
         all_ids = torch.cat([ids for ids, _ in entries], dim=0)
         all_grads = torch.cat([grads for _, grads in entries], dim=0)
         local_unique_ids, local_summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
-        profile["trace_aggregate_ms"] += (time.perf_counter() - aggregate_start) * 1e3
-        local_update_start = time.perf_counter()
         module_kv_client.local_update_flat(
             name=name,
             ids=local_unique_ids,
@@ -442,13 +379,7 @@ def _process_generic_module_with_trace_shared_local_shm_single_table(
                 "lr": float(lr),
             }
         )
-        profile["local_update_ms"] += (time.perf_counter() - local_update_start) * 1e3
-        _merge_numeric_profile(
-            profile,
-            getattr(module_kv_client, "get_last_local_shm_update_profile", lambda: {})(),
-        )
 
-    setattr(mod, "_single_node_fast_path_profile", profile)
     return payloads
 
 # --- Core Classes ---
@@ -473,38 +404,6 @@ class SparseOptimizer:
         self.kv_client = _get_kv_client_if_needed(params)
         self._inflight_handles: List[Tuple[Any, int]] = []
         self._last_update_payloads: List[Dict[str, Any]] = []
-        self._last_step_profile: Dict[str, float] = {}
-        self.reset_perf_stats()
-
-    def _capture_module_fast_path_profile(self, mod: Any) -> None:
-        profile = getattr(mod, "_single_node_fast_path_profile", None)
-        if not isinstance(profile, dict):
-            return
-        normalized_profile = {
-            key: float(value) for key, value in profile.items()
-        }
-        self._last_step_profile = normalized_profile
-        self._perf_add("update_owner_exchange_ms", normalized_profile.get("exchange_ms", 0.0))
-        self._perf_add("update_trace_merge_ms", normalized_profile.get("owner_aggregate_ms", 0.0))
-        self._perf_add("update_local_apply_ms", normalized_profile.get("local_update_ms", 0.0))
-
-    def reset_perf_stats(self) -> None:
-        self._perf_stats: Dict[str, float] = {
-            "update_trace_merge_ms": 0.0,
-            "update_owner_exchange_ms": 0.0,
-            "update_local_apply_ms": 0.0,
-            "update_async_enqueue_ms": 0.0,
-            "update_flush_wait_ms": 0.0,
-        }
-
-    def _perf_add(self, key: str, delta_ms: float) -> None:
-        self._perf_stats[key] = self._perf_stats.get(key, 0.0) + float(delta_ms)
-
-    def consume_perf_stats(self, reset: bool = True) -> Dict[str, float]:
-        stats = dict(self._perf_stats)
-        if reset:
-            self.reset_perf_stats()
-        return stats
 
     def last_update_payloads(self) -> List[Dict[str, Any]]:
         return [
@@ -556,7 +455,6 @@ class SparseSGD(SparseOptimizer):
     def step(self):
         """Aggregates sparse gradients and submits them to the backend optimizer."""
         with torch.no_grad():
-            self._last_step_profile = {}
             self._last_update_payloads = []
             for group in self.param_groups:
                 lr = group["lr"]
@@ -568,18 +466,18 @@ class SparseSGD(SparseOptimizer):
                             self._last_update_payloads.extend(
                                 _process_generic_module_with_trace_shared_local_shm_single_table(mod, lr)
                             )
-                            self._capture_module_fast_path_profile(mod)
-                        elif _can_use_single_node_distributed_fast_path(mod):
-                            self._last_update_payloads.extend(
-                                _process_generic_module_with_trace_single_node_distributed(mod, lr)
-                            )
-                            self._capture_module_fast_path_profile(mod)
                         else:
-                            t_enqueue_start = perf_counter()
-                            self._inflight_handles.extend(
-                                _process_generic_module_with_trace(mod, lr, self.kv_client)
-                            )
-                            self._perf_add("update_async_enqueue_ms", (perf_counter() - t_enqueue_start) * 1e3)
+                            fast_path_backend = mod.resolve_fast_path_backend()
+                            if fast_path_backend is not None:
+                                self._last_update_payloads.extend(
+                                    _process_generic_module_with_trace_single_node_distributed(
+                                        mod, lr, fast_path_backend
+                                    )
+                                )
+                            else:
+                                self._inflight_handles.extend(
+                                    _process_generic_module_with_trace(mod, lr, self.kv_client)
+                                )
                     else:
                         print(f"Warning: Module type {type(mod).__name__} is not supported by SparseSGD optimizer.")
                     if hasattr(mod, 'reset_trace'):

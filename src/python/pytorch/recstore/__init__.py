@@ -1,12 +1,46 @@
+import os
+from pathlib import Path
+
+import torch
+
+
+def load_ops_library() -> None:
+    torch.ops.load_library(
+        os.environ.get(
+            "RECSTORE_OPS_LIBRARY",
+            str(Path(__file__).resolve().parents[4] / "build/lib/lib_recstore_ops.so"),
+        )
+    )
+
+
+if os.environ.get("RECSTORE_DEFER_OPS_LOAD") != "1":
+    load_ops_library()
+
 from .DistTensor import DistTensor
 from .DistEmb import DistEmbedding
-# from .controller_process import (
-#     KGCacheControllerWrapperBase,
-#     KGCacheControllerWrapperDummy,
-#     KGCacheControllerWrapper,
-#     TestPerfSampler,
-#     BasePerfSampler,
-#     GraphCachedSampler
-# )
+from .KVClient import RecStoreClient, get_kv_client
+from .optimizer import SparseSGD
+from . import bagpipe_cache
 
-# from .torch_op import *
+# Lazy: importing EmbeddingBag pulls recstore.KVClient and would re-enter this
+# package while torchrec_kv.EmbeddingBag is still initializing (circular import
+# when tests load via src.python.pytorch.recstore.* with PYTHONPATH set).
+def __getattr__(name: str):
+    if name == "RecStoreEmbeddingBagCollection":
+        from torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection as _cls
+
+        globals()[name] = _cls
+        return _cls
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "DistTensor",
+    "DistEmbedding",
+    "RecStoreClient",
+    "get_kv_client",
+    "SparseSGD",
+    "bagpipe_cache",
+    "RecStoreEmbeddingBagCollection",
+    "load_ops_library",
+]

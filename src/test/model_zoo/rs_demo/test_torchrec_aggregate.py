@@ -11,6 +11,10 @@ from model_zoo.rs_demo.runtime.torchrec_aggregate import (
 )
 
 
+def _by_metric(rows: list[dict[str, float | int | str]]) -> dict[str, dict[str, float | int | str]]:
+    return {str(row["metric"]): row for row in rows}
+
+
 class TestTorchRecAggregate(unittest.TestCase):
     def test_aggregate_main_csv_outputs_basic_stats(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -43,19 +47,22 @@ class TestTorchRecAggregate(unittest.TestCase):
                     }
                 )
 
-            agg = aggregate_torchrec_main_csv(path)
+            agg = _by_metric(aggregate_torchrec_main_csv(path))
 
-        self.assertEqual(agg["row_count"], 2)
-        self.assertEqual(agg["step_total_ms_mean"], 15.0)
-        self.assertEqual(agg["step_total_ms_p50"], 15.0)
-        self.assertEqual(agg["step_total_ms_p95"], 19.5)
-        self.assertEqual(agg["step_total_ms_max"], 20.0)
-        self.assertEqual(agg["embed_transport_ms_mean"], 2.5)
-        self.assertEqual(agg["embed_transport_ms_p50"], 2.5)
-        self.assertEqual(agg["embed_transport_ms_p95"], 3.4)
-        self.assertEqual(agg["embed_transport_ms_max"], 3.5)
+        self.assertEqual(agg["row_count"]["mean"], 2.0)
+        self.assertEqual(agg["row_count"]["p50"], 2.0)
+        self.assertEqual(agg["row_count"]["p95"], 2.0)
+        self.assertEqual(agg["row_count"]["max"], 2.0)
+        self.assertEqual(agg["step_total_ms"]["mean"], 15.0)
+        self.assertEqual(agg["step_total_ms"]["p50"], 15.0)
+        self.assertEqual(agg["step_total_ms"]["p95"], 19.5)
+        self.assertEqual(agg["step_total_ms"]["max"], 20.0)
+        self.assertEqual(agg["embed_transport_ms"]["mean"], 2.5)
+        self.assertEqual(agg["embed_transport_ms"]["p50"], 2.5)
+        self.assertEqual(agg["embed_transport_ms"]["p95"], 3.4)
+        self.assertEqual(agg["embed_transport_ms"]["max"], 3.5)
 
-    def test_aggregate_main_csv_includes_prefetch_counter_columns(self) -> None:
+    def test_aggregate_main_csv_includes_throughput_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "main.csv"
             with path.open("w", encoding="utf-8", newline="") as f:
@@ -63,67 +70,64 @@ class TestTorchRecAggregate(unittest.TestCase):
                     f,
                     fieldnames=[
                         "step_total_ms",
-                        "prefetch_depth",
-                        "prefetch_issued_batches",
-                        "prefetch_consumed_batches",
-                        "prefetch_pending_batches",
-                        "prefetch_ready_batches",
-                        "prefetch_total_ids",
-                        "prefetch_consumed_total_ids",
+                        "samples_per_sec",
+                        "batches_per_sec",
+                        "batch_raw_ids",
                     ],
                 )
                 writer.writeheader()
                 writer.writerow(
                     {
                         "step_total_ms": 10.0,
-                        "prefetch_depth": 2,
-                        "prefetch_issued_batches": 1,
-                        "prefetch_consumed_batches": 0,
-                        "prefetch_pending_batches": 1,
-                        "prefetch_ready_batches": 0,
-                        "prefetch_total_ids": 10,
-                        "prefetch_consumed_total_ids": 0,
+                        "samples_per_sec": 100.0,
+                        "batches_per_sec": 10.0,
+                        "batch_raw_ids": 20,
                     }
                 )
                 writer.writerow(
                     {
                         "step_total_ms": 20.0,
-                        "prefetch_depth": 2,
-                        "prefetch_issued_batches": 1,
-                        "prefetch_consumed_batches": 1,
-                        "prefetch_pending_batches": 2,
-                        "prefetch_ready_batches": 1,
-                        "prefetch_total_ids": 14,
-                        "prefetch_consumed_total_ids": 14,
+                        "samples_per_sec": 200.0,
+                        "batches_per_sec": 20.0,
+                        "batch_raw_ids": 40,
                     }
                 )
 
-            agg = aggregate_torchrec_main_csv(path)
+            agg = _by_metric(aggregate_torchrec_main_csv(path))
 
-        self.assertEqual(agg["prefetch_depth_mean"], 2.0)
-        self.assertEqual(agg["prefetch_issued_batches_mean"], 1.0)
-        self.assertEqual(agg["prefetch_consumed_batches_mean"], 0.5)
-        self.assertEqual(agg["prefetch_pending_batches_mean"], 1.5)
-        self.assertEqual(agg["prefetch_ready_batches_mean"], 0.5)
-        self.assertEqual(agg["prefetch_total_ids_mean"], 12.0)
-        self.assertEqual(agg["prefetch_consumed_total_ids_mean"], 7.0)
+        self.assertEqual(agg["samples_per_sec"]["mean"], 150.0)
+        self.assertEqual(agg["batches_per_sec"]["mean"], 15.0)
+        self.assertEqual(agg["batch_raw_ids"]["mean"], 30.0)
 
-    def test_write_aggregate_csv(self) -> None:
+    def test_aggregate_csv_to_wide_pivots_long_format(self) -> None:
+        from model_zoo.rs_demo.runtime.torchrec_aggregate import aggregate_csv_to_wide
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            out_path = Path(tmpdir) / "agg.csv"
+            path = Path(tmpdir) / "agg.csv"
             write_aggregate_csv(
-                out_path,
-                {
-                    "row_count": 1,
-                    "step_total_ms_mean": 10.0,
-                },
+                path,
+                [
+                    {
+                        "metric": "row_count",
+                        "mean": 2,
+                        "p50": 2,
+                        "p95": 2,
+                        "max": 2,
+                    },
+                    {
+                        "metric": "step_total_ms",
+                        "mean": 15.0,
+                        "p50": 15.0,
+                        "p95": 19.5,
+                        "max": 20.0,
+                    },
+                ],
             )
+            wide = aggregate_csv_to_wide(path)
 
-            with out_path.open("r", encoding="utf-8") as f:
-                row = next(csv.DictReader(f))
-
-        self.assertEqual(row["row_count"], "1")
-        self.assertEqual(row["step_total_ms_mean"], "10.0")
+        self.assertEqual(wide["row_count_mean"], "2.00")
+        self.assertEqual(wide["step_total_ms_p95"], "19.50")
+        self.assertEqual(wide["step_total_ms_max"], "20.00")
 
 
 if __name__ == "__main__":

@@ -22,9 +22,9 @@ from .config import configure_src_paths
 
 configure_src_paths()
 
-from python.pytorch.recstore.KVClient import get_kv_client
-from python.pytorch.recstore.optimizer import SparseSGD
-from python.pytorch.torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection
+from recstore.KVClient import get_kv_client
+from recstore.optimizer import SparseSGD
+from torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection
 
 
 BARRIER_TIMEOUT_SECONDS = 30
@@ -175,7 +175,7 @@ def worker(rank: int, world_size: int, args, barrier, table_name: str) -> None:
                     sys.exit(1)
 
         barrier.wait(timeout=BARRIER_TIMEOUT_SECONDS)
-    except mp.context.TimeoutError:
+    except TimeoutError:
         print(f"[Rank {rank}] Timed out waiting on multiprocessing barrier")
         traceback.print_exc()
         sys.exit(2)

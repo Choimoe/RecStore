@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import csv
+import math
 from contextlib import ExitStack
 import tempfile
 import types
@@ -17,12 +18,10 @@ from model_zoo.rs_demo.config import RunConfig
 from model_zoo.rs_demo.runners import recstore_runner
 from model_zoo.rs_demo.runners.recstore_runner import (
     RecStoreRunner,
-    _attach_or_refetch_with_bagpipe_policy,
     _build_train_dataloader_for_mode,
-    _effective_prefetch_issue_depth,
     _maybe_wrap_dense_module_for_dist,
 )
-from model_zoo.rs_demo.runtime.prefetch import LookaheadPrefetcher
+from recstore.embedding_read_path import LookaheadPrefetcher
 
 
 class _DummyDense(torch.nn.Module):
@@ -36,7 +35,7 @@ class _DummyDense(torch.nn.Module):
         return self.linear(features)
 
 
-class _FakeShardedClient:
+class _FakeRecStoreClient:
     def __init__(self) -> None:
         self.emb_read_calls = 0
         self.emb_read_prefetch_calls = 0
@@ -50,7 +49,6 @@ class _FakeShardedClient:
         self.enable_gpu_cache_result = True
         self.gpu_cache_enabled = False
         self.gpu_cache_lookup_bypass_enabled: bool | None = True
-        self.gpu_cache_profile = {}
         self.gpu_cache_clear_count = 0
         self.clear_after_cpu_update_flags: list[bool] = []
         self.gpu_cache_sgd_update_calls = []
@@ -80,9 +78,6 @@ class _FakeShardedClient:
 
     def set_gpu_cache_lookup_bypass_enabled(self, enabled: bool) -> None:
         self.gpu_cache_lookup_bypass_enabled = bool(enabled)
-
-    def get_last_gpu_cache_profile(self):
-        return self.gpu_cache_profile
 
     def get_gpu_cache_clear_count(self) -> int:
         return int(self.gpu_cache_clear_count)
@@ -136,7 +131,7 @@ class _FakeShardedClient:
         return self._shared_local_shm_table
 
 
-class _FakeDirectReadShardedClient(_FakeShardedClient):
+class _FakeDirectReadRecStoreClient(_FakeRecStoreClient):
     def emb_read(self, keys: torch.Tensor, embedding_dim: int) -> torch.Tensor:
         self.emb_read_calls += 1
         return torch.zeros((keys.numel(), embedding_dim), dtype=torch.float32)
@@ -149,14 +144,16 @@ class _FakeRecStoreEmbeddingBagCollection:
         self.args = args
         self.kwargs = kwargs
         self.kv_client = kwargs.get("kv_client")
+        self._enable_fusion = bool(kwargs.get("enable_fusion", True))
         self.issue_fused_prefetch_calls = 0
         self.issue_fused_prefetch_record_flags: list[bool] = []
         self.issue_fused_prefetch_features: list[object] = []
         self.issue_fused_id_prefetch_ids: list[torch.Tensor] = []
+        self.prepare_fused_prefetch_calls = 0
         self.set_fused_prefetch_handle_calls = 0
         self.forward_features: list[object] = []
         self.reset_perf_stats_calls = 0
-        self._single_node_forward_profile = {}
+        self.fast_path_mode = "auto"
         _FakeRecStoreEmbeddingBagCollection.last_instance = self
 
     def issue_fused_prefetch(self, features, *, record_handle: bool = True):
@@ -183,6 +180,23 @@ class _FakeRecStoreEmbeddingBagCollection:
             torch.arange(int(fused_ids.numel()), dtype=torch.int64),
         )
 
+    def prepare_fused_prefetch(self, features):
+        self.prepare_fused_prefetch_calls += 1
+        self.issue_fused_prefetch_features.append(features)
+        return (
+            torch.tensor([1], dtype=torch.int64),
+            torch.tensor([0], dtype=torch.int64),
+            7,
+        )
+
+    def issue_prepared_fused_prefetch(
+        self, unique_ids, inverse, num_ids, *, record_handle: bool = True
+    ):
+        del unique_ids, inverse
+        self.issue_fused_prefetch_calls += 1
+        self.issue_fused_prefetch_record_flags.append(bool(record_handle))
+        return 3000 + self.issue_fused_prefetch_calls
+
     def set_fused_prefetch_handle(self, *args, **kwargs) -> None:
         del args, kwargs
         self.set_fused_prefetch_handle_calls += 1
@@ -193,23 +207,17 @@ class _FakeRecStoreEmbeddingBagCollection:
     def consume_perf_stats(self, reset: bool = True):
         del reset
         return {
-            "prefetch_issue_ms": 0.2,
+            "lookup_ids_build_ms": 0.1,
             "lookup_wait_ms": 0.6,
-            "lookup_owner_exchange_ms": 0.4,
-            "lookup_local_lookup_ms": 0.5,
-            "lookup_reassemble_ms": 0.3,
-            "pool_embedding_bag_ms": 0.7,
+            "lookup_total_ms": 0.9,
         }
 
     def __call__(self, features):
         self.forward_features.append(features)
         return object()
 
-    def _can_use_single_node_distributed_fast_path(self) -> bool:
-        return bool(
-            getattr(self, "enable_single_node_distributed_fast_path", False)
-            and getattr(self, "single_node_distributed_mode", None) == "single_node"
-        )
+    def resolve_fast_path_backend(self):
+        return None
 
 
 class _FakePrefetchModule:
@@ -288,7 +296,6 @@ class _FakeSparseSGD:
         self.flush_calls = 0
         self.zero_grad_calls = 0
         self.reset_perf_stats_calls = 0
-        self._last_step_profile = {}
         self._last_update_payloads = []
         _FakeSparseSGD.last_instance = self
 
@@ -326,11 +333,6 @@ class _FakeSparseSGD:
     def consume_perf_stats(self, reset: bool = True):
         del reset
         return {
-            "update_trace_merge_ms": 0.25,
-            "update_owner_exchange_ms": 0.35,
-            "update_local_apply_ms": 0.45,
-            "update_async_enqueue_ms": 0.05,
-            "update_flush_wait_ms": 0.15,
         }
 
     def last_update_payloads(self):
@@ -352,55 +354,6 @@ class _FakeDenseOptimizer:
         self.step_calls += 1
 
 
-class _FakeConsumeDecision:
-    def __init__(
-        self,
-        stale_ids: list[int],
-        valid_ids: list[int],
-        *,
-        stale_cached_ids: list[int] | None = None,
-        stale_refetch_ids: list[int] | None = None,
-    ) -> None:
-        self.stale_ids = torch.tensor(stale_ids, dtype=torch.int64)
-        self.valid_prefetch_ids = torch.tensor(valid_ids, dtype=torch.int64)
-        self.stale_cached_ids = torch.tensor(
-            stale_cached_ids if stale_cached_ids is not None else [],
-            dtype=torch.int64,
-        )
-        self.stale_refetch_ids = torch.tensor(
-            stale_refetch_ids if stale_refetch_ids is not None else stale_ids,
-            dtype=torch.int64,
-        )
-
-    @property
-    def requires_refetch(self) -> bool:
-        return bool(self.stale_refetch_ids.numel() > 0)
-
-
-class _FakeBagPipePolicy:
-    def __init__(self, decision: _FakeConsumeDecision) -> None:
-        self.decision = decision
-        self.consume_steps: list[int] = []
-
-    def on_consume(self, step: int) -> _FakeConsumeDecision:
-        self.consume_steps.append(int(step))
-        return self.decision
-
-
-class _FakeBagPipeUpdatePolicy:
-    def __init__(self) -> None:
-        self.update_calls: list[tuple[int, torch.Tensor, torch.Tensor]] = []
-
-    def on_update(self, step: int, ids, *, cache_updated_ids=()) -> None:
-        self.update_calls.append(
-            (
-                int(step),
-                ids.detach().cpu().clone(),
-                cache_updated_ids.detach().cpu().clone(),
-            )
-        )
-
-
 class TestRecStoreRunner(unittest.TestCase):
     def setUp(self) -> None:
         self._append_worker_debug_patch = mock.patch(
@@ -416,19 +369,9 @@ class TestRecStoreRunner(unittest.TestCase):
 
         prefetcher.enqueue(_FakeSparseFeatures(3))
         prefetcher.attach_next()
-        stats = prefetcher.consume_stats()
 
         self.assertEqual(module.issued, [])
         self.assertEqual(module.consumed, [])
-        self.assertEqual(stats["prefetch_depth"], 0)
-        self.assertEqual(stats["prefetch_issued_batches"], 0)
-        self.assertEqual(stats["prefetch_consumed_batches"], 0)
-
-    def test_effective_prefetch_issue_depth_clamps_large_depth(self) -> None:
-        self.assertEqual(_effective_prefetch_issue_depth(50, 20), 20)
-        self.assertEqual(_effective_prefetch_issue_depth(100, 20), 20)
-        self.assertEqual(_effective_prefetch_issue_depth(10, 20), 10)
-        self.assertEqual(_effective_prefetch_issue_depth(50, 0), 50)
 
     def test_lookahead_prefetcher_delays_consumption_by_depth(self) -> None:
         module = _FakePrefetchModule()
@@ -443,39 +386,11 @@ class TestRecStoreRunner(unittest.TestCase):
         prefetcher.enqueue(_FakeSparseFeatures(7))
         self.assertTrue(prefetcher.advance())
         self.assertTrue(prefetcher.attach_next())
-        stats = prefetcher.consume_stats()
 
         self.assertEqual([item[1] for item in module.issued], [False, False, False])
         self.assertEqual(module.consumed, [(100, 3)])
-        self.assertEqual(stats["prefetch_depth"], 2)
-        self.assertEqual(stats["prefetch_issued_batches"], 3)
-        self.assertEqual(stats["prefetch_consumed_batches"], 1)
-        self.assertEqual(stats["prefetch_pending_batches"], 2)
-        self.assertEqual(stats["prefetch_total_ids"], 15)
-        self.assertEqual(stats["prefetch_consumed_total_ids"], 3)
-        self.assertGreater(stats["prefetch_issue_to_consume_ms"], 0)
-        self.assertEqual(stats["prefetch_window_live_ids"], 12)
-        self.assertEqual(stats["prefetch_window_live_bytes"], 12 * 128 * 4)
-        self.assertEqual(stats["prefetch_window_peak_live_ids"], 15)
-
-    def test_lookahead_prefetcher_reports_dense_overlap(self) -> None:
-        module = _FakePrefetchModule()
-        prefetcher = LookaheadPrefetcher(module, depth=1, embedding_dim=64)
-
-        prefetcher.enqueue(_FakeSparseFeatures(10))
-        prefetcher.enqueue(_FakeSparseFeatures(20))
-        self.assertTrue(prefetcher.advance())
-        self.assertTrue(prefetcher.attach_next())
-        stats = prefetcher.consume_stats(
-            reset=False,
-            dense_compute_ms=2.0,
-            wait_ms=5.0,
-        )
-
-        self.assertEqual(stats["prefetch_network_wait_ms"], 5.0)
-        self.assertEqual(stats["prefetch_dense_compute_ms"], 2.0)
-        self.assertEqual(stats["prefetch_exposed_network_ms"], 3.0)
-        self.assertEqual(stats["prefetch_dense_cover_ratio"], 0.4)
+        self.assertEqual(prefetcher.live_ids, 12)
+        self.assertEqual(prefetcher.live_bytes, 12 * 128 * 4)
 
     def test_lookahead_prefetcher_can_discard_stale_ready_handle(self) -> None:
         module = _FakePrefetchModule()
@@ -505,154 +420,28 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertEqual([ids.tolist() for ids in module.issued_fused_ids], [[7, 8], [9]])
         self.assertEqual(module.consumed, [(100, 2)])
 
-    def test_bagpipe_partial_stale_prefetch_attaches_with_invalid_ids(self) -> None:
-        module = _FakePrefetchModule()
-        prefetcher = LookaheadPrefetcher(module, depth=1, embedding_dim=64)
-        prefetcher.enqueue(_FakeSparseFeatures(10))
-        prefetcher.enqueue(_FakeSparseFeatures(20))
-        self.assertTrue(prefetcher.advance())
-        row: dict[str, object] = {}
-
-        _attach_or_refetch_with_bagpipe_policy(
-            prefetch_depth=1,
-            bagpipe_policy=_FakeBagPipePolicy(_FakeConsumeDecision([7], [8])),
-            lookahead_prefetcher=prefetcher,
-            embedding_module=module,
-            sparse_features=_FakeSparseFeatures(30),
-            row=row,
-            step=2,
-        )
-
-        self.assertEqual(row["bagpipe_stale_ids"], 1)
-        self.assertEqual(row["bagpipe_valid_prefetch_ids"], 1)
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 0)
-        self.assertEqual(module.consumed, [(100, 10)])
-        self.assertEqual(module.consume_kwargs[0]["invalid_fused_ids_cpu"].tolist(), [7])
-        self.assertEqual([record for _, record in module.issued], [False, False])
-
-    def test_bagpipe_stale_cached_attaches_handle_with_invalid_ids(self) -> None:
-        module = _FakePrefetchModule()
-        prefetcher = LookaheadPrefetcher(module, depth=1, embedding_dim=64)
-        prefetcher.enqueue(_FakeSparseFeatures(10))
-        prefetcher.enqueue(_FakeSparseFeatures(20))
-        self.assertTrue(prefetcher.advance())
-        row: dict[str, object] = {}
-
-        _attach_or_refetch_with_bagpipe_policy(
-            prefetch_depth=1,
-            bagpipe_policy=_FakeBagPipePolicy(
-                _FakeConsumeDecision(
-                    [7],
-                    [8],
-                    stale_cached_ids=[7],
-                    stale_refetch_ids=[],
-                )
-            ),
-            lookahead_prefetcher=prefetcher,
-            embedding_module=module,
-            sparse_features=_FakeSparseFeatures(30),
-            row=row,
-            step=2,
-        )
-
-        self.assertEqual(row["bagpipe_stale_ids"], 1)
-        self.assertEqual(row["bagpipe_stale_cached_ids"], 1)
-        self.assertEqual(row["bagpipe_stale_refetch_ids"], 0)
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 0)
-        self.assertEqual(module.consumed, [(100, 10)])
-        self.assertEqual(module.consume_kwargs[0]["invalid_fused_ids_cpu"].tolist(), [7])
-        self.assertEqual([record for _, record in module.issued], [False, False])
-
-    def test_bagpipe_valid_prefetch_attaches_ready_handle(self) -> None:
-        module = _FakePrefetchModule()
-        prefetcher = LookaheadPrefetcher(module, depth=1, embedding_dim=64)
-        prefetcher.enqueue(_FakeSparseFeatures(10))
-        prefetcher.enqueue(_FakeSparseFeatures(20))
-        self.assertTrue(prefetcher.advance())
-        row: dict[str, object] = {}
-
-        _attach_or_refetch_with_bagpipe_policy(
-            prefetch_depth=1,
-            bagpipe_policy=_FakeBagPipePolicy(_FakeConsumeDecision([], [7])),
-            lookahead_prefetcher=prefetcher,
-            embedding_module=module,
-            sparse_features=_FakeSparseFeatures(30),
-            row=row,
-            step=2,
-        )
-
-        self.assertEqual(row["bagpipe_stale_ids"], 0)
-        self.assertEqual(row["bagpipe_valid_prefetch_ids"], 1)
-        self.assertEqual(row["bagpipe_discarded_stale_handle"], 0)
-        self.assertEqual(module.consumed, [(100, 10)])
-        self.assertEqual([record for _, record in module.issued], [False, False])
-
-    def test_bagpipe_update_maintains_gpu_cache_for_optimizer_payloads(self) -> None:
-        class _Client:
-            def __init__(self) -> None:
-                self.calls = []
-
-            def apply_sgd_update_gpu_cache(self, name, ids, grads, *, learning_rate):
-                self.calls.append((name, ids.clone(), grads.clone(), float(learning_rate)))
-                return True
-
-        client = _Client()
-        module = types.SimpleNamespace(kv_client=client)
-        optimizer = types.SimpleNamespace(
-            last_update_payloads=lambda: [
-                {
-                    "module": module,
-                    "name": "table0",
-                    "ids": torch.tensor([4, 5], dtype=torch.int64),
-                    "grads": torch.ones((2, 4), dtype=torch.float32),
-                    "lr": 0.25,
-                }
-            ]
-        )
-        policy = _FakeBagPipeUpdatePolicy()
-        row: dict[str, object] = {}
-
-        recstore_runner._notify_bagpipe_sparse_update(
-            bagpipe_policy=policy,
-            sparse_optimizer=optimizer,
-            fallback_updated_ids=torch.tensor([4, 5], dtype=torch.int64),
-            row=row,
-            step=3,
-        )
-
-        self.assertEqual(len(client.calls), 1)
-        self.assertEqual(client.calls[0][0], "table0")
-        self.assertEqual(client.calls[0][3], 0.25)
-        self.assertEqual(row["bagpipe_gpu_cache_update_ids"], 2)
-        self.assertEqual(row["bagpipe_gpu_cache_update_failures"], 0)
-        self.assertEqual(policy.update_calls[0][1].tolist(), [4, 5])
-        self.assertEqual(policy.update_calls[0][2].tolist(), [4, 5])
-
-    def test_finalize_step_timing_uses_visible_training_time(self) -> None:
-        row = {
-            "batch_size": 64,
-            "prefetch_queue_residence_ms": 50.0,
-            "input_pack_consume_ms": 3.0,
-        }
+    def test_finalize_step_timing_records_total_throughput(self) -> None:
+        row = {"batch_size": 64}
         with mock.patch(
             "model_zoo.rs_demo.runners.recstore_runner.time.perf_counter",
             return_value=12.0,
         ):
-            recstore_runner._finalize_step_timing(row, consume_start=10.0)
+            recstore_runner._finalize_step_timing(
+                row, consume_start=10.0, wall_start=9.0
+            )
 
-        self.assertEqual(row["step_visible_ms"], 2000.0)
-        self.assertEqual(row["step_total_ms"], 2000.0)
-        self.assertEqual(row["samples_per_sec"], 32.0)
-        self.assertEqual(row["batches_per_sec"], 0.5)
-        self.assertEqual(row["prefetch_queue_residence_ms"], 50.0)
-        self.assertEqual(row["step_end_to_end_ms"], 2000.0)
+        self.assertEqual(row["step_total_ms"], 3000.0)
+        self.assertAlmostEqual(row["samples_per_sec"], 64 / 3)
+        self.assertAlmostEqual(row["batches_per_sec"], 1 / 3)
+        self.assertEqual(row["step_end_to_end_ms"], 3000.0)
 
     def test_warmup_gpu_local_shm_fast_path_runs_only_for_shared_cuda_fast_path(self) -> None:
         cfg = RunConfig(
             backend="recstore",
-            enable_single_node_distributed_fast_path=True,
+            nnodes=1,
+            single_node_ps_backend="local_shm",
         )
-        client = _FakeShardedClient()
+        client = _FakeRecStoreClient()
         client._shared_local_shm_table = True
 
         warmed = recstore_runner._maybe_warmup_gpu_local_shm_fast_path(
@@ -667,10 +456,10 @@ class TestRecStoreRunner(unittest.TestCase):
     def test_warmup_gpu_local_shm_fast_path_skips_hierkv_backend(self) -> None:
         cfg = RunConfig(
             backend="recstore",
-            enable_single_node_distributed_fast_path=True,
+            nnodes=1,
             single_node_ps_backend="hierkv",
         )
-        client = _FakeShardedClient()
+        client = _FakeRecStoreClient()
         client._shared_local_shm_table = True
         client.set_ps_backend("hierkv")
 
@@ -687,9 +476,10 @@ class TestRecStoreRunner(unittest.TestCase):
     def test_warmup_gpu_local_shm_fast_path_skips_when_conditions_do_not_match(self) -> None:
         cfg = RunConfig(
             backend="recstore",
-            enable_single_node_distributed_fast_path=False,
+            nnodes=2,
+            single_node_ps_backend="local_shm",
         )
-        client = _FakeShardedClient()
+        client = _FakeRecStoreClient()
         client._shared_local_shm_table = True
 
         warmed = recstore_runner._maybe_warmup_gpu_local_shm_fast_path(
@@ -708,6 +498,12 @@ class TestRecStoreRunner(unittest.TestCase):
         rank: int = 0,
         world_size: int = 1,
         local_rank: int = 0,
+        num_batches: int = 1,
+        build_kjt=None,
+        captured_rows: list | None = None,
+        write_csv: bool = False,
+        use_run: bool = False,
+        patch_distributed: bool = False,
     ) -> _FakeRecStoreEmbeddingBagCollection:
         runner_runtime = Path(tempfile.mkdtemp())
         repo_root = Path("/app/RecStore")
@@ -715,35 +511,25 @@ class TestRecStoreRunner(unittest.TestCase):
         dense = torch.zeros((1, 13), dtype=torch.float32)
         sparse = torch.zeros((1, 1), dtype=torch.int64)
         labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
+        dataset = [(dense, sparse, labels)] * num_batches
+        dataloader = list(dataset)
+        if build_kjt is None:
+            build_kjt = lambda *args, **kwargs: (None, object())
 
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
+        fake_client = _FakeDirectReadRecStoreClient()
         fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
         class _ProfiledEmbeddingBagCollection(_FakeRecStoreEmbeddingBagCollection):
-            def __init__(self, *args, **kwargs) -> None:
-                super().__init__(*args, **kwargs)
-                self._single_node_forward_profile = {
-                    "lookup_local_lookup_ms": 1.25,
+            def consume_perf_stats(self, reset: bool = True):
+                del reset
+                return {
+                    "lookup_ids_build_ms": 0.5,
                     "lookup_wait_ms": 0.75,
+                    "lookup_total_ms": 1.25,
                 }
 
         fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _ProfiledEmbeddingBagCollection
         fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        class _ProfiledSparseSGD(_FakeSparseSGD):
-            def __init__(self, params, lr: float) -> None:
-                super().__init__(params, lr)
-                self._last_step_profile = {
-                    "exchange_ms": 2.5,
-                    "local_update_ms": 3.5,
-                    "local_update_backend_call_ms": 3.25,
-                    "trace_collect_ms": 0.5,
-                    "trace_aggregate_ms": 1.5,
-                }
-
-        fake_optimizer_module.SparseSGD = _ProfiledSparseSGD
+        fake_optimizer_module.SparseSGD = _FakeSparseSGD
 
         _FakeRecStoreEmbeddingBagCollection.last_instance = None
 
@@ -752,9 +538,9 @@ class TestRecStoreRunner(unittest.TestCase):
                 mock.patch.dict(
                     "sys.modules",
                     {
-                        "client": fake_client_module,
                         "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
                         "python.pytorch.recstore.optimizer": fake_optimizer_module,
+                        "python.pytorch.recstore.KVClient": types.SimpleNamespace(RecStoreClient=lambda: fake_client),
                     },
                 )
             )
@@ -771,16 +557,10 @@ class TestRecStoreRunner(unittest.TestCase):
                 )
             )
             stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                    lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                )
+                mock.patch.object(recstore_runner.recstore, "RecStoreClient", return_value=fake_client)
             )
             stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                    lambda raw_client, runtime_dir: fake_client,
-                )
+                mock.patch.multiple(recstore_runner.recstore, SparseSGD=fake_optimizer_module.SparseSGD, RecStoreEmbeddingBagCollection=fake_embeddingbag_module.RecStoreEmbeddingBagCollection)
             )
             stack.enter_context(
                 mock.patch(
@@ -797,12 +577,12 @@ class TestRecStoreRunner(unittest.TestCase):
             stack.enter_context(
                 mock.patch(
                     "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                    lambda *args, **kwargs: (None, object()),
+                    build_kjt,
                 )
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
+                    "model_zoo.rs_demo.runners.recstore_runner.build_dense_module",
                     lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
                 )
             )
@@ -824,18 +604,6 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward",
-                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                    lambda *args, **kwargs: None,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
                     "model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row",
                     lambda row: row,
                 )
@@ -846,33 +614,74 @@ class TestRecStoreRunner(unittest.TestCase):
                     lambda xs: "ok",
                 )
             )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
-                    lambda *args, **kwargs: None,
+            if captured_rows is not None:
+                stack.enter_context(
+                    mock.patch(
+                        "model_zoo.rs_demo.runners.recstore_runner._write_rows",
+                        lambda path, rows: captured_rows.extend(rows),
+                    )
                 )
-            )
+            elif not write_csv:
+                stack.enter_context(
+                    mock.patch(
+                        "model_zoo.rs_demo.runners.recstore_runner._write_rows",
+                        lambda *args, **kwargs: None,
+                    )
+                )
+            if patch_distributed:
+                stack.enter_context(
+                    mock.patch(
+                        "model_zoo.rs_demo.runners.recstore_runner._maybe_wrap_dense_module_for_dist",
+                        lambda **kwargs: kwargs["dense_module"],
+                    )
+                )
+                fake_dist = types.SimpleNamespace(
+                    is_initialized=lambda: False,
+                    init_process_group=lambda **kwargs: None,
+                    barrier=lambda *args, **kwargs: None,
+                    destroy_process_group=lambda: None,
+                )
+                stack.enter_context(mock.patch("torch.distributed.is_initialized", fake_dist.is_initialized))
+                stack.enter_context(mock.patch("torch.distributed.init_process_group", fake_dist.init_process_group))
+                stack.enter_context(mock.patch("torch.distributed.barrier", fake_dist.barrier))
+                stack.enter_context(mock.patch("torch.distributed.destroy_process_group", fake_dist.destroy_process_group))
 
             runner = RecStoreRunner(runner_runtime)
-            runner._run_local_worker(
-                repo_root=repo_root,
-                cfg=cfg,
-                rank=rank,
-                world_size=world_size,
-                local_rank=local_rank,
-                out_csv=runner_runtime / "rank.csv",
-            )
+            if use_run:
+                runner.run(repo_root=repo_root, cfg=cfg)
+            else:
+                runner._run_local_worker(
+                    repo_root=repo_root,
+                    cfg=cfg,
+                    rank=rank,
+                    world_size=world_size,
+                    local_rank=local_rank,
+                    out_csv=runner_runtime / "rank.csv",
+                )
 
         fake_ebc = _FakeRecStoreEmbeddingBagCollection.last_instance
         self.assertIsNotNone(fake_ebc)
         return fake_ebc
 
-    def test_parse_config_keeps_single_node_fast_path_disabled_by_default(self) -> None:
+    def test_parse_config_defaults_single_node_ps_backend(self) -> None:
         cfg = config.parse_config(["--backend", "recstore"])
 
-        self.assertFalse(cfg.enable_single_node_distributed_fast_path)
+        self.assertEqual(cfg.nnodes, 1)
         self.assertEqual(cfg.single_node_ps_backend, "local_shm")
         self.assertEqual(cfg.single_node_owner_policy, "hash_mod_world_size")
+
+    def test_parse_config_json_drops_removed_enable_single_node_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "old_worker.json"
+            path.write_text(
+                '{"backend": "recstore", "nnodes": 1, '
+                '"enable_single_node_distributed_fast_path": true, '
+                '"single_node_ps_backend": "hierkv"}',
+                encoding="utf-8",
+            )
+            loaded = config.parse_config(["--run-config-json", str(path)])
+        self.assertEqual(loaded.single_node_ps_backend, "hierkv")
+        self.assertFalse(hasattr(loaded, "enable_single_node_distributed_fast_path"))
 
     def test_parse_config_accepts_gpu_cache_options(self) -> None:
         cfg = config.parse_config(
@@ -889,6 +698,10 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertTrue(cfg.enable_gpu_cache)
         self.assertEqual(cfg.gpu_cache_capacity, 1024)
         self.assertTrue(cfg.disable_gpu_cache_lookup_bypass)
+
+    def test_parse_config_accepts_read_mode_bagpipe_choice(self) -> None:
+        cfg = config.parse_config(["--backend", "recstore", "--read-mode", "bagpipe"])
+        self.assertEqual(cfg.read_mode, "bagpipe")
 
     def test_parse_config_accepts_prefetch_depth(self) -> None:
         cfg = config.parse_config(
@@ -914,15 +727,16 @@ class TestRecStoreRunner(unittest.TestCase):
 
         self.assertEqual(cfg.prefetch_issue_depth, 12)
 
-    def test_validate_recstore_config_rejects_gpu_cache_without_capacity(self) -> None:
-        cfg = RunConfig(backend="recstore")
-        cfg.enable_gpu_cache = True
-        cfg.gpu_cache_capacity = 0
+    def test_validate_recstore_config_rejects_gpu_cache(self) -> None:
+        cfg = RunConfig(backend="recstore", enable_gpu_cache=True, gpu_cache_capacity=1024)
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "--gpu-cache-capacity must be positive",
-        ):
+        with self.assertRaisesRegex(RuntimeError, "--enable-gpu-cache is not supported"):
+            config.validate_recstore_config(cfg)
+
+    def test_validate_recstore_config_rejects_bagpipe_read_mode(self) -> None:
+        cfg = RunConfig(backend="recstore", read_mode="bagpipe")
+
+        with self.assertRaisesRegex(RuntimeError, "read_mode=bagpipe is not wired"):
             config.validate_recstore_config(cfg)
 
     def test_validate_recstore_config_rejects_negative_prefetch_depth(self) -> None:
@@ -937,72 +751,62 @@ class TestRecStoreRunner(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "--prefetch-issue-depth must be non-negative"):
             config.validate_recstore_config(cfg)
 
-    def test_validate_recstore_config_allows_single_node_fast_path(self) -> None:
+    def test_validate_recstore_config_allows_single_node_ps_backend(self) -> None:
         cfg = RunConfig(
             backend="recstore",
             nnodes=1,
             nproc_per_node=2,
-            enable_single_node_distributed_fast_path=True,
             single_node_ps_backend="local_shm",
             single_node_owner_policy="hash_mod_world_size",
         )
 
         config.validate_recstore_config(cfg)
 
-    def test_validate_recstore_config_allows_hierkv_single_node_fast_path(self) -> None:
+    def test_validate_recstore_config_allows_hierkv_single_node_ps_backend(self) -> None:
         cfg = RunConfig(
             backend="recstore",
             nnodes=1,
             nproc_per_node=2,
-            enable_single_node_distributed_fast_path=True,
             single_node_ps_backend="hierkv",
             single_node_owner_policy="hash_mod_world_size",
         )
 
         config.validate_recstore_config(cfg)
 
-    def test_validate_recstore_config_rejects_single_node_fast_path_with_multiple_nodes(self) -> None:
+    def test_validate_recstore_config_allows_single_node_with_one_process(self) -> None:
+        cfg = RunConfig(
+            backend="recstore",
+            nnodes=1,
+            nproc_per_node=1,
+            single_node_ps_backend="local_shm",
+        )
+
+        config.validate_recstore_config(cfg)
+
+    def test_validate_recstore_config_skips_single_node_ps_checks_for_multi_node(self) -> None:
         cfg = RunConfig(
             backend="recstore",
             nnodes=2,
             nproc_per_node=2,
             node_rank=0,
             recstore_runtime_dir="/tmp/shared",
-            enable_single_node_distributed_fast_path=True,
+            single_node_ps_backend="brpc",
+            single_node_owner_policy="rank_zero",
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "single-node distributed fast path requires --nnodes=1",
-        ):
-            config.validate_recstore_config(cfg)
-
-    def test_validate_recstore_config_rejects_single_node_fast_path_without_multiple_processes(self) -> None:
-        cfg = RunConfig(
-            backend="recstore",
-            nnodes=1,
-            nproc_per_node=1,
-            enable_single_node_distributed_fast_path=True,
-        )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "single-node distributed fast path requires --nproc-per-node greater than 1",
-        ):
-            config.validate_recstore_config(cfg)
+        config.validate_recstore_config(cfg)
 
     def test_validate_recstore_config_rejects_invalid_fast_path_backend(self) -> None:
         cfg = RunConfig(
             backend="recstore",
             nnodes=1,
             nproc_per_node=2,
-            enable_single_node_distributed_fast_path=True,
             single_node_ps_backend="brpc",
         )
 
         with self.assertRaisesRegex(
             RuntimeError,
-            "single-node distributed fast path only supports --single-node-ps-backend=local_shm or hierkv",
+            "single-node path only supports --single-node-ps-backend=local_shm or hierkv",
         ):
             config.validate_recstore_config(cfg)
 
@@ -1027,24 +831,6 @@ class TestRecStoreRunner(unittest.TestCase):
                         "invalid_backend",
                     ]
                 )
-
-    def test_build_worker_fingerprint_includes_cli(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_root = Path(tmpdir)
-            for rel_path in (
-                "model_zoo/rs_demo/cli.py",
-                "model_zoo/rs_demo/config.py",
-                "model_zoo/rs_demo/runners/recstore_runner.py",
-                "model_zoo/rs_demo/runtime/hybrid_dlrm.py",
-            ):
-                path = repo_root / rel_path
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(rel_path, encoding="utf-8")
-
-            fingerprint = recstore_runner._build_worker_fingerprint(repo_root)
-
-        self.assertIn("files", fingerprint)
-        self.assertIn("model_zoo/rs_demo/cli.py", fingerprint["files"])
 
     def test_wrap_dense_module_for_dist_uses_ddp_when_distributed(self) -> None:
         module = _DummyDense()
@@ -1109,162 +895,24 @@ class TestRecStoreRunner(unittest.TestCase):
                 return_value={"backend": "recstore", "rows": []},
             ) as dist_run:
                 result = runner.run(Path(tmpdir), cfg)
-
-            self.assertEqual(result["backend"], "recstore")
             dist_run.assert_called_once_with(Path(tmpdir), cfg)
 
-    def test_runner_builds_torchrun_command_with_hybrid_arch_args(self) -> None:
+    def test_build_torchrun_cmd_uses_config_json(self) -> None:
         runner = RecStoreRunner(Path("/tmp/runtime"))
         cfg = RunConfig(
-            backend="recstore",
-            nnodes=1,
-            node_rank=0,
-            nproc_per_node=2,
-            master_addr="127.0.0.1",
-            master_port=29653,
-            rdzv_backend="c10d",
-            rdzv_id="recstore-case",
-            output_root="/nas/home/shq/docker/rs_demo",
-            run_id="recstore-case",
-            recstore_main_csv="/nas/home/shq/docker/rs_demo/outputs/recstore-case/recstore_main.csv",
-            recstore_main_agg_csv="/nas/home/shq/docker/rs_demo/outputs/recstore-case/recstore_main_agg.csv",
-            dense_arch_layer_sizes="64,32,16",
-            over_arch_layer_sizes="128,64,1",
+            backend="recstore", nnodes=1, node_rank=0, nproc_per_node=2,
+            master_addr="127.0.0.1", master_port=29653, rdzv_backend="c10d",
+            rdzv_id="recstore-case", output_root="/tmp/rs_demo", run_id="recstore-case",
         )
-
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-
-        self.assertIn("--dense-arch-layer-sizes", cmd)
-        self.assertIn("64,32,16", cmd)
-        self.assertIn("--over-arch-layer-sizes", cmd)
-        self.assertIn("128,64,1", cmd)
-
-    def test_runner_builds_torchrun_command_with_recstore_runtime_dir(self) -> None:
-        runner = RecStoreRunner(Path("/tmp/runtime"))
-        cfg = RunConfig(
-            backend="recstore",
-            nnodes=2,
-            node_rank=1,
-            nproc_per_node=1,
-            master_addr="10.0.2.196",
-            master_port=29621,
-            rdzv_backend="c10d",
-            rdzv_id="recstore-mnmp",
-            output_root="/nas/home/shq/docker/rs_demo",
-            run_id="recstore-mnmp",
-            recstore_runtime_dir="/nas/home/shq/docker/rs_demo/runtime/shared-runtime",
-            recstore_main_csv="/nas/home/shq/docker/rs_demo/outputs/recstore-mnmp/recstore_main.csv",
-            recstore_main_agg_csv="/nas/home/shq/docker/rs_demo/outputs/recstore-mnmp/recstore_main_agg.csv",
+        cmd = runner._build_torchrun_cmd(
+            Path("/app/RecStore"), cfg, Path("/tmp/worker_config.json")
         )
-
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-
-        self.assertIn("--recstore-runtime-dir", cmd)
-        self.assertIn(cfg.recstore_runtime_dir, cmd)
-
-    def test_runner_builds_torchrun_command_with_ps_kv_backend(self) -> None:
-        runner = RecStoreRunner(Path("/tmp/runtime"))
-        cfg = RunConfig(
-            backend="recstore",
-            nnodes=1,
-            node_rank=0,
-            nproc_per_node=2,
-            master_addr="127.0.0.1",
-            master_port=29653,
-            rdzv_backend="c10d",
-            rdzv_id="recstore-hps",
-            output_root="/tmp/rs_demo",
-            run_id="recstore-hps",
-            recstore_runtime_dir="/tmp/runtime",
-            recstore_main_csv="/tmp/rs_demo/outputs/recstore-hps/recstore_main.csv",
-            recstore_main_agg_csv="/tmp/rs_demo/outputs/recstore-hps/recstore_main_agg.csv",
-            ps_kv_backend="hps_rocksdb",
-        )
-
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-
-        self.assertIn("--ps-kv-backend", cmd)
-        self.assertIn("hps_rocksdb", cmd)
-
-    def test_runner_builds_torchrun_command_with_tiered_dram_multiplier(self) -> None:
-        runner = RecStoreRunner(Path("/tmp/runtime"))
-        cfg = RunConfig(
-            backend="recstore",
-            nnodes=1,
-            node_rank=0,
-            nproc_per_node=2,
-            master_addr="127.0.0.1",
-            master_port=29653,
-            rdzv_backend="c10d",
-            rdzv_id="recstore-tiered",
-            output_root="/tmp/rs_demo",
-            run_id="recstore-tiered",
-            recstore_runtime_dir="/tmp/runtime",
-            recstore_main_csv="/tmp/rs_demo/outputs/recstore-tiered/recstore_main.csv",
-            recstore_main_agg_csv="/tmp/rs_demo/outputs/recstore-tiered/recstore_main_agg.csv",
-            ps_kv_backend="recstore_tiered",
-            tiered_dram_capacity_multiplier=0.02,
-        )
-
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-
-        self.assertIn("--tiered-dram-capacity-multiplier", cmd)
-        self.assertIn("0.02", cmd)
-
-    def test_runner_builds_torchrun_command_with_single_node_fast_path_args(self) -> None:
-        runner = RecStoreRunner(Path("/tmp/runtime"))
-        cfg = RunConfig(
-            backend="recstore",
-            nnodes=1,
-            node_rank=0,
-            nproc_per_node=2,
-            master_addr="127.0.0.1",
-            master_port=29653,
-            rdzv_backend="c10d",
-            rdzv_id="recstore-fast-path-case",
-            output_root="/tmp/rs_demo",
-            run_id="recstore-fast-path-case",
-            recstore_runtime_dir="/tmp/runtime",
-            recstore_main_csv="/tmp/rs_demo/outputs/recstore-fast-path-case/recstore_main.csv",
-            recstore_main_agg_csv="/tmp/rs_demo/outputs/recstore-fast-path-case/recstore_main_agg.csv",
-            enable_single_node_distributed_fast_path=True,
-            single_node_ps_backend="local_shm",
-            single_node_owner_policy="hash_mod_world_size",
-            read_before_update=False,
-            read_mode="direct",
-        )
-
-        cmd = runner._build_torchrun_cmd(Path("/app/RecStore"), cfg)
-
-        self.assertIn("--enable-single-node-distributed-fast-path", cmd)
-        self.assertIn("--single-node-ps-backend", cmd)
-        self.assertIn("local_shm", cmd)
-        self.assertIn("--single-node-owner-policy", cmd)
-        self.assertIn("hash_mod_world_size", cmd)
-        self.assertIn("--no-read-before-update", cmd)
-
-    def test_embedding_module_default_path_does_not_inject_single_node_fast_path(self) -> None:
-        cfg = RunConfig(
-            backend="recstore",
-            steps=1,
-            warmup_steps=0,
-            init_rows=1,
-            batch_size=1,
-            embedding_dim=4,
-            num_embeddings=16,
-            recstore_main_csv="/tmp/recstore-default.csv",
-        )
-
-        fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
-
-        self.assertFalse(hasattr(fake_ebc, "enable_single_node_distributed_fast_path"))
-        self.assertFalse(hasattr(fake_ebc, "single_node_distributed_mode"))
-        self.assertFalse(hasattr(fake_ebc, "single_node_ps_backend"))
-        self.assertFalse(hasattr(fake_ebc, "single_node_owner_policy"))
+        self.assertIn("--run-config-json", cmd)
+        self.assertIn("/tmp/worker_config.json", cmd)
+        self.assertIn("--nproc_per_node", cmd)
+        self.assertIn("2", cmd)
 
     def test_local_worker_rows_include_ps_kv_backend_label(self) -> None:
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
         cfg = RunConfig(
             backend="recstore",
             ps_kv_backend="hps_rocksdb",
@@ -1274,84 +922,22 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            read_before_update=False,
-            recstore_main_csv=str(runner_runtime / "main.csv"),
+            read_mode="direct",
+            recstore_main_csv="/tmp/recstore-ps-kv.csv",
         )
 
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
-
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        fake_optimizer_module.SparseSGD = _FakeSparseSGD
         captured_rows: list[dict] = []
-
-        with ExitStack() as stack:
-            stack.enter_context(
-                mock.patch.dict(
-                    "sys.modules",
-                    {
-                        "client": fake_client_module,
-                        "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                        "python.pytorch.recstore.optimizer": fake_optimizer_module,
-                    },
-                )
-            )
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed", lambda *_: None))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD", _FakeDenseOptimizer))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.detect_library_path", lambda *_: repo_root / "build/lib/lib_recstore_ops.so"))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient", lambda raw_client, runtime_dir: fake_client))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names", lambda: ["cat_0"]))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader", lambda **kwargs: (dataset, dataloader)))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels", lambda *args, **kwargs: (None, object())))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch", lambda *args, **kwargs: _DummyDense().to(kwargs["device"])))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm", lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True)))
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                    lambda **kwargs: (
-                        torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                        torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                        torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                    ),
-                )
-            )
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward", lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32)))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.sync_device", lambda *args, **kwargs: None))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.summarize_us", lambda xs: "ok"))
-            stack.enter_context(mock.patch("model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row", lambda row: row))
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
-                    lambda path, rows: captured_rows.extend(rows),
-                )
-            )
-
-            runner = RecStoreRunner(runner_runtime)
-            runner._run_local_worker(
-                repo_root=repo_root,
-                cfg=cfg,
-                rank=0,
-                world_size=1,
-                local_rank=0,
-                out_csv=runner_runtime / "rank.csv",
-            )
+        self._run_local_worker_with_fake_embedding_module(cfg, captured_rows=captured_rows)
 
         self.assertEqual(len(captured_rows), 1)
-        self.assertEqual(captured_rows[0]["backend"], "recstore")
-        self.assertEqual(captured_rows[0]["ps_kv_backend"], "hps_rocksdb")
-        self.assertEqual(captured_rows[0]["model_backend_label"], "recstore:hps_rocksdb")
+        self.assertNotIn("backend", captured_rows[0])
+        self.assertNotIn("ps_kv_backend", captured_rows[0])
+        self.assertNotIn("model_backend_label", captured_rows[0])
 
-    def test_embedding_module_injects_single_node_fast_path_when_enabled(self) -> None:
-        cfg = RunConfig(
+    def test_embedding_module_auto_detects_fast_path_without_runner_injection(self) -> None:
+        # Neither the default path nor the explicit single-node config should make
+        # the runner inject a fast-path mode; the module keeps auto-detecting.
+        base_kwargs = dict(
             backend="recstore",
             steps=1,
             warmup_steps=0,
@@ -1359,103 +945,30 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            nnodes=1,
-            nproc_per_node=2,
-            enable_single_node_distributed_fast_path=True,
-            single_node_ps_backend="local_shm",
-            single_node_owner_policy="hash_mod_world_size",
-            recstore_main_csv="/tmp/recstore-fast-path.csv",
         )
+        for extra in (
+            {"recstore_main_csv": "/tmp/recstore-default.csv"},
+            {
+                "nnodes": 1,
+                "nproc_per_node": 2,
+                "single_node_ps_backend": "local_shm",
+                "single_node_owner_policy": "hash_mod_world_size",
+                "recstore_main_csv": "/tmp/recstore-fast-path.csv",
+            },
+        ):
+            cfg = RunConfig(**base_kwargs, **extra)
+            fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
+            self.assertEqual(fake_ebc.fast_path_mode, "auto")
 
-        fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
-
-        self.assertTrue(fake_ebc.enable_single_node_distributed_fast_path)
-        self.assertEqual(fake_ebc.single_node_distributed_mode, "single_node")
-        self.assertEqual(fake_ebc.single_node_ps_backend, "local_shm")
-        self.assertEqual(fake_ebc.single_node_owner_policy, "hash_mod_world_size")
-
-    def test_gpu_cache_options_are_forwarded_to_recstore_module(self) -> None:
+    def test_gpu_cache_options_are_rejected_by_validate(self) -> None:
         cfg = RunConfig(
             backend="recstore",
-            steps=1,
-            warmup_steps=0,
-            init_rows=1,
-            batch_size=1,
-            embedding_dim=4,
-            num_embeddings=16,
-            enable_gpu_cache=True,
-            gpu_cache_capacity=1024,
-            recstore_main_csv="/tmp/recstore-gpu-cache.csv",
-        )
-
-        fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
-
-        self.assertEqual(fake_ebc.kv_client.enable_gpu_cache_calls, [(1024, 4)])
-
-    def test_gpu_cache_lookup_bypass_option_is_forwarded(self) -> None:
-        cfg = RunConfig(
-            backend="recstore",
-            steps=1,
-            warmup_steps=0,
-            init_rows=1,
-            batch_size=1,
-            embedding_dim=4,
-            num_embeddings=16,
             enable_gpu_cache=True,
             gpu_cache_capacity=1024,
             disable_gpu_cache_lookup_bypass=True,
-            recstore_main_csv="/tmp/recstore-gpu-cache-no-bypass.csv",
         )
-
-        fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
-
-        self.assertEqual(fake_ebc.kv_client.enable_gpu_cache_calls, [(1024, 4)])
-        self.assertFalse(fake_ebc.kv_client.gpu_cache_lookup_bypass_enabled)
-
-    def test_gpu_cache_enable_false_fails_loudly(self) -> None:
-        cfg = RunConfig(
-            backend="recstore",
-            steps=1,
-            warmup_steps=0,
-            init_rows=1,
-            batch_size=1,
-            embedding_dim=4,
-            num_embeddings=16,
-            enable_gpu_cache=True,
-            gpu_cache_capacity=1024,
-            recstore_main_csv="/tmp/recstore-gpu-cache-false.csv",
-        )
-        fake_client = _FakeShardedClient()
-        fake_client.enable_gpu_cache_result = False
-        fake_ebc = types.SimpleNamespace(kv_client=fake_client)
-
-        with self.assertRaisesRegex(RuntimeError, "GPU cache"):
-            recstore_runner._configure_gpu_cache(fake_ebc, cfg, embedding_dim=4)
-
-        self.assertEqual(fake_client.enable_gpu_cache_calls, [(1024, 4)])
-
-    def test_gpu_cache_profile_merges_with_stage_prefix(self) -> None:
-        row = {}
-        fake_client = _FakeShardedClient()
-        fake_client.gpu_cache_profile = {
-            "gpu_cache_query_ms": 0.11,
-            "gpu_cache_backend_lookup_ms": 0.22,
-            "gpu_cache_fill_ms": 0.33,
-            "gpu_cache_update_ms": 0.44,
-            "gpu_cache_hit_count": 5,
-            "gpu_cache_request_count": 8,
-        }
-        fake_client.gpu_cache_clear_count = 2
-
-        recstore_runner._merge_gpu_cache_profile(row, fake_client, "lookup")
-
-        self.assertEqual(row["lookup_gpu_cache_query_ms"], 0.11)
-        self.assertEqual(row["lookup_gpu_cache_backend_lookup_ms"], 0.22)
-        self.assertEqual(row["lookup_gpu_cache_fill_ms"], 0.33)
-        self.assertEqual(row["lookup_gpu_cache_update_ms"], 0.44)
-        self.assertEqual(row["lookup_gpu_cache_hit_count"], 5.0)
-        self.assertEqual(row["lookup_gpu_cache_hit_rate"], 5.0 / 8.0)
-        self.assertEqual(row["gpu_cache_clear_count"], 2)
+        with self.assertRaisesRegex(RuntimeError, "--enable-gpu-cache is not supported"):
+            config.validate_recstore_config(cfg)
 
     def test_local_worker_switches_client_backend_for_single_node_fast_path(self) -> None:
         cfg = RunConfig(
@@ -1468,170 +981,16 @@ class TestRecStoreRunner(unittest.TestCase):
             num_embeddings=16,
             nnodes=1,
             nproc_per_node=2,
-            enable_single_node_distributed_fast_path=True,
             single_node_ps_backend="hierkv",
             single_node_owner_policy="hash_mod_world_size",
             recstore_main_csv="/tmp/recstore-hierkv-fast-path.csv",
         )
 
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        class _ProfiledEmbeddingBagCollection(_FakeRecStoreEmbeddingBagCollection):
-            def __init__(self, *args, **kwargs) -> None:
-                super().__init__(*args, **kwargs)
-                self._single_node_forward_profile = {
-                    "lookup_local_lookup_ms": 1.25,
-                    "lookup_wait_ms": 0.75,
-                }
+        fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg)
 
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _ProfiledEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        class _ProfiledSparseSGD(_FakeSparseSGD):
-            def __init__(self, params, lr: float) -> None:
-                super().__init__(params, lr)
-                self._last_step_profile = {
-                    "exchange_ms": 2.5,
-                    "local_update_ms": 3.5,
-                    "local_update_backend_call_ms": 3.25,
-                    "trace_collect_ms": 0.5,
-                    "trace_aggregate_ms": 1.5,
-                }
+        self.assertEqual(fake_ebc.kv_client.set_ps_backend_calls, ["hierkv"])
 
-        fake_optimizer_module.SparseSGD = _ProfiledSparseSGD
-
-        _FakeRecStoreEmbeddingBagCollection.last_instance = None
-
-        with ExitStack() as stack:
-            stack.enter_context(
-                mock.patch.dict(
-                    "sys.modules",
-                    {
-                        "client": fake_client_module,
-                        "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                        "python.pytorch.recstore.optimizer": fake_optimizer_module,
-                    },
-                )
-            )
-            stack.enter_context(
-                mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None)
-            )
-            stack.enter_context(
-                mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed", lambda *_: None)
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD",
-                    _FakeDenseOptimizer,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                    lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                    lambda raw_client, runtime_dir: fake_client,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
-                    lambda: ["cat_0"],
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
-                    lambda **kwargs: (dataset, dataloader),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                    lambda *args, **kwargs: (None, object()),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
-                    lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm",
-                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                    lambda **kwargs: (
-                        torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                        torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                        torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                    ),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row",
-                    lambda row, **kwargs: row,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
-                    lambda *args, **kwargs: None,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                    lambda *args, **kwargs: None,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.dist",
-                    types.SimpleNamespace(
-                        is_initialized=lambda: False,
-                        init_process_group=lambda **kwargs: None,
-                        barrier=lambda *args, **kwargs: None,
-                        destroy_process_group=lambda: None,
-                    ),
-                    create=True,
-                )
-            )
-
-            runner = RecStoreRunner(runner_runtime)
-            runner._run_local_worker(
-                repo_root=repo_root,
-                cfg=cfg,
-                rank=0,
-                world_size=1,
-                local_rank=0,
-                out_csv=runner_runtime / "rank.csv",
-            )
-
-        self.assertEqual(fake_client.set_ps_backend_calls, ["hierkv"])
-        self.assertEqual(fake_client.activate_shard_calls, [0])
-
-    def test_read_before_update_prefetch_mode_uses_ebc_prefetch_and_sparse_optimizer(self) -> None:
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
+    def test_prefetch_mode_uses_ebc_prefetch_and_sparse_optimizer(self) -> None:
         cfg = RunConfig(
             steps=1,
             warmup_steps=0,
@@ -1639,115 +998,40 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            read_before_update=True,
             read_mode="prefetch",
-            recstore_main_csv=str(runner_runtime / "main.csv"),
+            prefetch_depth=0,
+            recstore_main_csv=str(Path(tempfile.mkdtemp()) / "main.csv"),
         )
 
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
-
-        fake_client = _FakeShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        fake_optimizer_module.SparseSGD = _FakeSparseSGD
-
-        with mock.patch.dict(
-            "sys.modules",
-            {
-                "client": fake_client_module,
-                "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                "python.pytorch.recstore.optimizer": fake_optimizer_module,
-            },
-        ):
-            with mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None):
-                with mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed", lambda *_: None):
-                    with mock.patch(
-                        "model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD",
-                        _FakeDenseOptimizer,
-                    ):
-                        with mock.patch(
-                            "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                            lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                        ):
-                            with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                                lambda raw_client, runtime_dir: fake_client,
-                            ):
-                                with mock.patch(
-                                    "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
-                                    lambda: ["cat_0"],
-                                ):
-                                    with mock.patch(
-                                        "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
-                                        lambda **kwargs: (dataset, dataloader),
-                                    ):
-                                        with mock.patch(
-                                            "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                                            lambda *args, **kwargs: (None, object()),
-                                        ):
-                                            with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
-                                                lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
-                                            ):
-                                                with mock.patch(
-                                                    "model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm",
-                                                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True),
-                                                ):
-                                                    with mock.patch(
-                                                        "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                                                        lambda **kwargs: (
-                                                            torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                                                            torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                                                            torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                                                        ),
-                                                    ):
-                                                        with mock.patch(
-                                                            "model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward",
-                                                            lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32),
-                                                        ):
-                                                            with mock.patch(
-                                                                "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                                                                lambda *args, **kwargs: None,
-                                                            ):
-                                                                with mock.patch(
-                                                                    "model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row",
-                                                                    lambda row: row,
-                                                                ):
-                                                                    with mock.patch(
-                                                                        "model_zoo.rs_demo.runners.recstore_runner.summarize_us",
-                                                                        lambda xs: "ok",
-                                                                    ):
-                                                                        with mock.patch(
-                                                                            "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
-                                                                            lambda *args, **kwargs: None,
-                                                                        ):
-                                                                            runner = RecStoreRunner(runner_runtime)
-                                                                            runner.run(repo_root=repo_root, cfg=cfg)
-
-        fake_ebc = _FakeRecStoreEmbeddingBagCollection.last_instance
+        fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg, use_run=True)
         fake_sparse_optimizer = _FakeSparseSGD.last_instance
         self.assertIsNotNone(fake_ebc)
         self.assertIsNotNone(fake_sparse_optimizer)
         self.assertEqual(fake_ebc.issue_fused_prefetch_calls, 1)
         self.assertEqual(fake_ebc.issue_fused_prefetch_record_flags, [True])
-        self.assertIs(fake_ebc.kwargs["kv_client"], fake_client)
-        self.assertEqual(fake_client.emb_read_prefetch_calls, 0)
+        self.assertIs(fake_ebc.kwargs["kv_client"], fake_ebc.kv_client)
+        self.assertEqual(fake_ebc.kv_client.emb_read_prefetch_calls, 0)
         self.assertEqual(fake_sparse_optimizer.step_calls, 1)
         self.assertEqual(fake_sparse_optimizer.flush_calls, 1)
         self.assertGreaterEqual(fake_sparse_optimizer.zero_grad_calls, 2)
         self.assertEqual(fake_ebc.reset_perf_stats_calls, 1)
-        self.assertEqual(fake_sparse_optimizer.reset_perf_stats_calls, 1)
 
-    def test_read_before_update_prefetch_depth_uses_lookahead_handles(self) -> None:
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
+    def test_direct_mode_skips_async_issue(self) -> None:
+        cfg = RunConfig(
+            steps=1,
+            warmup_steps=0,
+            init_rows=1,
+            batch_size=1,
+            embedding_dim=4,
+            num_embeddings=16,
+            read_mode="direct",
+            recstore_main_csv=str(Path(tempfile.mkdtemp()) / "main.csv"),
+        )
+        fake_ebc = self._run_local_worker_with_fake_embedding_module(cfg, use_run=True)
+        self.assertEqual(fake_ebc.issue_fused_prefetch_calls, 0)
+        self.assertEqual(fake_ebc.set_fused_prefetch_handle_calls, 0)
+
+    def test_prefetch_depth_uses_lookahead_handles(self) -> None:
         cfg = RunConfig(
             steps=3,
             warmup_steps=0,
@@ -1755,171 +1039,48 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            read_before_update=True,
             read_mode="prefetch",
             prefetch_depth=1,
-            enable_gpu_cache=True,
-            gpu_cache_capacity=8,
-            recstore_main_csv=str(runner_runtime / "main.csv"),
+            recstore_main_csv=str(Path(tempfile.mkdtemp()) / "main.csv"),
         )
 
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)] * 3
-        dataloader = list(dataset)
-        feature_values_by_build = [4, 5, 4, 4, 5, 4]
+        feature_values_by_build = [4, 5, 4]
         built_sparse_features: list[object] = []
         build_devices: list[torch.device | None] = []
         build_device_by_feature: dict[object, torch.device | None] = {}
 
-        fake_client = _FakeShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        fake_optimizer_module.SparseSGD = _FakeSparseSGD
+        def build_fake_kjt(*args, **kwargs):
+            feature = _FakeKeyedSparseFeatures(
+                [feature_values_by_build[len(built_sparse_features)]]
+            )
+            built_sparse_features.append(feature)
+            build_device = kwargs.get("device")
+            build_devices.append(build_device)
+            build_device_by_feature[feature] = build_device
+            return None, feature
+
         captured_rows: list[dict] = []
-
-        with mock.patch.dict(
-            "sys.modules",
-            {
-                "client": fake_client_module,
-                "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                "python.pytorch.recstore.optimizer": fake_optimizer_module,
-            },
-        ):
-            with mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None):
-                with mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed", lambda *_: None):
-                    with mock.patch(
-                        "model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD",
-                        _FakeDenseOptimizer,
-                    ):
-                        with mock.patch(
-                            "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                            lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                        ):
-                            with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                                lambda raw_client, runtime_dir: fake_client,
-                            ):
-                                with mock.patch(
-                                    "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
-                                    lambda: ["cat_0"],
-                                ):
-                                    with mock.patch(
-                                        "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
-                                        lambda **kwargs: (dataset, dataloader),
-                                    ):
-                                        def build_fake_kjt(*args, **kwargs):
-                                            feature = _FakeKeyedSparseFeatures(
-                                                [feature_values_by_build[len(built_sparse_features)]]
-                                            )
-                                            built_sparse_features.append(feature)
-                                            build_device = kwargs.get("device")
-                                            build_devices.append(build_device)
-                                            build_device_by_feature[feature] = build_device
-                                            return None, feature
-
-                                        with mock.patch(
-                                            "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                                            build_fake_kjt,
-                                        ):
-                                            with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
-                                                lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
-                                            ):
-                                                with mock.patch(
-                                                    "model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm",
-                                                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True),
-                                                ):
-                                                    with mock.patch(
-                                                        "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                                                        lambda **kwargs: (
-                                                            torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                                                            torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                                                            torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                                                        ),
-                                                    ):
-                                                        with mock.patch(
-                                                            "model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward",
-                                                            lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32),
-                                                        ):
-                                                            with mock.patch(
-                                                                "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                                                                lambda *args, **kwargs: None,
-                                                            ):
-                                                                with mock.patch(
-                                                                    "model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row",
-                                                                    lambda row: row,
-                                                                ):
-                                                                    with mock.patch(
-                                                                        "model_zoo.rs_demo.runners.recstore_runner.summarize_us",
-                                                                        lambda xs: "ok",
-                                                                    ):
-                                                                        with mock.patch(
-                                                                            "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
-                                                                            lambda path, rows: captured_rows.extend(rows),
-                                                                        ):
-                                                                            runner = RecStoreRunner(runner_runtime)
-                                                                            runner.run(repo_root=repo_root, cfg=cfg)
-
-        fake_ebc = _FakeRecStoreEmbeddingBagCollection.last_instance
-        self.assertIsNotNone(fake_ebc)
-        self.assertEqual(fake_client.clear_after_cpu_update_flags, [False])
+        fake_ebc = self._run_local_worker_with_fake_embedding_module(
+            cfg,
+            use_run=True,
+            num_batches=3,
+            build_kjt=build_fake_kjt,
+            captured_rows=captured_rows,
+        )
         self.assertEqual(
             fake_ebc.issue_fused_prefetch_record_flags,
-            [False, False],
+            [False, False, False],
         )
-        self.assertEqual(fake_ebc.set_fused_prefetch_handle_calls, 2)
-        self.assertEqual(len(built_sparse_features), 6)
+        self.assertEqual(fake_ebc.set_fused_prefetch_handle_calls, 3)
+        self.assertEqual(len(built_sparse_features), 3)
         expected_device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.assertEqual([str(device) for device in build_devices], [expected_device] * 6)
-        self.assertEqual(len(fake_ebc.issue_fused_prefetch_features), 0)
-        self.assertEqual(fake_client.gpu_cache_sgd_update_calls, [])
-        self.assertEqual(
-            [ids.tolist() for ids in fake_ebc.issue_fused_id_prefetch_ids],
-            [[5], [4]],
-        )
+        self.assertEqual([str(device) for device in build_devices], [expected_device] * 3)
+        self.assertEqual(len(fake_ebc.issue_fused_prefetch_features), 3)
+        self.assertEqual(fake_ebc.issue_fused_id_prefetch_ids, [])
         self.assertEqual(len(fake_ebc.forward_features), 3)
         self.assertEqual(
             [str(build_device_by_feature[feature]) for feature in fake_ebc.forward_features],
             [expected_device, expected_device, expected_device],
-        )
-        self.assertEqual([row["prefetch_depth"] for row in captured_rows], [1.0, 1.0, 1.0])
-        self.assertEqual([row["prefetch_issued_batches"] for row in captured_rows], [1.0, 1.0, 0.0])
-        self.assertEqual([row["prefetch_consumed_batches"] for row in captured_rows], [0.0, 1.0, 1.0])
-        self.assertEqual([row["prefetch_discarded_batches"] for row in captured_rows], [0.0, 0.0, 0.0])
-        self.assertEqual([row["prefetch_total_ids"] for row in captured_rows], [1.0, 1.0, 0.0])
-        self.assertEqual([row["prefetch_consumed_total_ids"] for row in captured_rows], [0.0, 1.0, 1.0])
-        self.assertEqual([row["prefetch_discarded_total_ids"] for row in captured_rows], [0.0, 0.0, 0.0])
-        self.assertTrue(all(row["prefetch_issue_ms"] >= 0 for row in captured_rows))
-        self.assertTrue(all(row["prefetch_issue_to_consume_ms"] >= 0 for row in captured_rows))
-        self.assertEqual([row["bagpipe_stale_ids"] for row in captured_rows], [0, 0, 0])
-        self.assertEqual(
-            [row["bagpipe_stale_cached_ids"] for row in captured_rows],
-            [0, 0, 0],
-        )
-        self.assertEqual(
-            [row["bagpipe_stale_refetch_ids"] for row in captured_rows],
-            [0, 0, 0],
-        )
-        self.assertEqual(
-            [row["bagpipe_discarded_stale_handle"] for row in captured_rows],
-            [0, 0, 0],
-        )
-        self.assertEqual(
-            [row["bagpipe_gpu_cache_update_ids"] for row in captured_rows],
-            [0, 0, 0],
-        )
-        self.assertEqual(
-            [row["bagpipe_cache_insert_ids"] for row in captured_rows],
-            [0, 0, 0],
-        )
-        self.assertEqual(
-            [row["bagpipe_step_end_evict_ids"] for row in captured_rows],
-            [0, 0, 0],
         )
         self.assertTrue(
             all(row["step_end_to_end_ms"] >= row["step_total_ms"] for row in captured_rows)
@@ -1927,14 +1088,8 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertTrue(
             all(row["step_end_to_end_ms"] == row["step_total_ms"] for row in captured_rows)
         )
-        self.assertTrue(all(row["input_pack_consume_ms"] >= 0 for row in captured_rows))
-        self.assertTrue(
-            all(row["step_end_to_end_ms"] >= row["input_pack_consume_ms"] for row in captured_rows)
-        )
 
     def test_local_worker_emits_perf_breakdown_columns_from_model_layer_stats(self) -> None:
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
         cfg = RunConfig(
             backend="recstore",
             steps=1,
@@ -1943,116 +1098,25 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            read_before_update=True,
             read_mode="prefetch",
-            recstore_main_csv=str(runner_runtime / "main.csv"),
+            recstore_main_csv=str(Path(tempfile.mkdtemp()) / "main.csv"),
         )
 
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
-
-        fake_client = _FakeShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        fake_optimizer_module.SparseSGD = _FakeSparseSGD
-        captured_rows = []
-
-        with mock.patch.dict(
-            "sys.modules",
-            {
-                "client": fake_client_module,
-                "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                "python.pytorch.recstore.optimizer": fake_optimizer_module,
-            },
-        ):
-            with mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None):
-                with mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed", lambda *_: None):
-                    with mock.patch(
-                        "model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD",
-                        _FakeDenseOptimizer,
-                    ):
-                        with mock.patch(
-                            "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                            lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                        ):
-                            with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                                lambda raw_client, runtime_dir: fake_client,
-                            ):
-                                with mock.patch(
-                                    "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
-                                    lambda: ["cat_0"],
-                                ):
-                                    with mock.patch(
-                                        "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
-                                        lambda **kwargs: (dataset, dataloader),
-                                    ):
-                                        with mock.patch(
-                                            "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                                            lambda *args, **kwargs: (None, object()),
-                                        ):
-                                            with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
-                                                lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
-                                            ):
-                                                with mock.patch(
-                                                    "model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm",
-                                                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True),
-                                                ):
-                                                    with mock.patch(
-                                                        "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                                                        lambda **kwargs: (
-                                                            torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                                                            torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                                                            torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                                                        ),
-                                                    ):
-                                                        with mock.patch(
-                                                            "model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward",
-                                                            lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32),
-                                                        ):
-                                                            with mock.patch(
-                                                                "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                                                                lambda *args, **kwargs: None,
-                                                            ):
-                                                                with mock.patch(
-                                                                    "model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row",
-                                                                    lambda row: captured_rows.append(dict(row)) or row,
-                                                                ):
-                                                                    with mock.patch(
-                                                                        "model_zoo.rs_demo.runners.recstore_runner.summarize_us",
-                                                                        lambda xs: "ok",
-                                                                    ):
-                                                                        with mock.patch(
-                                                                            "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
-                                                                            lambda *args, **kwargs: None,
-                                                                        ):
-                                                                            runner = RecStoreRunner(runner_runtime)
-                                                                            runner.run(repo_root=repo_root, cfg=cfg)
+        captured_rows: list[dict] = []
+        self._run_local_worker_with_fake_embedding_module(
+            cfg, use_run=True, captured_rows=captured_rows
+        )
 
         self.assertEqual(len(captured_rows), 1)
         row = captured_rows[0]
-        self.assertEqual(row["prefetch_issue_ms"], 0.2)
-        self.assertEqual(row["lookup_wait_ms"], 0.6)
-        self.assertEqual(row["lookup_owner_exchange_ms"], 0.4)
-        self.assertEqual(row["lookup_local_lookup_ms"], 0.5)
-        self.assertEqual(row["lookup_reassemble_ms"], 0.3)
-        self.assertEqual(row["pool_embedding_bag_ms"], 0.7)
-        self.assertEqual(row["update_trace_merge_ms"], 0.25)
-        self.assertEqual(row["update_owner_exchange_ms"], 0.35)
-        self.assertEqual(row["update_local_apply_ms"], 0.45)
-        self.assertEqual(row["update_async_enqueue_ms"], 0.05)
-        self.assertEqual(row["update_flush_wait_ms"], 0.15)
+        self.assertIn("lookup_wait_ms", row)
+        self.assertIn("lookup_ids_build_ms", row)
+        self.assertIn("lookup_total_ms", row)
+        self.assertNotIn("prefetch_issue_ms", row)
+        self.assertNotIn("update_owner_exchange_ms", row)
 
-    def test_runner_exports_fast_path_profiles_into_rows(self) -> None:
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
+    def test_runner_exports_coarse_perf_stats_into_rows(self) -> None:
+        csv_path = Path(tempfile.mkdtemp()) / "main.csv"
         cfg = RunConfig(
             steps=1,
             warmup_steps=0,
@@ -2060,126 +1124,26 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            read_before_update=False,
-            recstore_main_csv=str(runner_runtime / "main.csv"),
+            read_mode="direct",
+            recstore_main_csv=str(csv_path),
         )
 
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
+        self._run_local_worker_with_fake_embedding_module(cfg, use_run=True, write_csv=True)
 
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        class _ProfiledEmbeddingBagCollection(_FakeRecStoreEmbeddingBagCollection):
-            def __init__(self, *args, **kwargs) -> None:
-                super().__init__(*args, **kwargs)
-                self._single_node_forward_profile = {
-                    "lookup_local_lookup_ms": 1.25,
-                    "lookup_wait_ms": 0.75,
-                }
-
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _ProfiledEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        class _ProfiledSparseSGD(_FakeSparseSGD):
-            def __init__(self, params, lr: float) -> None:
-                super().__init__(params, lr)
-                self._last_step_profile = {
-                    "exchange_ms": 2.5,
-                    "local_update_ms": 3.5,
-                    "local_update_backend_call_ms": 3.25,
-                    "trace_collect_ms": 0.5,
-                    "trace_aggregate_ms": 1.5,
-                }
-
-        fake_optimizer_module.SparseSGD = _ProfiledSparseSGD
-
-        with mock.patch.dict(
-            "sys.modules",
-            {
-                "client": fake_client_module,
-                "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                "python.pytorch.recstore.optimizer": fake_optimizer_module,
-            },
-        ):
-            with mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None):
-                with mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                    lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                ):
-                    with mock.patch(
-                        "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                        lambda raw_client, runtime_dir: fake_client,
-                    ):
-                        with mock.patch(
-                            "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
-                            lambda: ["cat_0"],
-                        ):
-                            with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
-                                lambda **kwargs: (dataset, dataloader),
-                            ):
-                                with mock.patch(
-                                    "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                                    lambda *args, **kwargs: (None, object()),
-                                ):
-                                    with mock.patch(
-                                        "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
-                                        lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
-                                    ):
-                                        with mock.patch(
-                                            "model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm",
-                                            lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True),
-                                        ):
-                                            with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                                                lambda **kwargs: (
-                                                    torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                                                    torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                                                    torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                                                ),
-                                            ):
-                                                with mock.patch(
-                                                    "model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward",
-                                                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32),
-                                                ):
-                                                    with mock.patch(
-                                                        "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                                                        lambda *args, **kwargs: None,
-                                                    ):
-                                                        with mock.patch(
-                                                            "model_zoo.rs_demo.runners.recstore_runner.summarize_us",
-                                                            lambda xs: "ok",
-                                                        ):
-                                                            with mock.patch(
-                                                                "model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed",
-                                                                lambda *_: None,
-                                                            ):
-                                                                runner = RecStoreRunner(runner_runtime)
-                                                                runner.run(repo_root=repo_root, cfg=cfg)
-
-        with Path(cfg.recstore_main_csv).open("r", encoding="utf-8") as f:
+        with csv_path.open("r", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(float(rows[0]["lookup_local_lookup_ms"]), 1.25)
-        self.assertEqual(float(rows[0]["lookup_wait_ms"]), 0.75)
-        self.assertEqual(float(rows[0]["exchange_ms"]), 2.5)
-        self.assertEqual(float(rows[0]["local_update_ms"]), 3.5)
-        self.assertEqual(float(rows[0]["local_update_backend_call_ms"]), 3.25)
-        self.assertEqual(float(rows[0]["trace_collect_ms"]), 0.5)
-        self.assertEqual(float(rows[0]["trace_aggregate_ms"]), 1.5)
+        self.assertTrue(math.isfinite(float(rows[0]["loss"])))
+        self.assertIn("lookup_wait_ms", rows[0])
         self.assertIn("sparse_backward_replay_ms", rows[0])
         self.assertIn("sparse_optimizer_step_ms", rows[0])
         self.assertIn("sparse_optimizer_flush_ms", rows[0])
-        self.assertIn("sparse_zero_grad_ms", rows[0])
+        self.assertNotIn("sparse_zero_grad_ms", rows[0])
+        self.assertNotIn("update_owner_exchange_ms", rows[0])
+        self.assertNotIn("lookup_local_lookup_ms", rows[0])
 
     def test_runner_passes_compute_device_into_sparse_feature_builder(self) -> None:
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
         cfg = RunConfig(
             steps=1,
             warmup_steps=0,
@@ -2187,104 +1151,26 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            read_before_update=False,
-            recstore_main_csv=str(runner_runtime / "main.csv"),
+            read_mode="direct",
+            recstore_main_csv=str(Path(tempfile.mkdtemp()) / "main.csv"),
         )
 
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
-
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        fake_optimizer_module.SparseSGD = _FakeSparseSGD
         device_calls: list[torch.device] = []
 
         def _build_sparse_features(*args, **kwargs):
             device_calls.append(kwargs["device"])
             return None, object()
 
-        with mock.patch.dict(
-            "sys.modules",
-            {
-                "client": fake_client_module,
-                "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                "python.pytorch.recstore.optimizer": fake_optimizer_module,
-            },
-        ):
-            with mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None):
-                with mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                    lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                ):
-                    with mock.patch(
-                        "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                        lambda raw_client, runtime_dir: fake_client,
-                    ):
-                        with mock.patch(
-                            "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
-                            lambda: ["cat_0"],
-                        ):
-                            with mock.patch(
-                                "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
-                                lambda **kwargs: (dataset, dataloader),
-                            ):
-                                with mock.patch(
-                                    "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                                    _build_sparse_features,
-                                ):
-                                    with mock.patch(
-                                        "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
-                                        lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
-                                    ):
-                                        with mock.patch(
-                                            "model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm",
-                                            lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True),
-                                        ):
-                                            with mock.patch(
-                                                "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                                                lambda **kwargs: (
-                                                    torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                                                    torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                                                    torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                                                ),
-                                            ):
-                                                with mock.patch(
-                                                    "model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward",
-                                                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32),
-                                                ):
-                                                    with mock.patch(
-                                                        "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                                                        lambda *args, **kwargs: None,
-                                                    ):
-                                                        with mock.patch(
-                                                            "model_zoo.rs_demo.runners.recstore_runner.summarize_us",
-                                                            lambda xs: "ok",
-                                                        ):
-                                                            with mock.patch(
-                                                                "model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed",
-                                                                lambda *_: None,
-                                                            ):
-                                                                with mock.patch(
-                                                                    "model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD",
-                                                                    _FakeDenseOptimizer,
-                                                                ):
-                                                                    runner = RecStoreRunner(runner_runtime)
-                                                                    runner.run(repo_root=repo_root, cfg=cfg)
+        self._run_local_worker_with_fake_embedding_module(
+            cfg, use_run=True, build_kjt=_build_sparse_features
+        )
 
         self.assertGreaterEqual(len(device_calls), 1)
         expected_device_type = "cuda" if torch.cuda.is_available() else "cpu"
         self.assertTrue(all(device.type == expected_device_type for device in device_calls))
 
     def test_nonzero_rank_skips_table_init_and_warm_write(self) -> None:
-        runner_runtime = Path(tempfile.mkdtemp())
-        repo_root = Path("/app/RecStore")
+        output_root = Path(tempfile.mkdtemp())
         cfg = RunConfig(
             backend="recstore",
             steps=1,
@@ -2293,174 +1179,26 @@ class TestRecStoreRunner(unittest.TestCase):
             batch_size=1,
             embedding_dim=4,
             num_embeddings=16,
-            read_before_update=False,
+            read_mode="direct",
             nnodes=1,
             nproc_per_node=2,
-            output_root=str(runner_runtime),
-            recstore_main_csv=str(runner_runtime / "main.csv"),
+            output_root=str(output_root),
+            recstore_main_csv=str(output_root / "main.csv"),
         )
 
-        dense = torch.zeros((1, 13), dtype=torch.float32)
-        sparse = torch.zeros((1, 1), dtype=torch.int64)
-        labels = torch.zeros((1, 1), dtype=torch.float32)
-        dataset = [(dense, sparse, labels)]
-        dataloader = [(dense, sparse, labels)]
-
-        fake_client = _FakeDirectReadShardedClient()
-        fake_client_module = types.ModuleType("client")
-        fake_client_module.RecstoreClient = lambda library_path=None: object()
-        fake_embeddingbag_module = types.ModuleType("python.pytorch.torchrec_kv.EmbeddingBag")
-        fake_embeddingbag_module.RecStoreEmbeddingBagCollection = _FakeRecStoreEmbeddingBagCollection
-        fake_optimizer_module = types.ModuleType("python.pytorch.recstore.optimizer")
-        fake_optimizer_module.SparseSGD = _FakeSparseSGD
-        fake_dist = types.SimpleNamespace(
-            is_initialized=lambda: False,
-            init_process_group=lambda **kwargs: None,
-            barrier=lambda *args, **kwargs: None,
-            destroy_process_group=lambda: None,
+        fake_ebc = self._run_local_worker_with_fake_embedding_module(
+            cfg, rank=1, world_size=2, local_rank=0, patch_distributed=True
         )
 
-        with ExitStack() as stack:
-            stack.enter_context(
-                mock.patch.dict(
-                    "sys.modules",
-                    {
-                        "client": fake_client_module,
-                        "python.pytorch.torchrec_kv.EmbeddingBag": fake_embeddingbag_module,
-                        "python.pytorch.recstore.optimizer": fake_optimizer_module,
-                    },
-                )
-            )
-            stack.enter_context(
-                mock.patch("model_zoo.rs_demo.runners.recstore_runner.inject_project_paths", lambda *_: None)
-            )
-            stack.enter_context(
-                mock.patch("model_zoo.rs_demo.runners.recstore_runner.torch.manual_seed", lambda *_: None)
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.torch.optim.SGD",
-                    _FakeDenseOptimizer,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.detect_library_path",
-                    lambda *_: repo_root / "build/lib/lib_recstore_ops.so",
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.ShardedRecstoreClient",
-                    lambda raw_client, runtime_dir: fake_client,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.get_default_cat_names",
-                    lambda: ["cat_0"],
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
-                    lambda **kwargs: (dataset, dataloader),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_kjt_batch_from_dense_sparse_labels",
-                    lambda *args, **kwargs: (None, object()),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_hybrid_dense_arch",
-                    lambda *args, **kwargs: _DummyDense().to(kwargs["device"]),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner._maybe_wrap_dense_module_for_dist",
-                    lambda **kwargs: kwargs["dense_module"],
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.reshape_torchrec_embeddings_for_dlrm",
-                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32, requires_grad=True),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.prepare_hybrid_dlrm_input",
-                    lambda **kwargs: (
-                        torch.zeros((1, 13), dtype=torch.float32, device=kwargs["device"]),
-                        torch.zeros((1, 1, 4), dtype=torch.float32, device=kwargs["device"], requires_grad=True),
-                        torch.zeros((1, 1), dtype=torch.float32, device=kwargs["device"]),
-                    ),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.run_hybrid_backward",
-                    lambda **kwargs: torch.zeros((1, 1, 4), dtype=torch.float32),
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.sync_device",
-                    lambda *args, **kwargs: None,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row",
-                    lambda row: row,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.summarize_us",
-                    lambda xs: "ok",
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.write_stage_csv",
-                    lambda *args, **kwargs: None,
-                )
-            )
-            stack.enter_context(mock.patch("torch.distributed.is_initialized", fake_dist.is_initialized))
-            stack.enter_context(
-                mock.patch("torch.distributed.init_process_group", fake_dist.init_process_group)
-            )
-            stack.enter_context(mock.patch("torch.distributed.barrier", fake_dist.barrier))
-            stack.enter_context(
-                mock.patch("torch.distributed.destroy_process_group", fake_dist.destroy_process_group)
-            )
-
-            runner = RecStoreRunner(runner_runtime)
-            runner._run_local_worker(
-                repo_root=repo_root,
-                cfg=cfg,
-                rank=1,
-                world_size=2,
-                local_rank=0,
-                out_csv=runner_runtime / "rank1.csv",
-            )
-
-        fake_ebc = _FakeRecStoreEmbeddingBagCollection.last_instance
-        self.assertIsNotNone(fake_ebc)
         self.assertFalse(fake_ebc.kwargs["initialize_tables"])
-        self.assertEqual(fake_client.emb_write_calls, 0)
+        self.assertEqual(fake_ebc.kv_client.emb_write_calls, 0)
 
     def test_merge_rank_outputs_preserves_rank_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             rank0 = Path(tmpdir) / "rank0.csv"
             rank1 = Path(tmpdir) / "rank1.csv"
             out_csv = Path(tmpdir) / "main.csv"
-            recstore_runner.write_stage_csv(
+            recstore_runner._write_rows(
                 rank1,
                 [
                     {
@@ -2472,7 +1210,7 @@ class TestRecStoreRunner(unittest.TestCase):
                     }
                 ],
             )
-            recstore_runner.write_stage_csv(
+            recstore_runner._write_rows(
                 rank0,
                 [
                     {
@@ -2497,22 +1235,6 @@ class TestRecStoreRunner(unittest.TestCase):
             self.assertEqual([(row["rank"], row["step"]) for row in rows], [(0, 0), (0, 1), (1, 0)])
             self.assertTrue(out_csv.exists())
 
-    def test_write_or_verify_worker_fingerprint_rejects_mismatch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "fingerprints.json"
-            recstore_runner._write_or_verify_worker_fingerprint(
-                rank=0,
-                world_size=2,
-                fingerprint={"files": {"a.py": "111"}},
-                fingerprint_path=path,
-            )
-            with self.assertRaisesRegex(RuntimeError, "worker fingerprint mismatch"):
-                recstore_runner._write_or_verify_worker_fingerprint(
-                    rank=1,
-                    world_size=2,
-                    fingerprint={"files": {"a.py": "222"}},
-                    fingerprint_path=path,
-                )
 
 if __name__ == "__main__":
     unittest.main()

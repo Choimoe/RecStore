@@ -28,7 +28,7 @@ for _p in (_REPO_ROOT, str(Path(_REPO_ROOT) / "src"), str(_THIS_DIR.parent)):
 
 import torch
 
-from rs_demo.runtime.rankmixer_model import (
+from RankMixer.model import (
     RankMixerLoss,
     build_rankmixer_arch,
     default_segment_dims,

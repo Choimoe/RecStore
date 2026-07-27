@@ -840,6 +840,37 @@ private:
     response->status->response_bytes = 0;
   }
 
+  void HandleUpdateFlat(const petps::RequestDescriptor& descriptor,
+                        const char* payload,
+                        petps::RcShardServerTransport::ResponseView* response,
+                        int thread_id) {
+    const std::string_view table_name = petps::DescriptorTableName(descriptor);
+    const std::size_t expected_bytes = petps::FlatUpdatePayloadBytes(
+        descriptor.key_count, descriptor.embedding_dim);
+    if (table_name.empty() || descriptor.key_count == 0 || expected_bytes == 0 ||
+        descriptor.payload_bytes != expected_bytes) {
+      response->status->status =
+          static_cast<std::int32_t>(petps::RpcStatus::kInvalidPayload);
+      response->status->response_bytes = 0;
+      return;
+    }
+
+    const std::size_t key_bytes =
+        static_cast<std::size_t>(descriptor.key_count) * sizeof(std::uint64_t);
+    const auto* keys = reinterpret_cast<const std::uint64_t*>(payload);
+    const auto* grads = reinterpret_cast<const float*>(payload + key_bytes);
+    const bool ok = cache_ps_->UpdateParameterFlat(
+        std::string(table_name),
+        base::ConstArray<std::uint64_t>(keys, descriptor.key_count),
+        grads,
+        descriptor.key_count,
+        descriptor.embedding_dim,
+        static_cast<unsigned>(thread_id));
+    response->status->status = static_cast<std::int32_t>(
+        ok ? petps::RpcStatus::kOk : petps::RpcStatus::kInvalidPayload);
+    response->status->response_bytes = 0;
+  }
+
   void HandleInitTable(const petps::RequestDescriptor& descriptor,
                        const char* payload,
                        petps::RcShardServerTransport::ResponseView* response) {
@@ -1093,6 +1124,15 @@ private:
                static_cast<std::uint16_t>(petps::RcOp::kUpdate)) {
       const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
       HandleUpdate(*descriptor, payload, &response, thread_id);
+      if (profile_enabled) {
+        profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
+        profile_.handle_update_ns.fetch_add(
+            NowNs() - handle_start_ns, std::memory_order_relaxed);
+      }
+    } else if (descriptor->op ==
+               static_cast<std::uint16_t>(petps::RcOp::kUpdateFlat)) {
+      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+      HandleUpdateFlat(*descriptor, payload, &response, thread_id);
       if (profile_enabled) {
         profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
         profile_.handle_update_ns.fetch_add(

@@ -500,6 +500,43 @@ void KVClientOp::EmbUpdate(const std::string& table_name,
 #  endif
 }
 
+uint64_t KVClientOp::EmbUpdateAsync(const std::string& table_name,
+                                    const base::RecTensor& keys,
+                                    const base::RecTensor& grads) {
+  if (ps_client_ == nullptr) {
+    throw std::runtime_error("PS client is not initialized");
+  }
+  auto* rdma_client = dynamic_cast<RDMAPSClientAdapter*>(ps_client_);
+  if (rdma_client == nullptr) {
+    throw std::runtime_error(
+        "Asynchronous embedding updates require the RDMA backend");
+  }
+  validate_keys(keys);
+  validate_embeddings(grads, "Grads");
+  if (keys.shape(0) != grads.shape(0) || grads.shape(1) <= 0) {
+    throw std::invalid_argument("Invalid asynchronous embedding update shape");
+  }
+  const int64_t rows = keys.shape(0);
+  const int64_t dim  = grads.shape(1);
+  return rdma_client->SubmitUpdateParameterFlatAsync(
+      table_name,
+      base::ConstArray<uint64_t>(keys.data_as<uint64_t>(), rows),
+      grads.data_as<float>(),
+      rows,
+      dim);
+}
+
+void KVClientOp::WaitForEmbUpdate(uint64_t update_id) {
+  auto* rdma_client = dynamic_cast<RDMAPSClientAdapter*>(ps_client_);
+  if (rdma_client == nullptr) {
+    throw std::runtime_error(
+        "Asynchronous embedding updates require the RDMA backend");
+  }
+  if (rdma_client->WaitUpdateParameterFlat(update_id) != 0) {
+    throw std::runtime_error("Failed to complete asynchronous RDMA update");
+  }
+}
+
 bool KVClientOp::InitEmbeddingTable(const std::string& table_name,
                                     const EmbeddingTableConfig& config) {
   if (IsHierKVBackendName(ps_backend_name_)) {

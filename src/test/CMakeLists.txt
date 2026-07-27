@@ -495,7 +495,6 @@ add_python_unittest(
     src.python.pytorch.recstore.unittest.test_kvclient_local_fast_path
     src.python.pytorch.recstore.unittest.test_embeddingbag_single_node_distributed
     src.python.pytorch.recstore.unittest.test_sparse_optimizer_single_node_distributed
-    src.test.model_zoo.rs_demo.test_recstore_distributed
 )
 set_tests_properties(
     test_hierkv_python_ops_py

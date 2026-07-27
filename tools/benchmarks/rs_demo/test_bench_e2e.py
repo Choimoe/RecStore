@@ -51,7 +51,7 @@ class TestBenchE2E(unittest.TestCase):
         )
         local_shm_lane = plan.lanes[1]
         self.assertEqual(local_shm_lane.ps_type, "LOCAL_SHM")
-        self.assertFalse(local_shm_lane.enable_single_node_fast_path)
+        self.assertEqual(local_shm_lane.single_node_ps_backend, "local_shm")
 
     def test_build_plan_includes_rdma_backend_ablation_lanes(self) -> None:
         from tools.benchmarks.run_bench_e2e import PlanOverrides, build_plan
@@ -233,7 +233,7 @@ class TestBenchE2E(unittest.TestCase):
                         "warmup_excluded",
                         "step_total_ms",
                         "embed_lookup_local_ms",
-                        "sparse_update_ms",
+                        "sparse_optimizer_ms",
                     ],
                 )
                 writer.writeheader()
@@ -243,7 +243,7 @@ class TestBenchE2E(unittest.TestCase):
                         "warmup_excluded": 1,
                         "step_total_ms": 100,
                         "embed_lookup_local_ms": 10,
-                        "sparse_update_ms": 20,
+                        "sparse_optimizer_ms": 20,
                     }
                 )
                 writer.writerow(
@@ -252,7 +252,7 @@ class TestBenchE2E(unittest.TestCase):
                         "warmup_excluded": 0,
                         "step_total_ms": 50,
                         "embed_lookup_local_ms": 5,
-                        "sparse_update_ms": 10,
+                        "sparse_optimizer_ms": 10,
                     }
                 )
 

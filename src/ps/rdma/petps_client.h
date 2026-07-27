@@ -59,6 +59,14 @@ public:
                                 base::ConstArray<uint64_t> keys,
                                 const float* grads,
                                 std::size_t embedding_dim);
+  int SubmitUpdateParameterFlatGather(
+      const std::string& table_name,
+      const std::uint64_t* keys,
+      const float* grads,
+      std::size_t num_rows,
+      std::size_t embedding_dim,
+      const std::size_t* row_indices,
+      std::size_t row_count);
   int WaitUpdateParameter(int rpc_id);
   int FakePutParameter(base::ConstArray<uint64_t> keys, float* values) override;
 
@@ -130,6 +138,14 @@ private:
       std::uint64_t seq,
       std::size_t key_count,
       std::size_t payload_bytes,
+      const std::string& table_name,
+      const RcClientQpView& view) const;
+  void FillUpdateFlatDescriptor(
+      RequestDescriptor* descriptor,
+      std::uint64_t seq,
+      std::size_t key_count,
+      std::size_t payload_bytes,
+      std::size_t embedding_dim,
       const std::string& table_name,
       const RcClientQpView& view) const;
   void FillInitTableDescriptor(RequestDescriptor* descriptor,

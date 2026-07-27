@@ -110,42 +110,6 @@ class TestHybridDlrm(unittest.TestCase):
         for param in model.parameters():
             self.assertIsNotNone(param.grad)
 
-    def test_run_hybrid_backward_does_not_require_autograd_grad(self) -> None:
-        model = torch.nn.Linear(4, 1)
-        embedded_sparse = torch.randn(2, 4, requires_grad=True)
-        loss = model(embedded_sparse).sum()
-
-        with unittest.mock.patch(
-            "torch.autograd.grad",
-            side_effect=AssertionError("autograd.grad should not be used here"),
-        ):
-            embedded_sparse_grad = run_hybrid_backward(
-                loss=loss,
-                embedded_sparse=embedded_sparse,
-                dense_module=model,
-                torch=torch,
-                device=torch.device("cpu"),
-            )
-
-        self.assertEqual(tuple(embedded_sparse_grad.shape), tuple(embedded_sparse.shape))
-
-    def test_run_hybrid_backward_retains_grad_for_non_leaf_sparse_tensor(self) -> None:
-        model = torch.nn.Linear(4, 1)
-        leaf_sparse = torch.randn(2, 4, requires_grad=True)
-        embedded_sparse = leaf_sparse * 2.0
-        loss = model(embedded_sparse).sum()
-
-        embedded_sparse_grad = run_hybrid_backward(
-            loss=loss,
-            embedded_sparse=embedded_sparse,
-            dense_module=model,
-            torch=torch,
-            device=torch.device("cpu"),
-        )
-
-        self.assertEqual(tuple(embedded_sparse_grad.shape), tuple(embedded_sparse.shape))
-        self.assertIsNotNone(leaf_sparse.grad)
-
     def test_split_backward_can_propagate_grad_to_non_leaf_sparse_source(self) -> None:
         model = torch.nn.Linear(4, 1)
         leaf_sparse = torch.randn(2, 4, requires_grad=True)

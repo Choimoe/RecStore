@@ -1,6 +1,5 @@
 #include "framework/gpu/gpu_embedding_cache.h"
 
-#include <chrono>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -27,17 +26,6 @@ int64_t g_capacity = 0;
 int64_t g_embedding_dim = 0;
 int g_device_index = -1;
 cudaEvent_t g_last_cache_event = nullptr;
-thread_local GpuCacheProfile g_last_profile;
-
-std::chrono::steady_clock::time_point Now() {
-  return std::chrono::steady_clock::now();
-}
-
-double MsSince(std::chrono::steady_clock::time_point start) {
-  return std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
-             Now() - start)
-      .count();
-}
 
 void RequireCudaTensor(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
@@ -242,14 +230,12 @@ void DisableGpuCache() {
   g_capacity = 0;
   g_embedding_dim = 0;
   g_device_index = -1;
-  g_last_profile = GpuCacheProfile{};
 }
 
 void ClearGpuCache() {
   std::lock_guard<std::mutex> guard(g_mu);
   if (!g_cache) {
-    g_last_profile = GpuCacheProfile{};
-    return;
+      return;
   }
   TORCH_CHECK(g_capacity > 0, "gpu cache capacity must be positive");
   TORCH_CHECK(g_embedding_dim > 0, "gpu cache embedding_dim must be positive");
@@ -262,7 +248,6 @@ void ClearGpuCache() {
     g_cache = std::make_shared<CacheImpl>(
         static_cast<size_t>(g_capacity), static_cast<size_t>(g_embedding_dim));
   }
-  g_last_profile = GpuCacheProfile{};
 }
 
 bool IsGpuCacheEnabled() {
@@ -270,9 +255,6 @@ bool IsGpuCacheEnabled() {
   return g_cache != nullptr;
 }
 
-GpuCacheProfile GetLastGpuCacheProfile() { return g_last_profile; }
-
-void ResetLastGpuCacheProfile() { g_last_profile = GpuCacheProfile{}; }
 
 bool CanUseGpuCache(const torch::Tensor& keys, int64_t embedding_dim) {
   std::lock_guard<std::mutex> guard(g_mu);
@@ -290,33 +272,19 @@ GpuCacheLookupResult QueryGpuCache(const torch::Tensor& keys,
   c10::cuda::CUDAGuard device_guard(keys.device());
   const auto stream = at::cuda::getCurrentCUDAStream();
 
-  const auto query_start = Now();
-
-  try {
-    std::optional<GpuCacheAsyncLookup> lookup;
-    {
-      std::lock_guard<std::mutex> guard(g_mu);
-      TORCH_CHECK(g_cache != nullptr, "gpu cache is not enabled");
-      TORCH_CHECK(embedding_dim == g_embedding_dim,
-                  "gpu cache embedding_dim mismatch");
-      RequireCacheDevice(keys, "keys");
-      auto cache = g_cache;
-      lookup.emplace(
-          SubmitGpuCacheLookupLocked(keys, embedding_dim, stream, cache));
-      RecordLastCacheOpOnStreamLocked(stream.stream());
-    }
-    auto result = MaterializeGpuCacheLookup(*lookup, keys.numel());
-
-    g_last_profile.query_ms += MsSince(query_start);
-    g_last_profile.hit_count +=
-        static_cast<double>(keys.numel() - result.missing_count);
-    g_last_profile.request_count += static_cast<double>(keys.numel());
-    g_last_profile.miss_count += static_cast<double>(result.missing_count);
-
-    return result;
-  } catch (...) {
-    throw;
+  std::optional<GpuCacheAsyncLookup> lookup;
+  {
+    std::lock_guard<std::mutex> guard(g_mu);
+    TORCH_CHECK(g_cache != nullptr, "gpu cache is not enabled");
+    TORCH_CHECK(embedding_dim == g_embedding_dim,
+                "gpu cache embedding_dim mismatch");
+    RequireCacheDevice(keys, "keys");
+    auto cache = g_cache;
+    lookup.emplace(
+        SubmitGpuCacheLookupLocked(keys, embedding_dim, stream, cache));
+    RecordLastCacheOpOnStreamLocked(stream.stream());
   }
+  return MaterializeGpuCacheLookup(*lookup, keys.numel());
 }
 
 void FillGpuCache(const torch::Tensor& keys_cuda,
@@ -325,7 +293,6 @@ void FillGpuCache(const torch::Tensor& keys_cuda,
     return;
   }
   c10::cuda::CUDAGuard device_guard(keys_cuda.device());
-  const auto fill_start = Now();
   const auto stream     = at::cuda::getCurrentCUDAStream();
   std::shared_ptr<CacheImpl> cache;
   {
@@ -345,7 +312,6 @@ void FillGpuCache(const torch::Tensor& keys_cuda,
     RetainCacheUntilStreamCompletes(cache, stream.stream());
     RecordLastCacheOpOnStreamLocked(stream.stream());
   }
-  g_last_profile.fill_ms += MsSince(fill_start);
 }
 
 void ScatterMissValues(torch::Tensor* output_values,
@@ -367,9 +333,6 @@ void ScatterMissValues(torch::Tensor* output_values,
   output_values->index_copy_(0, positions_cuda.to(torch::kLong), miss_values_cuda);
 }
 
-void AddGpuCacheBackendLookupMs(double ms) {
-  g_last_profile.backend_lookup_ms += ms;
-}
 
 void UpdateGpuCache(const torch::Tensor& keys_cuda,
                     const torch::Tensor& values_cuda) {
@@ -377,7 +340,6 @@ void UpdateGpuCache(const torch::Tensor& keys_cuda,
     return;
   }
   c10::cuda::CUDAGuard device_guard(keys_cuda.device());
-  const auto update_start = Now();
   const auto stream       = at::cuda::getCurrentCUDAStream();
   std::shared_ptr<CacheImpl> cache;
   {
@@ -397,7 +359,6 @@ void UpdateGpuCache(const torch::Tensor& keys_cuda,
     RetainCacheUntilStreamCompletes(cache, stream.stream());
     RecordLastCacheOpOnStreamLocked(stream.stream());
   }
-  g_last_profile.update_ms += MsSince(update_start);
 }
 
 void InvalidateGpuCache(const torch::Tensor& keys_cuda) {
@@ -405,7 +366,6 @@ void InvalidateGpuCache(const torch::Tensor& keys_cuda) {
     return;
   }
   c10::cuda::CUDAGuard device_guard(keys_cuda.device());
-  const auto invalidate_start = Now();
   const auto stream           = at::cuda::getCurrentCUDAStream();
   std::shared_ptr<CacheImpl> cache;
   {
@@ -425,7 +385,6 @@ void InvalidateGpuCache(const torch::Tensor& keys_cuda) {
     RetainCacheUntilStreamCompletes(cache, stream.stream());
     RecordLastCacheOpOnStreamLocked(stream.stream());
   }
-  g_last_profile.invalidate_ms += MsSince(invalidate_start);
 }
 
 bool ApplySgdUpdateGpuCache(const torch::Tensor& keys_cuda,

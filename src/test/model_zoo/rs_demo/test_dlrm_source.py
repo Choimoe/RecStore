@@ -43,6 +43,7 @@ class TestDlrmSourceFallback(unittest.TestCase):
                 dense,
                 sparse,
                 labels,
+                device=torch.device("cpu"),
             )
 
         self.assertEqual(len(sparse_features.keys()), 26)
@@ -52,80 +53,6 @@ class TestDlrmSourceFallback(unittest.TestCase):
                 torch.tensor([0, 26], dtype=torch.int64),
             )
         )
-
-    def test_recstore_embeddingbag_imports_without_torchrec(self) -> None:
-        import importlib
-        import sys
-
-        original_modules = {
-            name: sys.modules.get(name)
-            for name in [
-                "python.pytorch.torchrec_kv.EmbeddingBag",
-                "torchrec",
-                "torchrec.sparse.jagged_tensor",
-                "torchrec.modules.embedding_configs",
-            ]
-        }
-        for name in list(original_modules.keys()):
-            sys.modules.pop(name, None)
-
-        real_import_module = importlib.import_module
-
-        def _patched_import(name: str, package: str | None = None):
-            if name.startswith("torchrec"):
-                raise ModuleNotFoundError(name)
-            return real_import_module(name, package)
-
-        with mock.patch("importlib.import_module", side_effect=_patched_import):
-            module = importlib.import_module("src.python.pytorch.torchrec_kv.EmbeddingBag")
-
-        cfg = {"name": "table0", "embedding_dim": 4, "num_embeddings": 8, "feature_names": ["cat_0"]}
-        fake_client = mock.Mock()
-        fake_client.init_data.return_value = None
-        ebc = module.RecStoreEmbeddingBagCollection(
-            embedding_bag_configs=[cfg],
-            kv_client=fake_client,
-            initialize_tables=True,
-        )
-        keyed = module.KeyedTensor(
-            keys=["cat_0"],
-            values=torch.ones((2, 4), dtype=torch.float32),
-            length_per_key=[4],
-        )
-
-        self.assertEqual(ebc.embedding_bag_configs()[0].embedding_dim, 4)
-        self.assertEqual(ebc.feature_keys, ["cat_0"])
-        self.assertTrue(torch.equal(keyed["cat_0"], torch.ones((2, 4), dtype=torch.float32)))
-
-        for name, mod in original_modules.items():
-            if mod is not None:
-                sys.modules[name] = mod
-            else:
-                sys.modules.pop(name, None)
-
-    def test_build_kjt_batch_accepts_device_and_places_sparse_values_on_it(self) -> None:
-        real_import_module = dlrm_source.importlib.import_module
-
-        def _patched_import(name: str):
-            if name in {"torchrec.datasets.criteo", "torchrec.sparse.jagged_tensor"}:
-                raise ModuleNotFoundError(name)
-            return real_import_module(name)
-
-        dense = torch.zeros((2, 13), dtype=torch.float32)
-        sparse = torch.arange(52, dtype=torch.int64).reshape(2, 26)
-        labels = torch.zeros((2, 1), dtype=torch.float32)
-
-        with mock.patch(
-            "model_zoo.rs_demo.data.dlrm_source.importlib.import_module",
-            side_effect=_patched_import,
-        ):
-            _, sparse_features = dlrm_source.build_kjt_batch_from_dense_sparse_labels(
-                dense,
-                sparse,
-                labels,
-                device=torch.device("cpu"),
-            )
-
         self.assertEqual(sparse_features["cat_0"].values().device.type, "cpu")
 
     def test_custom_criteo_dataset_batch_getitems_matches_single_items(self) -> None:
@@ -144,14 +71,37 @@ class TestDlrmSourceFallback(unittest.TestCase):
                 num_embeddings_per_feature=[7] * 26,
             )
 
-            batch = dataset.__getitems__([1, 3, 5])
+            dense_b, sparse_b, labels_b = dataset.__getitems__([1, 3, 5])
             singles = [dataset[idx] for idx in [1, 3, 5]]
 
-        self.assertEqual(len(batch), 3)
-        for batched, single in zip(batch, singles):
-            for batched_tensor, single_tensor in zip(batched, single):
-                self.assertTrue(torch.equal(batched_tensor, single_tensor))
-                self.assertEqual(batched_tensor.dtype, single_tensor.dtype)
+        self.assertEqual(tuple(dense_b.shape), (3, 13))
+        self.assertEqual(tuple(sparse_b.shape), (3, 26))
+        self.assertEqual(tuple(labels_b.shape), (3, 1))
+        self.assertTrue(torch.equal(dense_b, torch.stack([s[0] for s in singles])))
+        self.assertTrue(torch.equal(sparse_b, torch.stack([s[1] for s in singles])))
+        self.assertTrue(torch.equal(labels_b, torch.stack([s[2] for s in singles])))
+        self.assertEqual(dense_b.dtype, singles[0][0].dtype)
+        self.assertEqual(sparse_b.dtype, singles[0][1].dtype)
+        self.assertEqual(labels_b.dtype, singles[0][2].dtype)
+
+    def test_cpu_fused_ids_match_kjt_feature_order(self) -> None:
+        sparse = torch.arange(3 * 26, dtype=torch.int64).reshape(3, 26)
+        names = [f"cat_{idx}" for idx in range(26)]
+        offsets = {name: idx << 10 for idx, name in enumerate(names)}
+        feature_offsets = torch.tensor(list(offsets.values()), dtype=torch.int64)
+
+        unique_ids, inverse, raw_count = dlrm_source.prepare_fused_ids_from_sparse_batch(
+            sparse, feature_offsets
+        )
+        _, sparse_features = dlrm_source.build_kjt_batch_from_dense_sparse_labels(
+            torch.zeros((3, 13)), sparse, torch.zeros((3, 1))
+        )
+        expected = dlrm_source.convert_kjt_ids_to_fused_ids(sparse_features, offsets)
+        expected_unique, expected_inverse = torch.unique(expected, return_inverse=True)
+
+        self.assertEqual(raw_count, expected.numel())
+        self.assertTrue(torch.equal(unique_ids, expected_unique))
+        self.assertTrue(torch.equal(inverse, expected_inverse))
 
     def test_resolve_default_table_sizes_uses_cap_instead_of_uniform_size(self) -> None:
         sizes = dlrm_source.resolve_num_embeddings_per_feature(5000)

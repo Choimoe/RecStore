@@ -1,5 +1,6 @@
 import torch
 import logging
+import os
 import time
 import torch.nn.functional as F
 from torch.autograd import Function
@@ -67,27 +68,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
-
-_EMPTY_LOOKUP_PROFILE: Dict[str, float] = {
-    "lookup_exchange_ids_ms": 0.0,
-    "lookup_local_lookup_ms": 0.0,
-    "lookup_exchange_responses_ms": 0.0,
-    "lookup_rebuild_ms": 0.0,
-    "lookup_post_rebuild_h2d_ms": 0.0,
-}
-
-
-def _new_lookup_profile() -> Dict[str, float]:
-    return dict(_EMPTY_LOOKUP_PROFILE)
-
-
-def _merge_profile_values(dst: Dict[str, float], src: Dict[str, Any] | None) -> None:
-    if not isinstance(src, dict):
-        return
-    for key, value in src.items():
-        if isinstance(value, (int, float)):
-            dst[key] = dst.get(key, 0.0) + float(value)
-
 
 class _RecStoreEBCFunction(Function):
     @staticmethod
@@ -172,8 +152,11 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                  enable_fusion: bool = True, fusion_k: int = 30,
                  ps_host: str = None, ps_port: int = None,
                  kv_client: RecStoreClient | None = None,
-                 initialize_tables: bool = True):
+                 initialize_tables: bool = True,
+                 fast_path_mode: str = "auto"):
         super().__init__()
+        if fast_path_mode not in {"auto", "off"}:
+            raise ValueError("fast_path_mode must be 'auto' or 'off'")
         self._embedding_bag_configs = [
             EmbeddingBagConfig(**c) for c in embedding_bag_configs
         ]
@@ -220,12 +203,9 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         # Cache for fused prefetch metadata (unique IDs and inverse) for one batch
         self._fused_ids_cpu: torch.Tensor | None = None
         self._fused_inverse: torch.Tensor | None = None
+        self._fused_prefetch_full_batch: bool = False
 
-        # Phase-1 single-node distributed fast path stays fully opt-in.
-        self.enable_single_node_distributed_fast_path: bool = False
-        self.single_node_distributed_mode: str | None = None
-        self.single_node_owner_policy: str = "hash_mod_world_size"
-        self.single_node_ps_backend: str = "local_shm"
+        self.fast_path_mode = fast_path_mode
         self.reset_perf_stats()
 
         for idx, config in enumerate(self._embedding_bag_configs):
@@ -278,8 +258,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         setup. The single-node fast path and request-lazy backends (BRPC/GRPC)
         do not, and are left untouched.
         """
-        if getattr(self, "enable_single_node_distributed_fast_path", False):
-            return False
         current_ps_backend = getattr(self.kv_client, "current_ps_backend", None)
         if not callable(current_ps_backend):
             return False
@@ -296,30 +274,11 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         self._trace = []
 
     def reset_perf_stats(self) -> None:
+        # ponytail: keep only E2E-useful lookup timings.
         self._perf_stats: Dict[str, float] = {
-            "prefetch_issue_ms": 0.0,
-            "planned_gpu_cache_prefill_ms": 0.0,
-            "planned_gpu_cache_prefill_wait_ms": 0.0,
-            "planned_gpu_cache_prefill_batches": 0.0,
-            "planned_gpu_cache_prefill_ids": 0.0,
-            "planned_gpu_cache_prefill_successes": 0.0,
-            "planned_gpu_cache_prefill_fallbacks": 0.0,
-            "planned_gpu_cache_prefill_no_cuda": 0.0,
-            "planned_gpu_cache_prefill_no_api": 0.0,
-            "planned_gpu_cache_prefill_wait_failures": 0.0,
-            "planned_gpu_cache_prefill_result_size_mismatches": 0.0,
             "lookup_ids_build_ms": 0.0,
             "lookup_wait_ms": 0.0,
             "lookup_total_ms": 0.0,
-            "lookup_owner_exchange_ms": 0.0,
-            "lookup_local_lookup_ms": 0.0,
-            "lookup_reassemble_ms": 0.0,
-            "lookup_gpu_cache_pull_ms": 0.0,
-            "lookup_fallback_pull_ms": 0.0,
-            "lookup_partial_merge_ms": 0.0,
-            "lookup_partial_prefetched_ids": 0.0,
-            "lookup_partial_missing_ids": 0.0,
-            "pool_embedding_bag_ms": 0.0,
         }
 
     def _perf_add(self, key: str, delta_ms: float) -> None:
@@ -358,12 +317,8 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         prefill = getattr(self.kv_client, "prefill_gpu_cache", None)
         is_gpu_cache_enabled = getattr(self.kv_client, "is_gpu_cache_enabled", None)
         if callable(is_gpu_cache_enabled) and not bool(is_gpu_cache_enabled()):
-            self._perf_add("planned_gpu_cache_prefill_no_api", 1.0)
-            self._perf_add("planned_gpu_cache_prefill_fallbacks", 1.0)
             return None
         if not callable(prefill):
-            self._perf_add("planned_gpu_cache_prefill_no_api", 1.0)
-            self._perf_add("planned_gpu_cache_prefill_fallbacks", 1.0)
             return None
         return prefill
 
@@ -442,13 +397,13 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         fused_ids_cpu: torch.Tensor | None = None,
         fused_inverse: torch.Tensor | None = None,
         invalid_fused_ids_cpu: torch.Tensor | None = None,
+        full_batch: bool = False,
     ):
         """Set a single fused prefetch handle for the upcoming forward.
 
         Optionally record stats: number of ids and issue timestamp for latency accounting.
-        Extra fused_ids_cpu and fused_inverse are accepted for API compatibility with the
-        prefetcher; they are currently unused but kept to avoid argument errors when
-        passed through from the producer thread.
+        The fused ID metadata lets a full-batch consumer expand unique lookup rows
+        without recomputing ``torch.unique``.
         """
         self._clear_per_feature_prefetch_state()
         slot = {
@@ -457,6 +412,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             "issue_ts": float(issue_ts) if issue_ts is not None else time.time(),
             "fused_ids_cpu": fused_ids_cpu if fused_ids_cpu is not None else None,
             "fused_inverse": fused_inverse if fused_inverse is not None else None,
+            "full_batch": bool(full_batch),
             "invalid_fused_ids_cpu": (
                 invalid_fused_ids_cpu.detach().to(dtype=torch.int64, device="cpu").flatten()
                 if isinstance(invalid_fused_ids_cpu, torch.Tensor)
@@ -480,6 +436,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             self._fused_prefetch_issue_ts = slot["issue_ts"]
             self._fused_ids_cpu = slot["fused_ids_cpu"]
             self._fused_inverse = slot["fused_inverse"]
+            self._fused_prefetch_full_batch = bool(slot.get("full_batch", False))
             self._fused_invalid_ids_cpu = slot.get("invalid_fused_ids_cpu")
         else:
             self._fused_prefetch_handle = None
@@ -487,6 +444,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             self._fused_prefetch_issue_ts = None
             self._fused_ids_cpu = None
             self._fused_inverse = None
+            self._fused_prefetch_full_batch = False
             self._fused_invalid_ids_cpu = None
 
     def _issue_fused_prefetch_from_ids(
@@ -496,6 +454,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         num_ids: int,
         *,
         record_handle: bool,
+        full_batch: bool,
     ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
         if unique_ids.numel() == 0:
             issue_ts = perf_counter()
@@ -508,7 +467,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         if callable(set_prefetch_table_name):
             set_prefetch_table_name(self._master_config.name)
         handle = self.kv_client.prefetch(unique_ids)
-        self._perf_add("prefetch_issue_ms", (perf_counter() - t_issue_start) * 1e3)
         issue_ts = perf_counter()
         if record_handle:
             self.set_fused_prefetch_handle(
@@ -517,23 +475,16 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 issue_ts=issue_ts,
                 fused_ids_cpu=unique_ids,
                 fused_inverse=inverse,
+                full_batch=full_batch,
             )
             return handle
         return handle, num_ids, issue_ts, unique_ids, inverse
 
-    def issue_fused_prefetch(
+    def prepare_fused_prefetch(
         self,
         features: KeyedJaggedTensor,
-        *,
-        record_handle: bool = True,
-    ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
-        """Compute fused global IDs and issue a single prefetch.
-
-        When record_handle is True (default), the handle is stored on the module and the
-        handle is returned. When False, the caller receives a tuple with metadata so the
-        consumer can set the handle later without touching shared state in the producer
-        thread: (handle, num_ids, issue_ts, fused_ids_cpu, inverse).
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """Build reusable unique-ID metadata for a full-batch fused prefetch."""
         if not self._enable_fusion or self._master_config is None:
             raise RuntimeError("Fused prefetch requires fusion enabled and a valid master config.")
 
@@ -555,10 +506,41 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         fused_ids_cpu_full = fused_values_all.to("cpu") if fused_values_all.numel() > 0 else fused_values_all
         unique_ids, inverse = self._dedupe_fused_ids_cpu(fused_ids_cpu_full)
         self._perf_add("lookup_ids_build_ms", (perf_counter() - t_build_start) * 1e3)
+        return unique_ids, inverse, int(fused_values_all.numel())
+
+    def issue_prepared_fused_prefetch(
+        self,
+        unique_ids: torch.Tensor,
+        inverse: torch.Tensor,
+        num_ids: int,
+        *,
+        record_handle: bool = True,
+    ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
+        """Issue a full-batch prefetch from previously prepared ID metadata."""
         return self._issue_fused_prefetch_from_ids(
             unique_ids,
             inverse,
-            int(fused_values_all.numel()),
+            int(num_ids),
+            record_handle=record_handle,
+            full_batch=True,
+        )
+
+    def issue_fused_prefetch(
+        self,
+        features: KeyedJaggedTensor,
+        *,
+        record_handle: bool = True,
+    ) -> int | Tuple[int, int, float, torch.Tensor, torch.Tensor]:
+        """Compute fused global IDs and issue a single prefetch.
+
+        When record_handle is True (default), the handle is stored on the module and the
+        handle is returned. When False, the caller receives a tuple with metadata so the
+        consumer can set the handle later without touching shared state in the producer
+        thread: (handle, num_ids, issue_ts, fused_ids_cpu, inverse).
+        """
+        prepared = self.prepare_fused_prefetch(features)
+        return self.issue_prepared_fused_prefetch(
+            *prepared,
             record_handle=record_handle,
         )
 
@@ -583,6 +565,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             inverse,
             int(unique_ids.numel()),
             record_handle=record_handle,
+            full_batch=False,
         )
 
     def prefill_gpu_cache_for_fused_ids(self, fused_ids: torch.Tensor) -> bool:
@@ -614,10 +597,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         if not values.is_contiguous():
             values = values.contiguous()
         prefill(self._master_config.name, prefill_ids, values)
-        self._perf_add("planned_gpu_cache_prefill_ms", (perf_counter() - t_prefill_start) * 1e3)
-        self._perf_add("planned_gpu_cache_prefill_batches", 1.0)
-        self._perf_add("planned_gpu_cache_prefill_ids", float(unique_ids.numel()))
-        self._perf_add("planned_gpu_cache_prefill_successes", 1.0)
         return True
 
     def invalidate_gpu_cache_for_fused_ids(self, fused_ids: torch.Tensor) -> bool:
@@ -643,21 +622,24 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         invalidator(self._master_config.name, unique_ids)
         return True
 
-    def _can_use_single_node_distributed_fast_path(self) -> bool:
-        if not self.enable_single_node_distributed_fast_path:
-            return False
+    def resolve_fast_path_backend(self) -> str | None:
+        if self.fast_path_mode == "off":
+            return None
+        if self.fast_path_mode != "auto":
+            raise ValueError("fast_path_mode must be 'auto' or 'off'")
         dist = getattr(torch, "distributed", None)
         if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
-            return False
+            return None
         if not hasattr(dist, "get_world_size") or dist.get_world_size() <= 1:
-            return False
-        if self.single_node_distributed_mode != "single_node":
-            return False
-        if self.single_node_owner_policy != "hash_mod_world_size":
-            return False
-        if self.single_node_ps_backend not in _LOCAL_FAST_PATH_BACKENDS:
-            return False
-        return True
+            return None
+        try:
+            local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", ""))
+        except ValueError:
+            return None
+        if local_world_size != int(dist.get_world_size()):
+            return None
+        backend = str(self.kv_client.current_ps_backend()).lower()
+        return backend if backend in _LOCAL_FAST_PATH_BACKENDS else None
 
     def _uses_shared_local_shm_single_table(self) -> bool:
         probe = getattr(self.kv_client, "is_shared_local_shm_table", None)
@@ -668,15 +650,21 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         except Exception:
             return False
 
-    def _prepare_single_node_local_shm_fast_path_client(self, rank: int = 0) -> None:
+    def _prepare_single_node_local_shm_fast_path_client(
+        self,
+        backend: str,
+        rank: int = 0,
+    ) -> None:
         current_backend = None
         if hasattr(self.kv_client, "current_ps_backend"):
             current_backend = self.kv_client.current_ps_backend()
+        if backend not in _LOCAL_FAST_PATH_BACKENDS:
+            raise RuntimeError("single-node fast path requires local_shm or hierkv backend")
         if hasattr(self.kv_client, "activate_shard"):
             self.kv_client.activate_shard(rank)
-        if current_backend != self.single_node_ps_backend:
+        if current_backend != backend:
             if hasattr(self.kv_client, "set_ps_backend"):
-                self.kv_client.set_ps_backend(self.single_node_ps_backend)
+                self.kv_client.set_ps_backend(backend)
 
     def _build_lookup_request_payload(
         self,
@@ -718,14 +706,14 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         self,
         fused_ids: torch.Tensor,
         *,
+        backend: str,
         compute_device: torch.device,
     ) -> torch.Tensor:
-        profile = _new_lookup_profile()
         dist = torch.distributed
         rank = int(dist.get_rank())
         world_size = int(dist.get_world_size())
-        backend = dist
-        self._prepare_single_node_local_shm_fast_path_client(rank)
+        exchange_backend = dist
+        self._prepare_single_node_local_shm_fast_path_client(backend, rank)
 
         local_payload = self._build_lookup_request_payload(
             fused_ids,
@@ -733,17 +721,11 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             world_size=world_size,
         )
         t_exchange_start = perf_counter()
-        exchange_ids_start = time.perf_counter()
         gathered_requests = exchange_lookup_ids(
             local_payload,
             world_size=world_size,
-            backend=backend,
+            backend=exchange_backend,
         )
-        self._perf_add("lookup_owner_exchange_ms", (perf_counter() - t_exchange_start) * 1e3)
-        profile["lookup_exchange_ids_ms"] += (
-            time.perf_counter() - exchange_ids_start
-        ) * 1e3
-
         owner_source_rank_tensors = [
             payload.source_ranks for payload in gathered_requests if payload.source_ranks.numel() > 0
         ]
@@ -758,18 +740,9 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         if owner_id_tensors:
             local_ids = torch.cat(owner_id_tensors, dim=0).contiguous()
             t_lookup_start = perf_counter()
-            lookup_start = time.perf_counter()
             local_embeddings = self.kv_client.local_lookup_flat(
                 self._master_config.name,
                 local_ids,
-            )
-            self._perf_add("lookup_local_lookup_ms", (perf_counter() - t_lookup_start) * 1e3)
-            profile["lookup_local_lookup_ms"] += (
-                time.perf_counter() - lookup_start
-            ) * 1e3
-            _merge_profile_values(
-                profile,
-                getattr(self.kv_client, "get_last_local_shm_lookup_profile", lambda: {})(),
             )
         else:
             local_ids = torch.empty((0,), dtype=torch.int64, device=payload_device)
@@ -795,31 +768,19 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             ),
             embeddings=local_embeddings,
         )
-        exchange_responses_start = time.perf_counter()
         gathered_responses = exchange_lookup_embedding_responses(
             response_payload,
             world_size=world_size,
-            backend=backend,
+            backend=exchange_backend,
         )
-        profile["lookup_exchange_responses_ms"] += (
-            time.perf_counter() - exchange_responses_start
-        ) * 1e3
-        rebuild_start = time.perf_counter()
         t_reassemble_start = perf_counter()
         rebuilt = reassemble_lookup_embedding_responses(
             gathered_responses,
             requestor_rank=rank,
             total_rows=int(fused_ids.numel()),
         )
-        self._perf_add("lookup_reassemble_ms", (perf_counter() - t_reassemble_start) * 1e3)
-        profile["lookup_rebuild_ms"] += (time.perf_counter() - rebuild_start) * 1e3
         if rebuilt.device != compute_device:
-            transfer_start = time.perf_counter()
             rebuilt = rebuilt.to(compute_device)
-            profile["lookup_post_rebuild_h2d_ms"] += (
-                time.perf_counter() - transfer_start
-            ) * 1e3
-        setattr(self, "_single_node_forward_profile", profile)
         return rebuilt
 
     def _lookup_fused_embeddings_shared_local_shm_single_table(
@@ -828,7 +789,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         *,
         compute_device: torch.device,
     ) -> torch.Tensor:
-        profile = _new_lookup_profile()
         dist = torch.distributed
         dist_available = (
             not hasattr(dist, "is_available") or bool(dist.is_available())
@@ -837,24 +797,14 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             hasattr(dist, "is_initialized") and bool(dist.is_initialized())
         )
         rank = int(dist.get_rank()) if dist_available and dist_initialized else 0
-        self._prepare_single_node_local_shm_fast_path_client(rank)
-        lookup_start = time.perf_counter()
+        self._prepare_single_node_local_shm_fast_path_client("local_shm", rank)
+        t_lookup_start = perf_counter()
         local_embeddings = self.kv_client.local_lookup_flat(
             self._master_config.name,
             fused_ids,
         )
-        profile["lookup_local_lookup_ms"] += (time.perf_counter() - lookup_start) * 1e3
-        _merge_profile_values(
-            profile,
-            getattr(self.kv_client, "get_last_local_shm_lookup_profile", lambda: {})(),
-        )
         if local_embeddings.device != compute_device:
-            transfer_start = time.perf_counter()
             local_embeddings = local_embeddings.to(compute_device)
-            profile["lookup_post_rebuild_h2d_ms"] += (
-                time.perf_counter() - transfer_start
-            ) * 1e3
-        setattr(self, "_single_node_forward_profile", profile)
         return local_embeddings
 
     def _lookup_fused_embeddings_gpu_cache(
@@ -883,7 +833,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         )
         if embeddings.device != compute_device:
             embeddings = embeddings.to(compute_device)
-        self._perf_add("lookup_gpu_cache_ms", (perf_counter() - t_lookup) * 1e3)
         return embeddings
 
     def _prefill_gpu_cache_from_fused_prefetch(
@@ -896,8 +845,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             return False
         allow_cpu_prefill = bool(getattr(self.kv_client, "allow_cpu_gpu_cache_prefill", False))
         if compute_device.type != "cuda" and not allow_cpu_prefill:
-            self._perf_add("planned_gpu_cache_prefill_no_cuda", 1.0)
-            self._perf_add("planned_gpu_cache_prefill_fallbacks", 1.0)
             self._pop_current_fused_prefetch_slot()
             return False
         prefill = self._gpu_cache_prefill_api()
@@ -906,7 +853,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             return False
         ids_cached = self._fused_ids_cpu
         if ids_cached is None:
-            self._perf_add("planned_gpu_cache_prefill_fallbacks", 1.0)
             self._pop_current_fused_prefetch_slot()
             return False
         t_prefill_start = perf_counter()
@@ -921,7 +867,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 device=compute_device,
             )
             t_wait_end = perf_counter()
-            self._perf_add("planned_gpu_cache_prefill_wait_ms", (t_wait_end - t_wait_start) * 1e3)
             self._prefetch_wait_latencies.append(t_wait_end - t_wait_start)
             issue_latency = t_wait_start - (self._fused_prefetch_issue_ts or t_wait_start)
             self._prefetch_issue_latencies.append(issue_latency)
@@ -939,8 +884,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                     ids_cached.numel(),
                     fused_values_all.numel(),
                 )
-                self._perf_add("planned_gpu_cache_prefill_result_size_mismatches", 1.0)
-                self._perf_add("planned_gpu_cache_prefill_fallbacks", 1.0)
                 prefill_values = self.kv_client.local_lookup_flat(
                     self._master_config.name,
                     prefill_ids,
@@ -951,8 +894,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 "falling back to local lookup prefill: %s",
                 exc,
             )
-            self._perf_add("planned_gpu_cache_prefill_wait_failures", 1.0)
-            self._perf_add("planned_gpu_cache_prefill_fallbacks", 1.0)
             prefill_values = self.kv_client.local_lookup_flat(
                 self._master_config.name,
                 prefill_ids,
@@ -960,10 +901,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         if not prefill_values.is_contiguous():
             prefill_values = prefill_values.contiguous()
         prefill(self._master_config.name, prefill_ids, prefill_values)
-        self._perf_add("planned_gpu_cache_prefill_ms", (perf_counter() - t_prefill_start) * 1e3)
-        self._perf_add("planned_gpu_cache_prefill_batches", 1.0)
-        self._perf_add("planned_gpu_cache_prefill_ids", float(prefill_ids.numel()))
-        self._perf_add("planned_gpu_cache_prefill_successes", 1.0)
         self._pop_current_fused_prefetch_slot()
         return True
 
@@ -994,18 +931,30 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             inv = self._fused_inverse
             ids_cached = self._fused_ids_cpu
             if inv is not None and ids_cached is not None and all_embeddings.size(0) == ids_cached.numel():
-                current_unique_ids = torch.unique(fused_values_all.detach().to(dtype=torch.int64, device="cpu"))
-                ids_match_current_batch = (
-                    ids_cached.detach().to(dtype=torch.int64, device="cpu").flatten().numel()
-                    == current_unique_ids.numel()
-                    and torch.equal(
-                        ids_cached.detach().to(dtype=torch.int64, device="cpu").flatten(),
-                        current_unique_ids,
+                if self._fused_prefetch_full_batch:
+                    cached_ids = ids_cached.detach().to(dtype=torch.int64, device="cpu").flatten()
+                    cached_inverse = inv.detach().to(dtype=torch.long, device="cpu").flatten()
+                    current_ids = cpu_ids.detach().to(dtype=torch.int64, device="cpu").flatten()
+                    slot_matches_current_batch = (
+                        cached_inverse.numel() == current_ids.numel()
+                        and (
+                            cached_inverse.numel() == 0
+                            or (
+                                int(cached_inverse.min().item()) >= 0
+                                and int(cached_inverse.max().item()) < cached_ids.numel()
+                                and torch.equal(
+                                    cached_ids.index_select(0, cached_inverse),
+                                    current_ids,
+                                )
+                            )
+                        )
                     )
-                )
-                if (
-                    ids_match_current_batch
-                    and (invalid_ids is None or invalid_ids.numel() == 0)
+                    if not slot_matches_current_batch:
+                        raise RuntimeError(
+                            "Fused prefetch slot does not match the current batch"
+                        )
+                if self._fused_prefetch_full_batch and (
+                    invalid_ids is None or invalid_ids.numel() == 0
                 ):
                     indexer = inv.to(device=all_embeddings.device, dtype=torch.long)
                     all_embeddings = all_embeddings.index_select(0, indexer)
@@ -1097,8 +1046,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             else torch.zeros_like(unique_batch_ids, dtype=torch.bool)
         )
         missing_ids_cpu = unique_batch_ids[~has_prefetched]
-        self._perf_add("lookup_partial_prefetched_ids", float(prefetched_ids_cpu.numel()))
-        self._perf_add("lookup_partial_missing_ids", float(missing_ids_cpu.numel()))
 
         all_ids_cpu = prefetched_ids_cpu
         all_embeddings = prefetched_embeddings
@@ -1124,7 +1071,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         )
         if merged.device != compute_device:
             merged = merged.to(compute_device)
-        self._perf_add("lookup_partial_merge_ms", (perf_counter() - t_merge_start) * 1e3)
         return merged
 
     def _lookup_missing_fused_prefetch_rows(self, ids: torch.Tensor) -> torch.Tensor:
@@ -1148,15 +1094,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 try:
                     t_lookup_start = perf_counter()
                     rows = local_lookup(self._master_config.name, ids)
-                    self._perf_add(
-                        "lookup_local_lookup_ms", (perf_counter() - t_lookup_start) * 1e3
-                    )
-                    _merge_profile_values(
-                        getattr(self, "_single_node_forward_profile", {}),
-                        getattr(
-                            self.kv_client, "get_last_local_shm_lookup_profile", lambda: {}
-                        )(),
-                    )
                     return rows
                 except RuntimeError as exc:
                     logging.debug(
@@ -1186,13 +1123,11 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 )
         t_pull_start = perf_counter()
         rows = self.kv_client.pull(name=self._master_config.name, ids=ids.to("cpu"))
-        self._perf_add("lookup_fallback_pull_ms", (perf_counter() - t_pull_start) * 1e3)
         if rows.device != target_device:
             rows = rows.to(target_device)
         return rows
 
     def forward(self, features: KeyedJaggedTensor) -> KeyedTensor:
-        setattr(self, "_single_node_forward_profile", {})
         t_lookup_total_start = perf_counter()
         try:
             return self._forward_impl(features)
@@ -1219,18 +1154,16 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             lengths_total_list: List[torch.Tensor] = []
             compute_device = features.device()  # target device (cuda or cpu)
             uses_shared_local_shm = self._uses_shared_local_shm_single_table()
-            use_shared_local_shm_direct_fast_path = (
-                self._can_use_single_node_distributed_fast_path() and uses_shared_local_shm
+            fast_path_backend = self.resolve_fast_path_backend()
+            use_local_shm_direct_fast_path = (
+                self.fast_path_mode != "off" and uses_shared_local_shm
             )
-            use_local_shm_direct_fast_path = uses_shared_local_shm
             use_single_node_owner_exchange_fast_path = (
-                self._can_use_single_node_distributed_fast_path()
-                and not use_shared_local_shm_direct_fast_path
+                fast_path_backend is not None
+                and not use_local_shm_direct_fast_path
             )
             use_single_node_fast_path = (
                 use_local_shm_direct_fast_path
-                or
-                use_shared_local_shm_direct_fast_path
                 or use_single_node_owner_exchange_fast_path
             )
 
@@ -1296,6 +1229,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             elif use_single_node_owner_exchange_fast_path:
                 all_embeddings = self._lookup_fused_embeddings_single_node_distributed(
                     fused_values_all,
+                    backend=fast_path_backend,
                     compute_device=compute_device,
                 )
             elif self._fused_prefetch_handle is not None:
@@ -1375,7 +1309,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                 mode="sum",
                 sparse=False,
             )
-            self._perf_add("pool_embedding_bag_ms", (perf_counter() - t_pool_start) * 1e3)
 
             # Split back by feature (each has B_i bags = lengths.size(0))
             pooled_embs_list: List[torch.Tensor] = []
@@ -1429,14 +1362,12 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                             cpu_ids_local = ids_used.to('cpu')
                             t_pull_start = perf_counter()
                             all_embeddings = self.kv_client.pull(name=self._master_config.name, ids=cpu_ids_local)
-                            self._perf_add("lookup_fallback_pull_ms", (perf_counter() - t_pull_start) * 1e3)
                             if values.device.type == 'cuda':
                                 all_embeddings = all_embeddings.to(values.device)
                         else:
                             ids_used = values
                             t_pull_start = perf_counter()
                             all_embeddings = self.kv_client.pull(name=config_name, ids=ids_used)
-                            self._perf_add("lookup_fallback_pull_ms", (perf_counter() - t_pull_start) * 1e3)
                             if values.device.type == 'cuda':
                                 all_embeddings = all_embeddings.to(values.device)
                 else:
@@ -1447,14 +1378,12 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                         cpu_ids_local = ids_used.to('cpu')
                         t_pull_start = perf_counter()
                         all_embeddings = self.kv_client.pull(name=self._master_config.name, ids=cpu_ids_local)
-                        self._perf_add("lookup_fallback_pull_ms", (perf_counter() - t_pull_start) * 1e3)
                         if values.device.type == 'cuda':
                             all_embeddings = all_embeddings.to(values.device)
                     else:
                         ids_used = values
                         t_pull_start = perf_counter()
                         all_embeddings = self.kv_client.pull(name=config_name, ids=ids_used)
-                        self._perf_add("lookup_fallback_pull_ms", (perf_counter() - t_pull_start) * 1e3)
                         if values.device.type == 'cuda':
                             all_embeddings = all_embeddings.to(values.device)
                 all_embeddings.requires_grad_()
@@ -1473,7 +1402,6 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                     mode="sum",
                     sparse=False,
                 )
-                self._perf_add("pool_embedding_bag_ms", (perf_counter() - t_pool_start) * 1e3)
             pooled_embs_list.append(pooled_embs)
 
         concatenated_embs = torch.cat(pooled_embs_list, dim=1)

@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_OUTPUT_ROOT = Path("/nas/home/shq/docker/rs_demo/bench_e2e")
-DEFAULT_DAY0 = Path("/nas/home/shq/RecStore_/model_zoo/torchrec_dlrm/partial_data/day_0.bak")
+DEFAULT_OUTPUT_ROOT = Path("/tmp/rs_demo/bench_e2e")
+DEFAULT_DAY0 = Path("/tmp/RecStore/model_zoo/torchrec_dlrm/partial_data/day_0.bak")
 SPARSE_FEATURES_PER_SAMPLE = 26
 
 @dataclass(frozen=True)
@@ -25,7 +25,6 @@ class E2ELane:
     nproc_per_node: int = 1
     torchrec_memory_mode: str = "hbm"
     prefetch_depth: int = 0
-    enable_single_node_fast_path: bool = False
     single_node_ps_backend: str = "local_shm"
     extra_args: tuple[str, ...] = field(default_factory=tuple)
 

@@ -580,7 +580,7 @@ void RcShardClientTransport::SubmitRequest(
   auto* local_commit     = reinterpret_cast<CommitWord*>(
       request_slot + RequestCommitOffset(config_));
   *local_descriptor = descriptor;
-  if (payload_bytes > 0) {
+  if (payload_bytes > 0 && payload != local_payload) {
     std::memcpy(local_payload, payload, payload_bytes);
   }
   local_commit->seq.store(descriptor.seq, std::memory_order_release);
