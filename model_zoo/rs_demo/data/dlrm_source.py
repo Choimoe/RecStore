@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
@@ -37,7 +38,7 @@ def build_kjt_batch_from_dense_sparse_labels(
 
     sparse_mat = sparse_batch.to(torch.long)
     if device is not None and sparse_mat.device != device:
-        sparse_mat = sparse_mat.to(device)
+        sparse_mat = sparse_mat.to(device, non_blocking=True)
     batch_size = sparse_mat.shape[0]
     values_list = [sparse_mat[:, i] for i in range(26)]
     values = torch.cat(values_list, dim=0)
@@ -46,6 +47,19 @@ def build_kjt_batch_from_dense_sparse_labels(
 
     kjt = build_sparse_features(cat_names, values, lengths)
     return dense_batch, kjt
+
+
+def prepare_fused_ids_from_sparse_batch(
+    sparse_batch: torch.Tensor,
+    feature_offsets: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    if sparse_batch.ndim != 2 or sparse_batch.shape[1] != feature_offsets.numel():
+        raise ValueError("sparse batch shape does not match feature offsets")
+    fused_ids = (
+        sparse_batch.to(dtype=torch.int64, device="cpu") + feature_offsets
+    ).T.reshape(-1)
+    unique_ids, inverse = torch.unique(fused_ids, return_inverse=True)
+    return unique_ids, inverse, int(fused_ids.numel())
 
 
 def get_default_cat_names() -> list[str]:
@@ -186,14 +200,34 @@ def build_train_dataloader(
         )
         effective_shuffle = False
 
+    num_workers = max(0, int(os.getenv("RS_DEMO_DATALOADER_NUM_WORKERS", "2")))
+    pin_memory = os.getenv("RS_DEMO_DATALOADER_PIN_MEMORY", "1") != "0"
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=effective_shuffle,
         sampler=sampler,
         drop_last=False,
-        pin_memory=False,
-        num_workers=0,
+        pin_memory=pin_memory,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
+        collate_fn=_identity_batch,
+        worker_init_fn=_init_worker,
         generator=generator,
     )
     return dataset, dataloader
+
+
+def _identity_batch(batch):
+    return batch
+
+
+def _init_worker(worker_id: int) -> None:
+    torch.set_num_threads(1)
+    raw_cpus = os.getenv("RS_DEMO_DATALOADER_CPU_LIST", "")
+    if not raw_cpus or not hasattr(os, "sched_setaffinity"):
+        return
+    cpus = [int(value) for value in raw_cpus.split(",") if value.strip()]
+    if cpus:
+        os.sched_setaffinity(0, {cpus[worker_id % len(cpus)]})

@@ -71,14 +71,37 @@ class TestDlrmSourceFallback(unittest.TestCase):
                 num_embeddings_per_feature=[7] * 26,
             )
 
-            batch = dataset.__getitems__([1, 3, 5])
+            dense_b, sparse_b, labels_b = dataset.__getitems__([1, 3, 5])
             singles = [dataset[idx] for idx in [1, 3, 5]]
 
-        self.assertEqual(len(batch), 3)
-        for batched, single in zip(batch, singles):
-            for batched_tensor, single_tensor in zip(batched, single):
-                self.assertTrue(torch.equal(batched_tensor, single_tensor))
-                self.assertEqual(batched_tensor.dtype, single_tensor.dtype)
+        self.assertEqual(tuple(dense_b.shape), (3, 13))
+        self.assertEqual(tuple(sparse_b.shape), (3, 26))
+        self.assertEqual(tuple(labels_b.shape), (3, 1))
+        self.assertTrue(torch.equal(dense_b, torch.stack([s[0] for s in singles])))
+        self.assertTrue(torch.equal(sparse_b, torch.stack([s[1] for s in singles])))
+        self.assertTrue(torch.equal(labels_b, torch.stack([s[2] for s in singles])))
+        self.assertEqual(dense_b.dtype, singles[0][0].dtype)
+        self.assertEqual(sparse_b.dtype, singles[0][1].dtype)
+        self.assertEqual(labels_b.dtype, singles[0][2].dtype)
+
+    def test_cpu_fused_ids_match_kjt_feature_order(self) -> None:
+        sparse = torch.arange(3 * 26, dtype=torch.int64).reshape(3, 26)
+        names = [f"cat_{idx}" for idx in range(26)]
+        offsets = {name: idx << 10 for idx, name in enumerate(names)}
+        feature_offsets = torch.tensor(list(offsets.values()), dtype=torch.int64)
+
+        unique_ids, inverse, raw_count = dlrm_source.prepare_fused_ids_from_sparse_batch(
+            sparse, feature_offsets
+        )
+        _, sparse_features = dlrm_source.build_kjt_batch_from_dense_sparse_labels(
+            torch.zeros((3, 13)), sparse, torch.zeros((3, 1))
+        )
+        expected = dlrm_source.convert_kjt_ids_to_fused_ids(sparse_features, offsets)
+        expected_unique, expected_inverse = torch.unique(expected, return_inverse=True)
+
+        self.assertEqual(raw_count, expected.numel())
+        self.assertTrue(torch.equal(unique_ids, expected_unique))
+        self.assertTrue(torch.equal(inverse, expected_inverse))
 
     def test_resolve_default_table_sizes_uses_cap_instead_of_uniform_size(self) -> None:
         sizes = dlrm_source.resolve_num_embeddings_per_feature(5000)

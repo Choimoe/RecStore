@@ -74,7 +74,7 @@ class CustomCriteoDataset(Dataset):
             if torch.any(positive):
                 sparse_batch[:, positive] %= vocab[positive]
 
-        return list(zip(dense_batch.unbind(0), sparse_batch.unbind(0), labels_batch.unbind(0)))
+        return dense_batch, sparse_batch, labels_batch
 
 
 class RandomSingleDayDataset(Dataset):
@@ -175,7 +175,8 @@ def get_custom_dataloader(args: argparse.Namespace, backend: str, stage: str) ->
             shuffle=(stage == "train"),
             drop_last=(stage == "train" and args.drop_last_training_batch),
             pin_memory=args.pin_memory,
-            num_workers=0  # 避免多进程问题
+            num_workers=0,  # 避免多进程问题
+            collate_fn=lambda batch: batch,
         )
         
         return dataloader

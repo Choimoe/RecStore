@@ -23,10 +23,15 @@ def _mean(rows: Iterable[dict[str, str]], column: str) -> float:
 LATENCY_BREAKDOWN_COLUMNS = (
     "batch_prepare_ms",
     "input_pack_ms",
+    "lookup_ids_build_ms",
     "embed_lookup_local_ms",
     "dense_fwd_ms",
     "backward_ms",
     "dense_optimizer_ms",
+    "sparse_backward_replay_ms",
+    "sparse_optimizer_step_ms",
+    "update_overlap_prepare_ms",
+    "sparse_optimizer_flush_ms",
     "sparse_optimizer_ms",
     "step_total_ms",
 )
@@ -90,7 +95,12 @@ def collect_summary_rows(manifest: list[dict[str, Any]]) -> list[dict[str, Any]]
             continue
         warm = _warm_rows(path)
         batch_size = int(item["batch_size"])
-        latency_means = {column: _mean(warm, column) for column in LATENCY_BREAKDOWN_COLUMNS}
+        latency_means = {
+            column: _mean(warm, column)
+            if any(row.get(column, "") not in {"", "nan", "NaN"} for row in warm)
+            else ""
+            for column in LATENCY_BREAKDOWN_COLUMNS
+        }
         out.append(
             {
                 **item,
@@ -141,6 +151,9 @@ def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
     for row in rows:
         grouped.setdefault(str(row.get("lane", row.get("transport", ""))), []).append(row)
     systems = sorted(grouped) or ["-"]
+    transports = sorted(
+        {str(row["transport"]) for row in rows if row.get("backend") == "recstore" and row.get("transport")}
+    )
 
     def table(metrics: list[tuple[str, list[str]]]) -> list[str]:
         return [
@@ -148,6 +161,10 @@ def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
             f"| --- | {' | '.join(['---:'] * len(systems))} |",
             *(f"| {label} | {' | '.join(values)} |" for label, values in metrics),
         ]
+
+    def format_mean(group: list[dict[str, Any]], metric: str) -> str:
+        values = [row[metric] for row in group if row.get(metric, "") not in {"", "nan", "NaN"}]
+        return f"{statistics.fmean(float(value) for value in values):.3f}" if values else "-"
 
     lines = [
         *header,
@@ -157,7 +174,8 @@ def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
         "",
         (
             f"本次测试模型为 {cfg.model}，client 部署为 {infer_client_deployment(cfg.clients)}，"
-            f"PS 部署为 {infer_ps_deployment(cfg.servers)}，client=[{clients}]，PS=[{servers}]。"
+            f"PS 部署为 {infer_ps_deployment(cfg.servers)}，RecStore transport={','.join(transports) or '-'}，"
+            f"client=[{clients}]，PS=[{servers}]。"
             f"batch_size={cfg.batch_size}，embedding_dim={cfg.embedding_dim}，"
             f"num_embeddings={cfg.num_embeddings}，steps={cfg.steps}，warmup_steps={cfg.warmup_steps}，"
             f"init_rows={cfg.init_rows}，"
@@ -201,7 +219,7 @@ def render_summary_md(cfg: BenchmarkConfig, rows: list[dict[str, Any]]) -> str:
     )
     lines.extend(table([
         *[
-            (column, [f"{_mean(grouped[name], f'mean_{column}'):.3f}" if name in grouped else "0.000" for name in systems])
+            (column, [format_mean(grouped[name], f"mean_{column}") if name in grouped else "-" for name in systems])
             for column in LATENCY_BREAKDOWN_COLUMNS
         ],
         ("p95 step_total", [f"{_mean(grouped[name], 'p95_step_total_ms'):.3f}" if name in grouped else "0.000" for name in systems]),

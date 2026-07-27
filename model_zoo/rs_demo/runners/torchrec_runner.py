@@ -148,8 +148,12 @@ def _compute_or_load_shared_sharding_plan(
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     if rank == 0:
         plan = planner.plan(embedding_module, sharders)
-        with plan_path.open("wb") as f:
+        pending_path = plan_path.with_suffix(plan_path.suffix + ".tmp")
+        with pending_path.open("wb") as f:
             pickle.dump(plan, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(pending_path, plan_path)
     else:
         wait_deadline = time.monotonic() + 60.0
         while not plan_path.exists():
@@ -544,7 +548,7 @@ def _run_single_or_dist_worker(
                     sparse_batch,
                     labels_batch,
                 )
-                sparse_features = sparse_features.to(device)
+                sparse_features = sparse_features.to(device, non_blocking=True)
 
             _append_worker_debug(cfg, rank, f"before_embedding step={step}")
             with timer.gpu("embed_lookup_local_ms"):

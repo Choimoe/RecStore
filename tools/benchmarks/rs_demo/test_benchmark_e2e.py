@@ -23,8 +23,9 @@ class TestBenchmarkE2E(unittest.TestCase):
         ):
             _finalize_step_timing(row, consume_start=18.0, wall_start=15.0)
 
-        self.assertEqual(row["step_visible_ms"], 2000.0)
         self.assertEqual(row["step_total_ms"], 5000.0)
+        self.assertEqual(row["step_end_to_end_ms"], 5000.0)
+        self.assertNotIn("step_visible_ms", row)
         self.assertEqual(row["samples_per_sec"], 0.4)
 
     def test_parse_specs_and_infer_topology(self) -> None:
@@ -335,6 +336,7 @@ class TestBenchmarkE2E(unittest.TestCase):
         self.assertIn("| 指标 | BRPC | TorchRec-HBM |", report)
         self.assertIn("| samples/s 均值 | 5.120K | 5.120K |", report)
         self.assertIn("| step_total_ms | 50.000 | 50.000 |", report)
+        self.assertIn("| update_overlap_prepare_ms | - | - |", report)
         self.assertNotIn("| run_id | lane |", report)
 
     def test_collect_summary_uses_slowest_rank_for_job_throughput(self) -> None:

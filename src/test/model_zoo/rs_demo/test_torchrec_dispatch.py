@@ -70,6 +70,18 @@ class _FakePlan:
         self.plan = plan_by_module
 
 
+def _make_cfg(base, **kwargs) -> RunConfig:
+    """RunConfig with the four torchrec CSV/trace paths derived from ``base``."""
+    base = Path(base)
+    return RunConfig(
+        torchrec_main_csv=str(base / "torchrec_main.csv"),
+        torchrec_main_agg_csv=str(base / "torchrec_main_agg.csv"),
+        torchrec_trace_dir=str(base / "torchrec_traces"),
+        torchrec_trace_csv=str(base / "torchrec_trace.csv"),
+        **kwargs,
+    )
+
+
 class TestTorchRecDispatch(unittest.TestCase):
     def test_debug_log_path_is_rank_scoped(self) -> None:
         cfg = RunConfig(output_root="/tmp/rs_demo", run_id="case-debug")
@@ -198,14 +210,17 @@ class TestTorchRecDispatch(unittest.TestCase):
         fake_dist = _FakeDist()
         planner = _FakePlanner()
         with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.pkl"
             plan = _compute_or_load_shared_sharding_plan(
                 dist=fake_dist,
                 rank=0,
                 embedding_module="emb",
                 sharders=["s"],
                 planner=planner,
-                plan_path=Path(tmpdir) / "plan.pkl",
+                plan_path=plan_path,
             )
+            self.assertTrue(plan_path.exists())
+            self.assertFalse(plan_path.with_suffix(".pkl.tmp").exists())
 
         self.assertEqual(plan["token"], "rank0-plan")
         self.assertEqual(planner.calls, 1)
@@ -272,7 +287,8 @@ class TestTorchRecDispatch(unittest.TestCase):
             runner.run(Path("/app/RecStore"), RunConfig(backend="recstore", steps=1))
 
     def test_runner_builds_multi_node_torchrun_command(self) -> None:
-        cfg = RunConfig(
+        cfg = _make_cfg(
+            "/nas/home/shq/docker/rs_demo/outputs/case-a",
             backend="torchrec",
             steps=2,
             nnodes=2,
@@ -285,10 +301,6 @@ class TestTorchRecDispatch(unittest.TestCase):
             rdzv_id="demo-run",
             output_root="/nas/home/shq/docker/rs_demo",
             run_id="case-a",
-            torchrec_main_csv="/nas/home/shq/docker/rs_demo/outputs/case-a/torchrec_main.csv",
-            torchrec_main_agg_csv="/nas/home/shq/docker/rs_demo/outputs/case-a/torchrec_main_agg.csv",
-            torchrec_trace_dir="/nas/home/shq/docker/rs_demo/outputs/case-a/torchrec_traces",
-            torchrec_trace_csv="/nas/home/shq/docker/rs_demo/outputs/case-a/torchrec_trace.csv",
         )
         runner = TorchRecRunner(Path("/tmp/runtime"))
         cmd = runner._build_torchrun_cmd(
@@ -345,35 +357,6 @@ class TestTorchRecDispatch(unittest.TestCase):
             ["fused_uvm_caching"],
         )
 
-    def test_runner_forwards_dense_arch_args_to_worker(self) -> None:
-        cfg = RunConfig(
-            backend="torchrec",
-            steps=1,
-            nnodes=2,
-            node_rank=0,
-            nproc=1,
-            nproc_per_node=1,
-            master_addr="10.0.2.196",
-            master_port=29611,
-            rdzv_backend="c10d",
-            rdzv_id="arch-case",
-            output_root="/tmp/rs_demo",
-            run_id="arch-case",
-            torchrec_main_csv="/tmp/rs_demo/out.csv",
-            torchrec_main_agg_csv="/tmp/rs_demo/out_agg.csv",
-            torchrec_trace_dir="/tmp/rs_demo/traces",
-            torchrec_trace_csv="/tmp/rs_demo/trace.csv",
-            embedding_dim=16,
-            dense_arch_layer_sizes="64,32,16",
-            over_arch_layer_sizes="128,64,1",
-        )
-        runner = TorchRecRunner(Path("/tmp/runtime"))
-        cmd = runner._build_torchrun_cmd(
-            Path("/app/RecStore"), cfg, Path("/tmp/worker_config.json")
-        )
-        self.assertIn("--run-config-json", cmd)
-        self.assertIn("/tmp/worker_config.json", cmd)
-
     def test_runner_rank_output_dir_uses_shared_output_root(self) -> None:
         cfg = RunConfig(
             backend="torchrec",
@@ -391,8 +374,12 @@ class TestTorchRecDispatch(unittest.TestCase):
             Path("/nas/home/shq/docker/rs_demo/outputs/case-b/torchrec_ranks"),
         )
 
-    def test_runner_uses_world_size_from_nnodes_and_nproc_per_node(self) -> None:
-        cfg = RunConfig(
+    def test_runner_routes_to_distributed_run(self) -> None:
+        runner = TorchRecRunner(Path("/tmp/runtime"))
+
+        # World size derived from nnodes * nproc_per_node routes to distributed.
+        cfg = _make_cfg(
+            "/nas/home/shq/docker/rs_demo/outputs/case-c",
             backend="torchrec",
             steps=1,
             nproc=1,
@@ -400,12 +387,7 @@ class TestTorchRecDispatch(unittest.TestCase):
             nproc_per_node=2,
             output_root="/nas/home/shq/docker/rs_demo",
             run_id="case-c",
-            torchrec_main_csv="/nas/home/shq/docker/rs_demo/outputs/case-c/torchrec_main.csv",
-            torchrec_main_agg_csv="/nas/home/shq/docker/rs_demo/outputs/case-c/torchrec_main_agg.csv",
-            torchrec_trace_dir="/nas/home/shq/docker/rs_demo/outputs/case-c/torchrec_traces",
-            torchrec_trace_csv="/nas/home/shq/docker/rs_demo/outputs/case-c/torchrec_trace.csv",
         )
-        runner = TorchRecRunner(Path("/tmp/runtime"))
         with mock.patch(
             "model_zoo.rs_demo.runners.torchrec_runner.ensure_torchrec_available",
             return_value=None,
@@ -414,7 +396,7 @@ class TestTorchRecDispatch(unittest.TestCase):
         self.assertEqual(result["backend"], "torchrec")
         dist_run.assert_called_once()
 
-    def test_runner_uses_torchrun_for_single_process_uvm_caching(self) -> None:
+        # Single-process uvm_caching still uses torchrun (distributed), not single-process.
         cfg = RunConfig(
             backend="torchrec",
             steps=1,
@@ -423,7 +405,6 @@ class TestTorchRecDispatch(unittest.TestCase):
             nproc_per_node=1,
             torchrec_memory_mode="uvm_caching",
         )
-        runner = TorchRecRunner(Path("/tmp/runtime"))
         with mock.patch(
             "model_zoo.rs_demo.runners.torchrec_runner.ensure_torchrec_available",
             return_value=None,
@@ -450,20 +431,16 @@ class TestTorchRecDispatch(unittest.TestCase):
                 "TCP",
             ),
         ]
-        for sample, expected in cases:
-            with self.subTest(expected=expected):
-                with tempfile.NamedTemporaryFile(
-                    mode="w", encoding="utf-8", delete=False
-                ) as handle:
-                    handle.write(sample)
-                    path = Path(handle.name)
-                try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for idx, (sample, expected) in enumerate(cases):
+                with self.subTest(expected=expected):
+                    path = Path(tmpdir) / f"nccl_{idx}.log"
+                    path.write_text(sample, encoding="utf-8")
                     self.assertEqual(_parse_nccl_transport_log(path), expected)
-                finally:
-                    path.unlink()
 
     def test_runner_sets_explicit_socket_env_for_multi_node(self) -> None:
-        cfg = RunConfig(
+        cfg = _make_cfg(
+            "/tmp/rs_demo",
             backend="torchrec",
             steps=1,
             nnodes=2,
@@ -475,10 +452,6 @@ class TestTorchRecDispatch(unittest.TestCase):
             rdzv_id="env-case",
             output_root="/tmp/rs_demo",
             run_id="env-case",
-            torchrec_main_csv="/tmp/rs_demo/out.csv",
-            torchrec_main_agg_csv="/tmp/rs_demo/out_agg.csv",
-            torchrec_trace_dir="/tmp/rs_demo/traces",
-            torchrec_trace_csv="/tmp/rs_demo/trace.csv",
         )
         runner = TorchRecRunner(Path("/tmp/runtime"))
         fake_result = mock.Mock(returncode=0, stdout="", stderr="")
@@ -529,7 +502,8 @@ class TestTorchRecDispatch(unittest.TestCase):
             for path in stale_paths:
                 path.write_text("stale", encoding="utf-8")
 
-            cfg = RunConfig(
+            cfg = _make_cfg(
+                run_output,
                 backend="torchrec",
                 steps=1,
                 nnodes=1,
@@ -540,10 +514,6 @@ class TestTorchRecDispatch(unittest.TestCase):
                 rdzv_id=run_id,
                 output_root=str(output_root),
                 run_id=run_id,
-                torchrec_main_csv=str(run_output / "torchrec_main.csv"),
-                torchrec_main_agg_csv=str(run_output / "torchrec_main_agg.csv"),
-                torchrec_trace_dir=str(run_output / "torchrec_traces"),
-                torchrec_trace_csv=str(run_output / "torchrec_trace.csv"),
             )
             runner = TorchRecRunner(Path("/tmp/runtime"))
 

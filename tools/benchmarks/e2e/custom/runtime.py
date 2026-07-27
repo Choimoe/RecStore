@@ -212,10 +212,20 @@ def _nccl_socket_ifnames() -> str:
     return "enp3s0f0,eno8303"
 
 
+def _dataloader_env() -> dict[str, str]:
+    names = (
+        "RS_DEMO_DATALOADER_NUM_WORKERS",
+        "RS_DEMO_DATALOADER_PIN_MEMORY",
+        "RS_DEMO_DATALOADER_CPU_LIST",
+    )
+    return {name: os.environ[name] for name in names if name in os.environ}
+
+
 def _recstore_nccl_env() -> dict[str, str]:
     # Embedding traffic uses the RecStore PS transport; dense DDP uses NCCL-IB.
     ifnames = _nccl_socket_ifnames()
     return {
+        **_dataloader_env(),
         "NCCL_SOCKET_IFNAME": ifnames,
         "GLOO_SOCKET_IFNAME": ifnames,
         "NCCL_SOCKET_FAMILY": "AF_INET",
@@ -238,6 +248,7 @@ def _torchrec_nccl_env() -> dict[str, str]:
     # TorchRec's embedding all-reduce IS the traffic we want on the IB NIC.
     ifnames = _nccl_socket_ifnames()
     return {
+        **_dataloader_env(),
         "NCCL_SOCKET_IFNAME": ifnames,
         "GLOO_SOCKET_IFNAME": ifnames,
         "NCCL_SOCKET_FAMILY": "AF_INET",

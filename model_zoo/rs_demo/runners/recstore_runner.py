@@ -26,6 +26,7 @@ from ..data.dlrm_source import (
     convert_kjt_ids_to_fused_ids,
     get_default_cat_names,
     inject_project_paths,
+    prepare_fused_ids_from_sparse_batch,
 )
 from ..runtime.hybrid_dlrm import (
     build_criterion,
@@ -428,6 +429,10 @@ class RecStoreRunner(BenchmarkRunner):
             eb_configs, table_offsets, RecStoreEmbeddingBagCollection = (
                 self._build_embedding_module(cfg, client, default_cat_names)
             )
+            fused_id_offsets = torch.tensor(
+                [table_offsets[name] for name in default_cat_names],
+                dtype=torch.int64,
+            )
             embedding_module = RecStoreEmbeddingBagCollection(
                 embedding_bag_configs=eb_configs,
                 enable_fusion=cfg.recstore_enable_fusion,
@@ -531,9 +536,6 @@ class RecStoreRunner(BenchmarkRunner):
                 row["batch_prepare_ms"] = (time.perf_counter() - batch_prepare_start) * 1e3
 
                 input_pack_start = time.perf_counter()
-                # Issue-ahead KJT: feeds prefetch/id-stats depth batches early.
-                # ponytail: a second KJT is rebuilt at consume time (below) as the
-                # training input.
                 _, prefetch_sparse_features = build_kjt_batch_from_dense_sparse_labels(
                     dense_batch, sparse_batch, labels_batch, device=device
                 )
@@ -541,9 +543,13 @@ class RecStoreRunner(BenchmarkRunner):
 
                 prepared_fused_prefetch = None
                 if prepare_same_batch_prefetch:
-                    prepared_fused_prefetch = embedding_module.prepare_fused_prefetch(
-                        prefetch_sparse_features
+                    fused_id_start = time.perf_counter()
+                    prepared_fused_prefetch = prepare_fused_ids_from_sparse_batch(
+                        sparse_batch, fused_id_offsets
                     )
+                    row["lookup_ids_build_ms"] = (
+                        time.perf_counter() - fused_id_start
+                    ) * 1e3
                     unique_ids, _, raw_count = prepared_fused_prefetch
                     _add_sparse_id_stats(
                         row, prefetch_sparse_features, table_offsets,
@@ -561,7 +567,8 @@ class RecStoreRunner(BenchmarkRunner):
                     )
                 return (
                     batch_step, row, time.perf_counter(),
-                    dense_batch, sparse_batch, labels_batch, prepared_fused_prefetch,
+                    dense_batch, prefetch_sparse_features, labels_batch,
+                    prepared_fused_prefetch,
                 )
 
             for step in range(cfg.steps):
@@ -580,15 +587,11 @@ class RecStoreRunner(BenchmarkRunner):
                     lookahead_prefetcher.advance_all()
 
                 (
-                    _, row, step_start, dense_batch, sparse_batch, labels_batch,
+                    _, row, step_start, dense_batch, sparse_features, labels_batch,
                     prepared_fused_prefetch,
                 ) = prepared_batches.popleft()
                 consume_step_start = time.perf_counter()
                 del step_start  # issue-queue wait is not an E2E export metric
-
-                _, sparse_features = build_kjt_batch_from_dense_sparse_labels(
-                    dense_batch, sparse_batch, labels_batch, device=device
-                )
 
                 _reset_perf_stats(embedding_module)
                 sparse_optimizer.zero_grad()
@@ -692,6 +695,7 @@ class RecStoreRunner(BenchmarkRunner):
 
                 # Resolve the CUDA-event GPU stages after a single device drain.
                 timer.finish()
+                row["loss"] = float(loss.detach().float().cpu().item())
                 _merge_consumed_perf_stats(row, _consume_perf_stats(embedding_module))
 
                 row["dense_compute_ms"] = (

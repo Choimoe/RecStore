@@ -169,11 +169,11 @@ def prepare_hybrid_dlrm_input(
     detach_sparse: bool,
 ):
     sync_device(torch, device)
-    dense_features = dense_batch.to(device)
-    embedded_sparse = embedded_sparse_source.to(device)
+    dense_features = dense_batch.to(device, non_blocking=True)
+    embedded_sparse = embedded_sparse_source.to(device, non_blocking=True)
     if detach_sparse:
         embedded_sparse = embedded_sparse.detach().requires_grad_(True)
-    labels = labels_batch.to(device).float()
+    labels = labels_batch.to(device, non_blocking=True).float()
     if labels.ndim == 1:
         labels = labels.view(-1, 1)
     sync_device(torch, device)
