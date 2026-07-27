@@ -48,13 +48,13 @@ struct FactoryCreatorImpl : public FactoryCreator<T, Args...> {
 };
 
 #if defined(__GNUC__) || defined(__clang__)
-#define FACTORY_REGISTER(T, key, IMPL, ...)                                    \
-  static base::FactoryCreatorImpl<T, IMPL, ##__VA_ARGS__>                      \
-      __attribute__((used)) FACTORY_REGISTER_##T##_##key(#key);
+#  define FACTORY_REGISTER(T, key, IMPL, ...)                                  \
+    static base::FactoryCreatorImpl<T, IMPL, ##__VA_ARGS__>                    \
+        __attribute__((used)) FACTORY_REGISTER_##T##_##key(#key);
 #else
-#define FACTORY_REGISTER(T, key, IMPL, ...)                                    \
-  static base::FactoryCreatorImpl<T, IMPL, ##__VA_ARGS__>                      \
-      FACTORY_REGISTER_##T##_##key(#key);
+#  define FACTORY_REGISTER(T, key, IMPL, ...)                                  \
+    static base::FactoryCreatorImpl<T, IMPL, ##__VA_ARGS__>                    \
+        FACTORY_REGISTER_##T##_##key(#key);
 #endif
 
 } // namespace base
