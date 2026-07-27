@@ -72,6 +72,9 @@ def _restore_modules(saved):
 class TestEmbeddingBagPrefetchState(unittest.TestCase):
     def setUp(self):
         self._saved_modules = _install_torchrec_stub()
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("src.python.pytorch.torchrec_kv"):
+                sys.modules.pop(mod_name, None)
         self.embeddingbag_module = importlib.import_module(
             "src.python.pytorch.torchrec_kv.EmbeddingBag"
         )
