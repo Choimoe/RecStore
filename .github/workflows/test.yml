@@ -259,6 +259,15 @@ jobs:
               echo "========== FAILED TESTS =========="
               grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log || true
               echo "==================================="
+              FAILED_LIST=$(grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log | sed 's/.*Test #//' | sed 's/:.*//' | paste -sd ',' -)
+              if [ -n "${FAILED_LIST}" ]; then
+                echo "Failed tests list: ${FAILED_LIST}"
+              fi
+            fi
+            if [ -f Testing/Temporary/LastTestsFailed.log ]; then
+              echo "--- LastTestsFailed.log ---"
+              cat Testing/Temporary/LastTestsFailed.log
+              echo "--- End LastTestsFailed.log ---"
             fi
             exit ${CTEST_RC}
           '
