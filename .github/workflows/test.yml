@@ -25,6 +25,7 @@ permissions:
   actions: read
   contents: write
   packages: read
+  statuses: write
 
 jobs:
   test-image:
