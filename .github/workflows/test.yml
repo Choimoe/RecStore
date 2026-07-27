@@ -253,7 +253,14 @@ jobs:
               --timeout 300 \
               -E "${CTEST_EXCLUDE_REGEX}" \
               2>&1 | tee /workspace/runner/logs/ctest.log
-            exit ${PIPESTATUS[0]}
+            CTEST_RC=${PIPESTATUS[0]}
+            if [ "${CTEST_RC}" -ne 0 ]; then
+              echo ""
+              echo "========== FAILED TESTS =========="
+              grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log || true
+              echo "==================================="
+            fi
+            exit ${CTEST_RC}
           '
 
       - name: Generate and publish coverage
@@ -328,6 +335,22 @@ jobs:
           path: build_coverage/coverage/
           if-no-files-found: ignore
 
+      - name: Print failed tests only
+        if: failure()
+        run: |
+          set -euo pipefail
+          echo "===== FAILED TESTS ====="
+          docker exec "${TEST_CONTAINER}" bash -lc '
+            if [ -f /workspace/runner/logs/ctest.log ]; then
+              grep -E "^[0-9]+/[0-9]+ Test #[0-9]+: .*Failed|^Test .*Failed|FAIL:|ERROR:" /workspace/runner/logs/ctest.log || true
+              echo "---"
+              grep -B2 -A10 "Test #.*Failed" /workspace/runner/logs/ctest.log | head -100 || true
+            else
+              echo "ctest log not found"
+            fi
+          '
+          echo "===== END FAILED TESTS ====="
+
       - name: Print ctest log summary
         if: always()
         run: |
@@ -339,8 +362,14 @@ jobs:
             else
               echo "ctest log not found: /workspace/runner/logs/ctest.log"
             fi
-          '
+          ' | tee /tmp/ctest_summary.txt
           echo "===== end of ctest log summary ====="
+          {
+            echo '### ctest log summary (last 200 lines)'
+            echo '```'
+            cat /tmp/ctest_summary.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Collect test logs from container
         if: always()
