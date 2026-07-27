@@ -53,13 +53,11 @@ def prepare_fused_ids_from_sparse_batch(
     sparse_batch: torch.Tensor,
     feature_offsets: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    if sparse_batch.ndim != 2 or sparse_batch.shape[1] != feature_offsets.numel():
-        raise ValueError("sparse batch shape does not match feature offsets")
-    fused_ids = (
-        sparse_batch.to(dtype=torch.int64, device="cpu") + feature_offsets
-    ).T.reshape(-1)
-    unique_ids, inverse = torch.unique(fused_ids, return_inverse=True)
-    return unique_ids, inverse, int(fused_ids.numel())
+    from recstore.embedding_read_path import (
+        prepare_fused_ids_from_sparse_batch as _prepare,
+    )
+
+    return _prepare(sparse_batch, feature_offsets)
 
 
 def get_default_cat_names() -> list[str]:

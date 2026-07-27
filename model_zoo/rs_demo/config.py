@@ -133,7 +133,6 @@ class RunConfig:
     seed: int = 20260330
     table_name: str = "mock_perf_table"
     init_rows: int = 50000
-    read_before_update: bool = True
     read_mode: str = "prefetch"
     prefetch_depth: int = 0
     prefetch_issue_depth: int = 20
@@ -344,22 +343,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260330)
     parser.add_argument("--table-name", type=str, default="mock_perf_table")
     parser.add_argument("--init-rows", type=int, default=50000)
-    parser.add_argument("--read-before-update", action="store_true", default=True)
-    parser.add_argument("--no-read-before-update", action="store_true")
     parser.add_argument(
         "--read-mode",
         type=str,
         default="prefetch",
-        choices=["prefetch", "direct"],
-        help="read path mode when read-before-update is enabled",
+        choices=["direct", "prefetch", "bagpipe"],
+        help=(
+            "Embedding read strategy: direct=sync pull; prefetch=async with "
+            "prefetch_depth window (may observe stale updates); bagpipe=async "
+            "with update-aware stalls (not wired yet)."
+        ),
     )
     parser.add_argument(
         "--prefetch-depth",
         type=int,
         default=0,
         help=(
-            "Number of future batches to issue fused embedding prefetches ahead. "
-            "0 keeps the legacy issue-and-immediate-wait path."
+            "For read_mode=prefetch|bagpipe: number of future batches to issue "
+            "ahead. 0 means same-step async get only."
         ),
     )
     parser.add_argument(
@@ -517,11 +518,13 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
             raw = json.load(f)
         # Drop removed fields so older worker JSON still loads.
         raw.pop("enable_single_node_distributed_fast_path", None)
+        raw.pop("read_before_update", None)
         return RunConfig(**raw)
     cfg_kwargs = vars(ns).copy()
     cfg_kwargs.pop("run_config_json", None)
-    cfg_kwargs.pop("no_read_before_update", None)
     cfg_kwargs.pop("no_start_server", None)
+    cfg_kwargs.pop("read_before_update", None)
+    cfg_kwargs.pop("no_read_before_update", None)
     disable_recstore_fusion = bool(cfg_kwargs.pop("disable_recstore_fusion", False))
     hps_no_materialize = bool(cfg_kwargs.pop("hps_torch_no_materialize_embeddings", False))
     hps_disable_gpucache = bool(cfg_kwargs.pop("hps_torch_disable_gpucache", False))
@@ -531,8 +534,6 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
         cfg_kwargs["nproc_per_node"] = cfg_kwargs.get("nproc", 1)
     cfg = RunConfig(**cfg_kwargs)
     cfg.model_args = model_args
-    if ns.no_read_before_update:
-        cfg.read_before_update = False
     if disable_recstore_fusion:
         cfg.recstore_enable_fusion = False
     if ns.no_start_server:
@@ -606,30 +607,31 @@ def validate_recstore_config(cfg: RunConfig) -> None:
         raise RuntimeError("--nproc-per-node must be greater than 0.")
     if cfg.node_rank < 0 or cfg.node_rank >= cfg.nnodes:
         raise RuntimeError("--node-rank must be within [0, nnodes).")
-    if cfg.enable_gpu_cache and cfg.gpu_cache_capacity <= 0:
+    read_mode = str(cfg.read_mode).strip().lower()
+    if read_mode not in {"direct", "prefetch", "bagpipe"}:
         raise RuntimeError(
-            "--gpu-cache-capacity must be positive when --enable-gpu-cache is set"
+            "--read-mode must be one of: direct, prefetch, bagpipe"
+        )
+    cfg.read_mode = read_mode
+    if read_mode == "bagpipe":
+        raise RuntimeError(
+            "read_mode=bagpipe is not wired in recstore_runner yet; "
+            "use --read-mode=direct or --read-mode=prefetch"
+        )
+    if cfg.enable_gpu_cache:
+        raise RuntimeError(
+            "--enable-gpu-cache is not supported by recstore_runner; "
+            "use --read-mode=bagpipe when that path is wired"
+        )
+    if cfg.enable_bagpipe_cache:
+        raise RuntimeError(
+            "--enable-bagpipe-cache is not supported; use --read-mode=bagpipe "
+            "when that path is wired"
         )
     if cfg.prefetch_depth < 0:
         raise RuntimeError("--prefetch-depth must be non-negative")
     if cfg.prefetch_issue_depth < 0:
         raise RuntimeError("--prefetch-issue-depth must be non-negative")
-    if cfg.enable_bagpipe_cache:
-        if not cfg.enable_gpu_cache:
-            raise RuntimeError(
-                "--enable-bagpipe-cache requires --enable-gpu-cache"
-            )
-        # BagPipe relies on the GPU cache being queried on every forward;
-        # disable the low-hit bypass so the prefilled cache is not cleared.
-        cfg.disable_gpu_cache_lookup_bypass = True
-        if cfg.bagpipe_lookahead <= 0:
-            raise RuntimeError(
-                "--bagpipe-lookahead must be positive when --enable-bagpipe-cache is set"
-            )
-        if cfg.bagpipe_cleanup_proportion <= 0 or cfg.bagpipe_cleanup_proportion > 1:
-            raise RuntimeError(
-                "--bagpipe-cleanup-proportion must be within (0, 1]"
-            )
     if cfg.tiered_dram_capacity_multiplier < 0:
         raise RuntimeError("--tiered-dram-capacity-multiplier must be non-negative")
     if cfg.nnodes == 1:

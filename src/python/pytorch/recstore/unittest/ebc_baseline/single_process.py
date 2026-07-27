@@ -10,9 +10,9 @@ from .config import configure_src_paths
 
 configure_src_paths()
 
-from python.pytorch.recstore.KVClient import get_kv_client
-from python.pytorch.recstore.optimizer import SparseSGD
-from python.pytorch.torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection
+from recstore.KVClient import get_kv_client
+from recstore.optimizer import SparseSGD
+from torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection
 
 
 LEARNING_RATE = 0.01
