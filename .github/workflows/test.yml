@@ -361,7 +361,15 @@ jobs:
           set -euo pipefail
           docker exec "${TEST_CONTAINER}" bash -lc '
             if [ -f /workspace/runner/logs/ctest.log ]; then
-              grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log > /workspace/ci-failure.txt || true
+              {
+                echo "=== FAILED TESTS ==="
+                grep -E "Test #.*Failed|FAIL:|ERROR:" /workspace/runner/logs/ctest.log || true
+                echo ""
+                echo "=== LAST 100 LINES ==="
+                tail -n 100 /workspace/runner/logs/ctest.log
+              } > /workspace/ci-failure.txt
+            else
+              echo "ctest.log not found" > /workspace/ci-failure.txt
             fi
           '
           if [ -f /workspace/ci-failure.txt ] && [ -s /workspace/ci-failure.txt ]; then
