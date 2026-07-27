@@ -26,6 +26,7 @@ permissions:
   contents: write
   packages: read
   statuses: write
+  issues: write
 
 jobs:
   test-image:
@@ -352,7 +353,7 @@ jobs:
           '
           echo "===== END FAILED TESTS ====="
 
-      - name: Post failed tests as commit status
+      - name: Post failed tests as GitHub Issue
         if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -362,23 +363,24 @@ jobs:
           set -euo pipefail
           FAILED_TESTS=$(docker exec "${TEST_CONTAINER}" bash -lc '
             if [ -f /workspace/runner/logs/ctest.log ]; then
-              grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log | head -5 | tr "\n" "; " || true
+              grep -E "Test #.*Failed" /workspace/runner/logs/ctest.log || true
             fi
           ')
           python3 -c "
-import json, os, urllib.request
+import json, os, sys, urllib.request
 failed_tests = sys.argv[1] if len(sys.argv) > 1 else 'none'
-# Truncate to 140 chars for GitHub status description limit
-desc = failed_tests[:140]
-data = json.dumps({'state': 'failure', 'context': 'ci/failed-tests', 'description': desc}).encode()
-url = f\"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/statuses/{os.environ['GITHUB_SHA']}\"
+body = f\"CI failed on commit {os.environ['GITHUB_SHA'][:7]}\\n\\n```\\n{failed_tests}\\n```\"
+data = json.dumps({'title': f'CI failure: {os.environ[\"GITHUB_SHA\"][:7]}', 'body': body, 'labels': ['ci-failure']}).encode()
+url = f\"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues\"
 req = urllib.request.Request(url, data=data, headers={
     'Authorization': f\"token {os.environ['GITHUB_TOKEN']}\",
     'Content-Type': 'application/json',
 })
 try:
     resp = urllib.request.urlopen(req)
-    print('Status created:', resp.status)
+    print('Issue created:', resp.status)
+    issue = json.loads(resp.read().decode())
+    print('Issue URL:', issue.get('html_url'))
 except urllib.error.HTTPError as e:
     print('HTTPError:', e.code, e.read().decode())
 " "${FAILED_TESTS}"
