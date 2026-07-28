@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import torch
+_repo_root = Path(__file__).resolve().parents[3]
+_pytorch_src = str(_repo_root / "src" / "python" / "pytorch")
+if _pytorch_src not in sys.path:
+    sys.path.insert(0, _pytorch_src)
 os.environ.setdefault("RECSTORE_DEFER_OPS_LOAD", "1")
 import recstore
 
