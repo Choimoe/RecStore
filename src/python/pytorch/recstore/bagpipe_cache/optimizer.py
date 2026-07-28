@@ -57,7 +57,7 @@ class BagPipeSparseSGD:
 
     def step(self) -> None:
         import time as _time
-        from python.pytorch.recstore.optimizer import _collect_traces_by_name
+        from ..optimizer import _collect_traces_by_name
 
         with torch.no_grad():
             self._last_step_profile = {}

@@ -137,7 +137,7 @@ class BagPipePlugin:
         """Return :class:`BagPipeSparseSGD` (enabled) or ``SparseSGD`` (disabled)."""
         if self._controller is not None:
             return BagPipeSparseSGD(modules, lr=lr, controller=self._controller)
-        from python.pytorch.recstore.optimizer import SparseSGD
+        from ..optimizer import SparseSGD
         return SparseSGD(modules, lr=lr)
 
     # ------------------------------------------------------------------
