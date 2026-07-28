@@ -501,6 +501,7 @@ set_tests_properties(
     test_hierkv_python_ops_py
     PROPERTIES
     LABELS "hierkv;python;integration"
+    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/src/python/pytorch;RECSTORE_DEFER_OPS_LOAD=1"
 )
 
 add_python_unittest(
@@ -536,6 +537,7 @@ set_tests_properties(
     test_hierkv_rs_demo_py
     PROPERTIES
     LABELS "hierkv;python;rs_demo"
+    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/src/python/pytorch;RECSTORE_DEFER_OPS_LOAD=1"
 )
 
 set(HUGECTR_TENSOR2_HEADER
