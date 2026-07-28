@@ -24,6 +24,8 @@ from ..models.dlrm import (
     build_criterion,
     build_dense_module,
     compute_dense_loss,
+)
+from ..models.utils import (
     parse_layer_sizes,
     prepare_hybrid_dlrm_input,
     reshape_torchrec_embeddings_for_dlrm,
