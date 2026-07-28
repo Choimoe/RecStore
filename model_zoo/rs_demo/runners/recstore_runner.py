@@ -97,10 +97,7 @@ def _finalize_step_timing(
 
 
 def _consume_perf_stats(obj: Any) -> dict[str, float]:
-    consume = getattr(obj, "consume_perf_stats", None)
-    if consume is None:
-        return {}
-    stats = consume(reset=True)
+    stats = obj.consume_perf_stats(reset=True)
     return stats if isinstance(stats, dict) else {}
 
 
@@ -112,9 +109,25 @@ def _merge_consumed_perf_stats(row: dict[str, Any], stats: dict[str, float]) -> 
 
 
 def _reset_perf_stats(obj: Any) -> None:
-    reset = getattr(obj, "reset_perf_stats", None)
-    if reset is not None:
-        reset()
+    obj.reset_perf_stats()
+
+
+def _fill_prefetch_buffer(
+    prepared_batches: deque,
+    prepare_fn: Any,
+    *,
+    from_step: int,
+    target_buffer: int,
+    max_steps: int,
+) -> None:
+    """Prepare batches until the buffer exceeds target_buffer or steps run out."""
+    current = len(prepared_batches)
+    needed = target_buffer + 1 - current
+    for i in range(needed):
+        future_step = from_step + current + i
+        if future_step >= max_steps:
+            break
+        prepared_batches.append(prepare_fn(future_step))
 
 
 def _maybe_warmup_gpu_local_shm_fast_path(
@@ -126,10 +139,9 @@ def _maybe_warmup_gpu_local_shm_fast_path(
         return False
     if not client.is_shared_local_shm_table():
         return False
-    # ponytail: activate_shard only on some test/distributed fakes, not RecStoreClient
-    activate_shard = getattr(client, "activate_shard", None)
-    if callable(activate_shard):
-        activate_shard(0)
+    # activate_shard exists on test/distributed fakes, not RecStoreClient.
+    if hasattr(client, "activate_shard"):
+        client.activate_shard(0)
     if client.current_ps_backend() != "local_shm":
         client.set_ps_backend("local_shm")
     return bool(client.warmup_local_lookup_flat_cuda_region())
@@ -488,21 +500,19 @@ class RecStoreRunner(BenchmarkRunner):
 
             for step in range(cfg.steps):
                 step_wall_start = time.perf_counter()
-                observed_depth = read_path.depth * 2
-                while (
-                    len(prepared_batches) <= observed_depth
-                    and step + len(prepared_batches) < cfg.steps
-                ):
-                    prepared_batches.append(prepare_next_batch(step + len(prepared_batches)))
+                target_buffer = read_path.desired_buffer_size
+                _fill_prefetch_buffer(
+                    prepared_batches, prepare_next_batch,
+                    from_step=step, target_buffer=target_buffer, max_steps=cfg.steps,
+                )
                 if step + len(prepared_batches) >= cfg.steps:
                     read_path.advance_all()
 
                 (
-                    _, row, step_start, dense_batch, sparse_features, labels_batch,
+                    _, row, _, dense_batch, sparse_features, labels_batch,
                     ticket,
                 ) = prepared_batches.popleft()
                 consume_step_start = time.perf_counter()
-                del step_start  # issue-queue wait is not an E2E export metric
 
                 _reset_perf_stats(embedding_module)
                 sparse_optimizer.zero_grad()
