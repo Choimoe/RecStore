@@ -268,9 +268,19 @@ jobs:
               echo "--- LastTestsFailed.log ---"
               cat Testing/Temporary/LastTestsFailed.log
               echo "--- End LastTestsFailed.log ---"
+              cp Testing/Temporary/LastTestsFailed.log /workspace/runner/logs/LastTestsFailed.log
             fi
             exit ${CTEST_RC}
           '
+
+      - name: Report failed tests
+        if: failure()
+        run: |
+          set -euo pipefail
+          if [ -f runner/logs/LastTestsFailed.log ]; then
+            FAILED_LIST=$(tr '\n' ',' < runner/logs/LastTestsFailed.log | sed 's/,$//')
+            echo "::error::Failed tests: ${FAILED_LIST}"
+          fi
 
       - name: Generate and publish coverage
         if: env.PUBLISH_COVERAGE == 'true'
