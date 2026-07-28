@@ -157,6 +157,14 @@ class EmbeddingReadPath(Protocol):
     @property
     def depth(self) -> int: ...
 
+    @property
+    def desired_buffer_size(self) -> int:
+        """How many prepared batches the runner should keep in its buffer.
+
+        The runner pre-prepares batches (dataloader + prefetch issue) up to
+        this many items ahead so the read path's internal pipeline stays full.
+        """
+
     def on_batch_prepared(
         self,
         step: int,
@@ -194,6 +202,10 @@ class DirectReadPath:
     @property
     def depth(self) -> int:
         return 0
+
+    @property
+    def desired_buffer_size(self) -> int:
+        return 0  # synchronous: no prefetch pipeline to fill
 
     def on_batch_prepared(
         self,
@@ -262,6 +274,13 @@ class PrefetchReadPath:
     @property
     def depth(self) -> int:
         return self._lookahead.depth
+
+    @property
+    def desired_buffer_size(self) -> int:
+        # LookaheadPrefetcher has two internal queues (pending + ready),
+        # each holding up to ``depth`` items.  The runner must prepare
+        # 2*depth batches to fill both.
+        return self._lookahead.depth * 2
 
     def on_batch_prepared(
         self,

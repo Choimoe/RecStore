@@ -115,7 +115,7 @@ def _write_or_verify_worker_fingerprint(
 
 
 def _summarize_sharding_plan(plan: Any) -> str:
-    plan_map = getattr(plan, "plan", {})
+    plan_map = plan.plan
     if not isinstance(plan_map, dict):
         return f"plan_type={type(plan).__name__}"
 
@@ -126,9 +126,9 @@ def _summarize_sharding_plan(plan: Any) -> str:
             for table_name, parameter_sharding in sorted(
                 module_plan.items(), key=lambda item: str(item[0])
             ):
-                sharding_type = getattr(parameter_sharding, "sharding_type", "unknown")
-                compute_kernel = getattr(parameter_sharding, "compute_kernel", "unknown")
-                ranks = getattr(parameter_sharding, "ranks", None)
+                sharding_type = parameter_sharding.sharding_type
+                compute_kernel = parameter_sharding.compute_kernel
+                ranks = parameter_sharding.ranks
                 table_summaries.append(
                     f"{table_name}:{sharding_type}:{compute_kernel}:ranks={ranks}"
                 )
@@ -241,7 +241,7 @@ def _build_uvm_caching_constraints(
             "TorchRec UVM caching requires EmbeddingComputeKernel.FUSED_UVM_CACHING. "
             "Install a TorchRec/FBGEMM version that supports fused UVM caching."
         ) from exc
-    fused_uvm_caching_value = getattr(fused_uvm_caching, "value", fused_uvm_caching)
+    fused_uvm_caching_value = fused_uvm_caching.value
     return {
         table_name: parameter_constraints_cls(compute_kernels=[fused_uvm_caching_value])
         for table_name in table_names
