@@ -277,9 +277,22 @@ jobs:
         if: failure()
         run: |
           set -euo pipefail
+          echo "===== DEBUG: runner/logs contents ====="
+          ls -la runner/logs/ || echo "runner/logs not found"
+          echo "===== DEBUG: ctest.log tail ====="
+          tail -n 50 runner/logs/ctest.log || echo "ctest.log not found"
+          echo "===== DEBUG: LastTestsFailed.log ====="
+          cat runner/logs/LastTestsFailed.log 2>/dev/null || echo "LastTestsFailed.log not found"
+          echo "===== END DEBUG ====="
+          if [ -f runner/logs/ctest.log ]; then
+            FAILED_LIST=$(grep -E "Test #.*Failed" runner/logs/ctest.log | sed 's/.*Test #//' | sed 's/:.*//' | paste -sd ',' -)
+            if [ -n "${FAILED_LIST}" ]; then
+              echo "::error::Failed tests: ${FAILED_LIST}"
+            fi
+          fi
           if [ -f runner/logs/LastTestsFailed.log ]; then
             FAILED_LIST=$(tr '\n' ',' < runner/logs/LastTestsFailed.log | sed 's/,$//')
-            echo "::error::Failed tests: ${FAILED_LIST}"
+            echo "::error::Failed tests (from LastTestsFailed.log): ${FAILED_LIST}"
           fi
 
       - name: Generate and publish coverage
