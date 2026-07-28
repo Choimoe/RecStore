@@ -162,7 +162,7 @@ class TestEmbeddingBagSingleNodeDistributed(unittest.TestCase):
         # EmbeddingCollection, so we must evict the whole package tree to
         # guarantee the stub is picked up on re-import.
         for mod_name in list(sys.modules):
-            if mod_name.startswith("src.python.pytorch.torchrec_kv"):
+            if mod_name.startswith("src.python.pytorch.torchrec_kv") or mod_name.startswith("torchrec_kv"):
                 sys.modules.pop(mod_name, None)
         self.embeddingbag_module = importlib.import_module(
             "src.python.pytorch.torchrec_kv.EmbeddingBag"

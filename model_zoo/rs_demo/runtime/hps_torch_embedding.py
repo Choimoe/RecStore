@@ -15,7 +15,7 @@ import torch
 try:
     from torchrec.modules.embedding_configs import EmbeddingBagConfig
     from torchrec.sparse.jagged_tensor import KeyedJaggedTensor, KeyedTensor
-except ModuleNotFoundError:  # pragma: no cover - import-time fallback for light tests
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - import-time fallback for light tests
     @dataclass
     class EmbeddingBagConfig:
         name: str

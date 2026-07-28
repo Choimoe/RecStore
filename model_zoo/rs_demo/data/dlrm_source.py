@@ -64,7 +64,7 @@ def get_default_cat_names() -> list[str]:
     try:
         criteo = importlib.import_module("torchrec.datasets.criteo")
         return list(criteo.DEFAULT_CAT_NAMES)
-    except ModuleNotFoundError:
+    except (ImportError, ModuleNotFoundError):
         return [f"cat_{idx}" for idx in range(26)]
 
 
@@ -119,7 +119,7 @@ def build_sparse_features(keys: list[str], values: torch.Tensor, lengths: torch.
             values=values,
             lengths=lengths,
         )
-    except ModuleNotFoundError:
+    except (ImportError, ModuleNotFoundError):
         return _SimpleKeyedJaggedTensor(keys, values, lengths)
 
 
