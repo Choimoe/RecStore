@@ -289,6 +289,10 @@ jobs:
             if [ -n "${FAILED_LIST}" ]; then
               echo "::error::Failed tests: ${FAILED_LIST}"
             fi
+            FAILED_NAMES=$(grep -E "Test #.*Failed" runner/logs/ctest.log | sed 's/.*Test #[0-9]*: //' | sed 's/ \.\..*//' | paste -sd ',' -)
+            if [ -n "${FAILED_NAMES}" ]; then
+              echo "::error::Failed test names: ${FAILED_NAMES}"
+            fi
           fi
           if [ -f runner/logs/LastTestsFailed.log ]; then
             FAILED_LIST=$(tr '\n' ',' < runner/logs/LastTestsFailed.log | sed 's/,$//')
