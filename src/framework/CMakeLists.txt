@@ -18,10 +18,9 @@ if(EXISTS "${_recstore_libtorch_lib_dir}/libtorch_cuda.so" OR
 endif()
 
 if(_recstore_libtorch_requires_cuda AND NOT (ENABLE_CUDA AND CMAKE_CUDA_COMPILER))
-    message(STATUS "Skipping framework/pytorch because CUDA libtorch is present but CUDA is disabled or nvcc not found")
-else()
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/pytorch)
+    message(WARNING "CUDA libtorch is present but CUDA is disabled or nvcc not found. Building framework/pytorch anyway.")
 endif()
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/pytorch)
 
 if(RECSTORE_ENABLE_TENSORFLOW)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/tensorflow)
