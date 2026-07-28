@@ -492,13 +492,33 @@ set_tests_properties(
 )
 
 add_python_unittest(
-    test_hierkv_python_ops_py
+    test_hierkv_python_ops_kvclient_py
     src.python.pytorch.recstore.unittest.test_kvclient_local_fast_path
+)
+set_tests_properties(
+    test_hierkv_python_ops_kvclient_py
+    PROPERTIES
+    LABELS "hierkv;python;integration"
+    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/src/python/pytorch:${PROJECT_SOURCE_DIR}/src;RECSTORE_DEFER_OPS_LOAD=1"
+)
+
+add_python_unittest(
+    test_hierkv_python_ops_embeddingbag_py
     src.python.pytorch.recstore.unittest.test_embeddingbag_single_node_distributed
+)
+set_tests_properties(
+    test_hierkv_python_ops_embeddingbag_py
+    PROPERTIES
+    LABELS "hierkv;python;integration"
+    ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/src/python/pytorch:${PROJECT_SOURCE_DIR}/src;RECSTORE_DEFER_OPS_LOAD=1"
+)
+
+add_python_unittest(
+    test_hierkv_python_ops_optimizer_py
     src.python.pytorch.recstore.unittest.test_sparse_optimizer_single_node_distributed
 )
 set_tests_properties(
-    test_hierkv_python_ops_py
+    test_hierkv_python_ops_optimizer_py
     PROPERTIES
     LABELS "hierkv;python;integration"
     ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/src/python/pytorch:${PROJECT_SOURCE_DIR}/src;RECSTORE_DEFER_OPS_LOAD=1"
