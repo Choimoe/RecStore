@@ -13,6 +13,7 @@ function(add_python_unittest _name)
         ${_name}
         PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/src/python/pytorch;RECSTORE_DEFER_OPS_LOAD=1"
     )
 endfunction()
 
