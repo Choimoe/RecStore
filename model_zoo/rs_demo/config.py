@@ -613,21 +613,27 @@ def validate_recstore_config(cfg: RunConfig) -> None:
             "--read-mode must be one of: direct, prefetch, bagpipe"
         )
     cfg.read_mode = read_mode
-    if read_mode == "bagpipe":
-        raise RuntimeError(
-            "read_mode=bagpipe is not wired in recstore_runner yet; "
-            "use --read-mode=direct or --read-mode=prefetch"
-        )
-    if cfg.enable_gpu_cache:
-        raise RuntimeError(
-            "--enable-gpu-cache is not supported by recstore_runner; "
-            "use --read-mode=bagpipe when that path is wired"
-        )
+    # When read_mode=bagpipe, auto-enable the bagpipe optimization plugin.
+    if read_mode == "bagpipe" and cfg.optimization.plugin == "none":
+        cfg.optimization.plugin = "bagpipe"
+        if cfg.optimization.lookahead <= 0:
+            cfg.optimization.lookahead = cfg.prefetch_depth or 4
+    # --enable-gpu-cache is a convenience alias for the bagpipe plugin.
+    if cfg.enable_gpu_cache and cfg.optimization.plugin == "none":
+        cfg.optimization.plugin = "bagpipe"
+        if cfg.optimization.lookahead <= 0:
+            cfg.optimization.lookahead = cfg.prefetch_depth or 4
     if cfg.enable_bagpipe_cache:
         raise RuntimeError(
-            "--enable-bagpipe-cache is not supported; use --read-mode=bagpipe "
-            "when that path is wired"
+            "--enable-bagpipe-cache is not supported; use --read-mode=bagpipe"
         )
+    opt = cfg.optimization
+    if opt.plugin != "none" and opt.lookahead <= 0:
+        raise RuntimeError(
+            f"--optimization-plugin {opt.plugin!r} requires --optimization-lookahead > 0"
+        )
+    if not (0.0 < opt.cleanup_proportion <= 1.0):
+        raise RuntimeError("--optimization-cleanup-proportion must be in (0.0, 1.0]")
     if cfg.prefetch_depth < 0:
         raise RuntimeError("--prefetch-depth must be non-negative")
     if cfg.prefetch_issue_depth < 0:
