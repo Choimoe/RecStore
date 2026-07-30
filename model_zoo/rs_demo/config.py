@@ -527,6 +527,9 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
         # Drop removed fields so older worker JSON still loads.
         raw.pop("enable_single_node_distributed_fast_path", None)
         raw.pop("read_before_update", None)
+        raw = _migrate_legacy_optim_fields(raw)
+        if isinstance(raw.get("optimization"), dict):
+            raw["optimization"] = OptimizationConfig(**raw["optimization"])
         return RunConfig(**raw)
     cfg_kwargs = vars(ns).copy()
     cfg_kwargs.pop("run_config_json", None)

@@ -10,7 +10,8 @@ import unittest
 import torch
 
 from model_zoo.rs_demo.cli import build_runner
-from model_zoo.rs_demo.config import RunConfig, dump_run_config, parse_config
+from model_zoo.rs_demo.config import RunConfig, dump_run_config, parse_config, validate_recstore_config
+from python.pytorch.recstore.optim.config import OptimizationConfig
 from python.pytorch.recstore.benchmark.report import write_stage_csv
 from model_zoo.rs_demo.runners.torchrec_runner import (
     TorchRecRunner,
@@ -343,6 +344,34 @@ class TestTorchRecDispatch(unittest.TestCase):
         self.assertTrue(loaded.torchrec_align_recstore_init)
         self.assertEqual(loaded.dense_arch_layer_sizes, "64,32,16")
         self.assertEqual(loaded.over_arch_layer_sizes, "128,64,1")
+
+    def test_worker_config_json_round_trips_optimization(self) -> None:
+        # dump_run_config serializes OptimizationConfig to a plain dict via
+        # asdict(); parse_config must reconstruct it as an OptimizationConfig
+        # so validate_recstore_config can access .optimization.plugin etc.
+        cfg = RunConfig(
+            backend="recstore",
+            optimization=OptimizationConfig(
+                plugin="bagpipe",
+                lookahead=4,
+                cleanup_proportion=0.5,
+                cache_capacity=1024,
+                embedding_dim=64,
+                plugin_config={"key": "val"},
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = dump_run_config(cfg, Path(tmpdir) / "worker_config.json")
+            loaded = parse_config(["--run-config-json", str(path)])
+
+        self.assertIsInstance(loaded.optimization, OptimizationConfig)
+        self.assertEqual(loaded.optimization.plugin, "bagpipe")
+        self.assertEqual(loaded.optimization.lookahead, 4)
+        self.assertEqual(loaded.optimization.cleanup_proportion, 0.5)
+        self.assertEqual(loaded.optimization.cache_capacity, 1024)
+        self.assertEqual(loaded.optimization.embedding_dim, 64)
+        # Must not crash — this is the P0 bug that affected all recstore workers.
+        validate_recstore_config(loaded)
 
     def test_runner_forwards_torchrec_align_recstore_init_to_worker(self) -> None:
         cfg = RunConfig(
