@@ -419,7 +419,7 @@ class TestRecStoreRunner(unittest.TestCase):
             return_value=12.0,
         ):
             recstore_runner._finalize_step_timing(
-                row, consume_start=10.0, wall_start=9.0
+                row, wall_start=9.0
             )
 
         self.assertEqual(row["step_total_ms"], 3000.0)
