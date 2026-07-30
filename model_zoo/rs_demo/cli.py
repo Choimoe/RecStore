@@ -35,6 +35,7 @@ from python.pytorch.recstore.benchmark.server import (
     stop_server,
     wait_server_ready,
 )
+from .runtime.worker_common import is_worker_process
 from tools.config.recstore_config_path import resolve_recstore_config_path
 
 
@@ -83,9 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     validate_recstore_config(cfg)
     validate_torchrec_config(cfg)
     validate_hps_torch_config(cfg)
-    is_torchrec_worker = os.environ.get("RS_DEMO_TORCHREC_WORKER") == "1"
-    is_recstore_worker = os.environ.get("RS_DEMO_RECSTORE_WORKER") == "1"
-    is_hps_torch_worker = os.environ.get("RS_DEMO_HPS_TORCH_WORKER") == "1"
+    is_torchrec_worker = is_worker_process("torchrec")
+    is_recstore_worker = is_worker_process("recstore")
+    is_hps_torch_worker = is_worker_process("hps_torch")
     if cfg.backend == "torchrec" and cfg.torchrec_profiler and not is_torchrec_worker:
         run_dir = Path(cfg.torchrec_trace_dir) / datetime.now().strftime(
             "run_%Y%m%d_%H%M%S_%f"
