@@ -53,3 +53,31 @@ def barrier_for_step_alignment(dist, device, local_rank: int, use_dist: bool) ->
         dist.barrier(device_ids=[local_rank])
     else:
         dist.barrier()
+
+
+def merge_rank_outputs(paths: list[Path], out_path: Path) -> list[dict[str, Any]]:
+    """Merge per-rank CSV outputs into a single sorted file."""
+    merged: list[dict[str, Any]] = []
+    for path in paths:
+        for row in load_rows(path):
+            normalized: dict[str, Any] = {}
+            for key, value in row.items():
+                if value is None:
+                    normalized[key] = ""
+                    continue
+                if key in {"backend", "collective_mode"}:
+                    normalized[key] = value
+                    continue
+                try:
+                    if "." in value:
+                        normalized[key] = float(value)
+                    else:
+                        normalized[key] = int(value)
+                except (TypeError, ValueError):
+                    normalized[key] = value
+            merged.append(normalized)
+    if any(str(row.get("torchrec_dist_mode", "")) == "fair_remote" for row in merged):
+        merged = [row for row in merged if int(row.get("torchrec_is_trainer", 1)) == 1]
+    merged.sort(key=lambda row: (int(row.get("rank", 0)), int(row.get("step", 0))))
+    write_rows(out_path, merged)
+    return merged

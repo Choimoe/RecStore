@@ -11,7 +11,7 @@ from dataclasses import dataclass
 try:
     from torchrec.sparse.jagged_tensor import KeyedJaggedTensor, KeyedTensor
     from torchrec.modules.embedding_configs import EmbeddingBagConfig
-except ModuleNotFoundError:
+except ImportError:
     class KeyedJaggedTensor:  # pragma: no cover - fallback typing surface
         pass
 

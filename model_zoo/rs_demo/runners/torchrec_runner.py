@@ -24,6 +24,8 @@ from ..models.dlrm import (
     build_criterion,
     build_dense_module,
     compute_dense_loss,
+)
+from ..models.utils import (
     parse_layer_sizes,
     prepare_hybrid_dlrm_input,
     reshape_torchrec_embeddings_for_dlrm,
@@ -35,6 +37,7 @@ from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
     bool_int as _bool_int,
     load_rows as _load_rows,
+    merge_rank_outputs as _merge_rank_outputs,
     parse_nccl_transport_log as _parse_nccl_transport_log,
     pick_socket_ifname as _pick_socket_ifname,
     write_rows as _write_rows,
@@ -72,12 +75,16 @@ def _build_worker_fingerprint(repo_root: Path) -> dict[str, dict[str, str]]:
         "model_zoo/rs_demo/config.py",
         "model_zoo/rs_demo/data/dlrm_source.py",
         "model_zoo/rs_demo/runners/torchrec_runner.py",
-        "model_zoo/rs_demo/runtime/hybrid_dlrm.py",
+        "model_zoo/rs_demo/models/dlrm.py",
+        "model_zoo/rs_demo/models/utils.py",
     ]
     files: dict[str, str] = {}
     for rel_path in rel_paths:
         path = repo_root / rel_path
-        files[rel_path] = hashlib.md5(path.read_bytes()).hexdigest()
+        try:
+            files[rel_path] = hashlib.md5(path.read_bytes()).hexdigest()
+        except FileNotFoundError:
+            continue
     return {"files": files}
 
 
@@ -113,7 +120,7 @@ def _write_or_verify_worker_fingerprint(
 
 
 def _summarize_sharding_plan(plan: Any) -> str:
-    plan_map = getattr(plan, "plan", {})
+    plan_map = plan.plan
     if not isinstance(plan_map, dict):
         return f"plan_type={type(plan).__name__}"
 
@@ -124,9 +131,9 @@ def _summarize_sharding_plan(plan: Any) -> str:
             for table_name, parameter_sharding in sorted(
                 module_plan.items(), key=lambda item: str(item[0])
             ):
-                sharding_type = getattr(parameter_sharding, "sharding_type", "unknown")
-                compute_kernel = getattr(parameter_sharding, "compute_kernel", "unknown")
-                ranks = getattr(parameter_sharding, "ranks", None)
+                sharding_type = parameter_sharding.sharding_type
+                compute_kernel = parameter_sharding.compute_kernel
+                ranks = parameter_sharding.ranks
                 table_summaries.append(
                     f"{table_name}:{sharding_type}:{compute_kernel}:ranks={ranks}"
                 )
@@ -188,33 +195,6 @@ def _remove_stale_distributed_outputs(cfg: RunConfig, rank_dir: Path) -> None:
                 pass
 
 
-def _merge_rank_outputs(paths: list[Path], out_path: Path) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    for path in paths:
-        for row in _load_rows(path):
-            normalized: dict[str, Any] = {}
-            for key, value in row.items():
-                if value is None:
-                    normalized[key] = ""
-                    continue
-                if key in {"backend", "collective_mode"}:
-                    normalized[key] = value
-                    continue
-                try:
-                    if "." in value:
-                        normalized[key] = float(value)
-                    else:
-                        normalized[key] = int(value)
-                except (TypeError, ValueError):
-                    normalized[key] = value
-            merged.append(normalized)
-    if any(str(row.get("torchrec_dist_mode", "")) == "fair_remote" for row in merged):
-        merged = [row for row in merged if int(row.get("torchrec_is_trainer", 1)) == 1]
-    merged.sort(key=lambda row: (int(row.get("rank", 0)), int(row.get("step", 0))))
-    _write_rows(out_path, merged)
-    return merged
-
-
 def _make_trace_handler(cfg: RunConfig, rank: int):
     def _handler(prof) -> None:
         trace_path = Path(cfg.torchrec_trace_dir) / f"rank{rank}.pt.trace.json"
@@ -239,7 +219,7 @@ def _build_uvm_caching_constraints(
             "TorchRec UVM caching requires EmbeddingComputeKernel.FUSED_UVM_CACHING. "
             "Install a TorchRec/FBGEMM version that supports fused UVM caching."
         ) from exc
-    fused_uvm_caching_value = getattr(fused_uvm_caching, "value", fused_uvm_caching)
+    fused_uvm_caching_value = fused_uvm_caching.value
     return {
         table_name: parameter_constraints_cls(compute_kernels=[fused_uvm_caching_value])
         for table_name in table_names
@@ -531,7 +511,7 @@ def _run_single_or_dist_worker(
                 "torchrec_is_trainer": _bool_int(is_trainer_rank),
             }
             step_start = time.perf_counter()
-            timer = StepTimer(row, torch, device)
+            timer = StepTimer(row, torch, device, mode=cfg.torchrec_timing_sync_mode)
 
             _append_worker_debug(cfg, rank, f"before_batch_prepare step={step}")
             with timer.cpu("batch_prepare_ms"):

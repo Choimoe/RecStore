@@ -404,6 +404,21 @@ class SparseOptimizer:
         self.kv_client = _get_kv_client_if_needed(params)
         self._inflight_handles: List[Tuple[Any, int]] = []
         self._last_update_payloads: List[Dict[str, Any]] = []
+        self.reset_perf_stats()
+
+    def reset_perf_stats(self) -> None:
+        self._perf_stats: Dict[str, float] = {
+            "update_flush_wait_ms": 0.0,
+        }
+
+    def _perf_add(self, key: str, delta_ms: float) -> None:
+        self._perf_stats[key] = self._perf_stats.get(key, 0.0) + float(delta_ms)
+
+    def consume_perf_stats(self, reset: bool = True) -> Dict[str, float]:
+        stats = dict(self._perf_stats)
+        if reset:
+            self.reset_perf_stats()
+        return stats
 
     def last_update_payloads(self) -> List[Dict[str, Any]]:
         return [
