@@ -3,10 +3,18 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Dict, Sequence
+
+_repo_root = Path(__file__).resolve().parents[2]
+_src_dir = str(_repo_root / "src")
+if _src_dir not in sys.path:
+    sys.path.insert(0, _src_dir)
+
+from python.pytorch.recstore.optim.config import OptimizationConfig
 
 
 # Model plugins that contribute their own CLI arguments (routed into
