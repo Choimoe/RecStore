@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 try:
     from torchrec.sparse.jagged_tensor import JaggedTensor, KeyedJaggedTensor
     from torchrec.modules.embedding_configs import EmbeddingConfig
-except ModuleNotFoundError:
+except ImportError:
     class KeyedJaggedTensor:  # pragma: no cover - fallback typing surface
         pass
 
