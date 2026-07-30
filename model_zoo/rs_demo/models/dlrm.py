@@ -235,6 +235,9 @@ class DlrmModelPlugin:
         logits = dense_module(dense_features, embedded_sparse)
         return criterion(logits, labels), logits
 
+    def task_names(self, dense_module) -> list[str]:
+        return []
+
 
 DLRM_PLUGIN = DlrmModelPlugin()
 

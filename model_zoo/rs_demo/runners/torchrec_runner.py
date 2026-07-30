@@ -35,6 +35,7 @@ from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
     bool_int as _bool_int,
     load_rows as _load_rows,
+    merge_rank_outputs as _merge_rank_outputs,
     parse_nccl_transport_log as _parse_nccl_transport_log,
     pick_socket_ifname as _pick_socket_ifname,
     write_rows as _write_rows,
@@ -72,12 +73,16 @@ def _build_worker_fingerprint(repo_root: Path) -> dict[str, dict[str, str]]:
         "model_zoo/rs_demo/config.py",
         "model_zoo/rs_demo/data/dlrm_source.py",
         "model_zoo/rs_demo/runners/torchrec_runner.py",
-        "model_zoo/rs_demo/runtime/hybrid_dlrm.py",
+        "model_zoo/rs_demo/models/dlrm.py",
+        "model_zoo/rs_demo/models/utils.py",
     ]
     files: dict[str, str] = {}
     for rel_path in rel_paths:
         path = repo_root / rel_path
-        files[rel_path] = hashlib.md5(path.read_bytes()).hexdigest()
+        try:
+            files[rel_path] = hashlib.md5(path.read_bytes()).hexdigest()
+        except FileNotFoundError:
+            continue
     return {"files": files}
 
 
@@ -186,33 +191,6 @@ def _remove_stale_distributed_outputs(cfg: RunConfig, rank_dir: Path) -> None:
                 path.unlink()
             except FileNotFoundError:
                 pass
-
-
-def _merge_rank_outputs(paths: list[Path], out_path: Path) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    for path in paths:
-        for row in _load_rows(path):
-            normalized: dict[str, Any] = {}
-            for key, value in row.items():
-                if value is None:
-                    normalized[key] = ""
-                    continue
-                if key in {"backend", "collective_mode"}:
-                    normalized[key] = value
-                    continue
-                try:
-                    if "." in value:
-                        normalized[key] = float(value)
-                    else:
-                        normalized[key] = int(value)
-                except (TypeError, ValueError):
-                    normalized[key] = value
-            merged.append(normalized)
-    if any(str(row.get("torchrec_dist_mode", "")) == "fair_remote" for row in merged):
-        merged = [row for row in merged if int(row.get("torchrec_is_trainer", 1)) == 1]
-    merged.sort(key=lambda row: (int(row.get("rank", 0)), int(row.get("step", 0))))
-    _write_rows(out_path, merged)
-    return merged
 
 
 def _make_trace_handler(cfg: RunConfig, rank: int):

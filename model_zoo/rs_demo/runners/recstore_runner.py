@@ -56,10 +56,9 @@ from recstore.optim import OptimizationPluginRegistry
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
-    denominator = float(denominator)
     if denominator == 0.0:
         return 0.0
-    return float(numerator) / denominator
+    return numerator / denominator
 
 
 def _add_sparse_id_stats(
@@ -107,7 +106,7 @@ def _consume_perf_stats(obj: Any) -> dict[str, float]:
 
 def _merge_consumed_perf_stats(row: dict[str, Any], stats: dict[str, float]) -> None:
     for key, value in stats.items():
-        if key in row and row[key] not in (0, 0.0, "", None):
+        if row.get(key):
             continue
         row[key] = value
 

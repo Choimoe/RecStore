@@ -98,12 +98,9 @@ class LookaheadPrefetcher:
     def enqueue_fused_ids(self, fused_ids: Any) -> None:
         if self._depth <= 0:
             return
-        issue = getattr(self._embedding_module, "issue_fused_id_prefetch", None)
-        if not callable(issue):
-            raise RuntimeError(
-                "fused-id prefetch requires issue_fused_id_prefetch()."
-            )
-        result = issue(fused_ids, record_handle=False)
+        result = self._embedding_module.issue_fused_id_prefetch(
+            fused_ids, record_handle=False
+        )
         handle, num_ids, issue_ts, fused_ids_cpu, fused_inverse = result
         self._pending.append(
             PrefetchSlot(
@@ -256,12 +253,12 @@ class PrefetchReadPath:
         embedding_dim: int,
         feature_offsets: Any | None = None,
     ) -> None:
-        if not bool(getattr(embedding_module, "_enable_fusion", False)):
+        if not embedding_module._enable_fusion:
             raise RuntimeError(
                 "read_mode=prefetch currently requires a fusion-enabled "
                 "embedding module (non-fused async APIs are not wired yet)"
             )
-        if not callable(getattr(embedding_module, "issue_fused_prefetch", None)):
+        if not hasattr(embedding_module, "issue_fused_prefetch"):
             raise RuntimeError(
                 "read_mode=prefetch requires embedding_module.issue_fused_prefetch"
             )
@@ -296,7 +293,7 @@ class PrefetchReadPath:
         if (
             sparse_batch is not None
             and self._feature_offsets is not None
-            and callable(getattr(self._module, "issue_prepared_fused_prefetch", None))
+            and hasattr(self._module, "issue_prepared_fused_prefetch")
         ):
             fused_id_start = time.perf_counter()
             unique_ids, inverse, raw_count = prepare_fused_ids_from_sparse_batch(
