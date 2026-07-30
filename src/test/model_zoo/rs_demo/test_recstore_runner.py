@@ -355,14 +355,6 @@ class _FakeDenseOptimizer:
 
 
 class TestRecStoreRunner(unittest.TestCase):
-    def setUp(self) -> None:
-        self._append_worker_debug_patch = mock.patch(
-            "model_zoo.rs_demo.runners.recstore_runner._append_worker_debug",
-            lambda *args, **kwargs: None,
-        )
-        self._append_worker_debug_patch.start()
-        self.addCleanup(self._append_worker_debug_patch.stop)
-
     def test_lookahead_prefetcher_depth_zero_never_issues_prefetch(self) -> None:
         module = _FakePrefetchModule()
         prefetcher = LookaheadPrefetcher(module, depth=0, embedding_dim=128)
@@ -606,12 +598,6 @@ class TestRecStoreRunner(unittest.TestCase):
                 mock.patch(
                     "model_zoo.rs_demo.runners.recstore_runner.finalize_recstore_row",
                     lambda row: row,
-                )
-            )
-            stack.enter_context(
-                mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.summarize_us",
-                    lambda xs: "ok",
                 )
             )
             if captured_rows is not None:

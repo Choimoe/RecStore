@@ -14,8 +14,6 @@ _repo_root = Path(__file__).resolve().parents[3]
 _pytorch_src = str(_repo_root / "src" / "python" / "pytorch")
 if _pytorch_src not in sys.path:
     sys.path.insert(0, _pytorch_src)
-os.environ.setdefault("RECSTORE_DEFER_OPS_LOAD", "1")
-import recstore
 
 from ..config import (
     RunConfig,
@@ -41,13 +39,12 @@ from ..models.utils import (
     reshape_torchrec_embeddings_for_dlrm,
     run_hybrid_backward,
 )
-from python.pytorch.recstore.benchmark.report import finalize_recstore_row, summarize_us
+from python.pytorch.recstore.benchmark.report import finalize_recstore_row
 from ..runtime.timing import StepTimer
 from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
     bool_int as _bool_int,
     load_rows as _load_rows,
-    parse_nccl_transport_log as _parse_nccl_transport_log,
     pick_socket_ifname as _pick_socket_ifname,
     write_rows as _write_rows,
 )
@@ -59,6 +56,20 @@ from recstore.embedding_read_path import (
     build_embedding_read_path,
 )
 from recstore.optim import OptimizationPluginRegistry
+
+
+_RECSTORE_DEFER_OPS_LOAD = "RECSTORE_DEFER_OPS_LOAD"
+_RECSTORE_WORKER = "RS_DEMO_RECSTORE_WORKER"
+_RECSTORE_WORKER_DIR = "RS_DEMO_RECSTORE_WORKER_DIR"
+_RANK = "RANK"
+_LOCAL_RANK = "LOCAL_RANK"
+_WORLD_SIZE = "WORLD_SIZE"
+_NCCL_SOCKET_IFNAME = "NCCL_SOCKET_IFNAME"
+_GLOO_SOCKET_IFNAME = "GLOO_SOCKET_IFNAME"
+_NCCL_SOCKET_FAMILY = "NCCL_SOCKET_FAMILY"
+
+os.environ.setdefault(_RECSTORE_DEFER_OPS_LOAD, "1")
+import recstore
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
@@ -151,18 +162,6 @@ def _maybe_warmup_gpu_local_shm_fast_path(
     if client.current_ps_backend() != "local_shm":
         client.set_ps_backend("local_shm")
     return bool(client.warmup_local_lookup_flat_cuda_region())
-
-
-def _debug_log_path(cfg: RunConfig, rank: int) -> Path:
-    return Path(cfg.output_root) / "outputs" / cfg.run_id / f"recstore_worker_rank{rank}.log"
-
-
-def _append_worker_debug(cfg: RunConfig, rank: int, message: str) -> None:
-    debug_path = _debug_log_path(cfg, rank)
-    debug_path.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with debug_path.open("a", encoding="utf-8") as f:
-        f.write(f"{timestamp} rank={rank} {message}\n")
 
 
 def _merge_rank_outputs(paths: list[Path], out_path: Path) -> list[dict[str, Any]]:
@@ -260,14 +259,13 @@ class RecStoreRunner(BenchmarkRunner):
 
         cmd = self._build_torchrun_cmd(repo_root, cfg, config_json)
         env = os.environ.copy()
-        env["RS_DEMO_RECSTORE_WORKER"] = "1"
-        env["RS_DEMO_RECSTORE_WORKER_DIR"] = str(rank_dir)
+        env[_RECSTORE_WORKER] = "1"
+        env[_RECSTORE_WORKER_DIR] = str(rank_dir)
         socket_ifname = _pick_socket_ifname()
         if socket_ifname:
-            env.setdefault("NCCL_SOCKET_IFNAME", socket_ifname)
-            env.setdefault("GLOO_SOCKET_IFNAME", socket_ifname)
-        env.setdefault("NCCL_SOCKET_FAMILY", "AF_INET")
-        env.setdefault("NCCL_DEBUG", "WARN")
+            env.setdefault(_NCCL_SOCKET_IFNAME, socket_ifname)
+            env.setdefault(_GLOO_SOCKET_IFNAME, socket_ifname)
+        env.setdefault(_NCCL_SOCKET_FAMILY, "AF_INET")
         res = subprocess.run(
             cmd, cwd=str(repo_root), env=env, check=False, text=True, capture_output=True
         )
@@ -287,37 +285,19 @@ class RecStoreRunner(BenchmarkRunner):
 
     # -- worker setup ------------------------------------------------------
 
-    def _init_process_group(self, cfg, rank, world_size, local_rank, dist):
+    def _init_process_group(self, world_size, local_rank, dist):
         """Set up the CUDA device and (if distributed) the process group."""
         use_dist = world_size > 1
         backend = "nccl"
         if torch.cuda.is_available():
             torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-        _append_worker_debug(
-            cfg, rank,
-            f"worker_start world_size={world_size} local_rank={local_rank} backend={backend}",
-        )
         if use_dist and not dist.is_initialized():
-            nccl_log_path = Path(
-                os.environ.get(
-                    "NCCL_DEBUG_FILE",
-                    str(Path(cfg.output_root) / "outputs" / cfg.run_id
-                        / f"recstore_nccl_rank{rank}.log"),
-                )
-            )
-            nccl_log_path.parent.mkdir(parents=True, exist_ok=True)
-            os.environ["NCCL_DEBUG_FILE"] = str(nccl_log_path)
-            os.environ.setdefault("NCCL_DEBUG", "INFO")
-            os.environ.setdefault("NCCL_DEBUG_SUBSYS", "NET")
             dist.init_process_group(
                 backend=backend,
                 device_id=device if device.type == "cuda" else None,
             )
             dist.barrier()
-            _append_worker_debug(
-                cfg, rank, f"nccl_transport={_parse_nccl_transport_log(nccl_log_path)}"
-            )
         return device, use_dist
 
     def _build_embedding_module(self, cfg, client, default_cat_names):
@@ -370,7 +350,7 @@ class RecStoreRunner(BenchmarkRunner):
             os.chdir(str(self.runtime_dir))
             torch.manual_seed(cfg.seed)
             device, use_dist = self._init_process_group(
-                cfg, rank, world_size, local_rank, dist
+                world_size, local_rank, dist
             )
 
             recstore.load_ops_library()
@@ -611,6 +591,17 @@ class RecStoreRunner(BenchmarkRunner):
             print("[rs_demo] workload finished")
 
             _write_rows(out_csv, rows)
+            if cfg.save_checkpoint:
+                from ..checkpoint import export_checkpoint
+                export_checkpoint(
+                    Path(cfg.checkpoint_path),
+                    cfg=cfg, step=cfg.steps,
+                    dense_module=unwrapped_module,
+                    embedding_module=embedding_module,
+                    dense_optimizer=dense_optimizer,
+                    sparse_optimizer=sparse_optimizer,
+                    rank=rank,
+                )
             if use_dist and dist.is_initialized():
                 dist.barrier(device_ids=[local_rank] if device.type == "cuda" else None)
                 dist.destroy_process_group()
@@ -628,13 +619,16 @@ class RecStoreRunner(BenchmarkRunner):
             raise ValueError("RecStoreRunner requires cfg.backend to be 'recstore'.")
         validate_recstore_config(cfg)
 
-        if os.environ.get("RS_DEMO_RECSTORE_WORKER") == "1":
-            rank = int(os.environ.get("RANK", "0"))
-            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if os.environ.get(_RECSTORE_WORKER) == "1":
+            rank = int(os.environ.get(_RANK, "0"))
+            local_rank = int(os.environ.get(_LOCAL_RANK, "0"))
             world_size = int(
-                os.environ.get("WORLD_SIZE", str(cfg.nnodes * cfg.nproc_per_node))
+                os.environ.get(_WORLD_SIZE, str(cfg.nnodes * cfg.nproc_per_node))
             )
-            worker_dir = Path(os.environ["RS_DEMO_RECSTORE_WORKER_DIR"])
+            worker_dir_value = os.environ.get(_RECSTORE_WORKER_DIR)
+            if not worker_dir_value:
+                raise RuntimeError(f"{_RECSTORE_WORKER_DIR} is required for worker runs")
+            worker_dir = Path(worker_dir_value)
             ensure_shared_dir(worker_dir)
             return self._run_local_worker(
                 repo_root=repo_root, cfg=cfg, rank=rank, world_size=world_size,
