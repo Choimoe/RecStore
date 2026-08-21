@@ -232,6 +232,14 @@ class RecStoreRunner(BenchmarkRunner):
         res = subprocess.run(
             cmd, cwd=str(repo_root), env=env, check=False, text=True, capture_output=True
         )
+        # [BagPipe-probe] keep worker stderr even on success: C++ WARNINGs
+        # (GPU cache fallbacks, update failures) are otherwise lost.
+        try:
+            (rank_dir / "worker_stderr.log").write_text(
+                res.stderr or "", encoding="utf-8"
+            )
+        except Exception:
+            pass
         if res.returncode != 0:
             raise RuntimeError(
                 "recstore torchrun worker failed\n"
@@ -394,6 +402,7 @@ class RecStoreRunner(BenchmarkRunner):
                 if callable(disable_bypass):
                     disable_bypass(False)
 
+                master_table_name = eb_configs[0]["name"] if eb_configs else ""
                 plugin = OptimizationPluginRegistry.create(
                     "bagpipe",
                     embedding_module=embedding_module,
@@ -404,7 +413,11 @@ class RecStoreRunner(BenchmarkRunner):
                     embedding_dim=cfg.optimization.embedding_dim,
                     fuse_k=cfg.fuse_k,
                     table_offsets=table_offsets,
-                    master_table_name=eb_configs[0]["name"] if eb_configs else "",
+                    table_sizes={
+                        cfg_item["feature_names"][0]: cfg_item["num_embeddings"]
+                        for cfg_item in eb_configs
+                    },
+                    master_table_name=master_table_name,
                     device=device,
                     lr=0.01,
                     id_extractor=_id_extractor,
