@@ -1280,19 +1280,10 @@ int main(int argc, char** argv) {
       return 0;
     }
 
-    nlohmann::json config = nlohmann::json::object();
-    config["client"]      = {
-             {"host", FLAGS_host}, {"port", FLAGS_port}, {"shard", 0}};
-    nlohmann::json servers = nlohmann::json::array();
-    for (int shard = 0; shard < FLAGS_num_shards; ++shard) {
-      servers.push_back(
-          {{"host", FLAGS_host}, {"port", FLAGS_port}, {"shard", shard}});
-    }
-    config["distributed_client"] = {
-        {"num_shards", FLAGS_num_shards},
-        {"hash_method", "city_hash"},
-        {"servers", servers},
-    };
+    CHECK(!FLAGS_config_path.empty())
+        << "multi-shard RDMA benchmark requires --config_path with a complete "
+           "rdma_deployment";
+    auto config  = LoadClientConfig("RDMA");
     auto adapter = std::make_unique<recstore::RDMAPSClientAdapter>(config);
     auto raw     = std::make_unique<recstore::RdmaRawAccess>(adapter.get());
     std::vector<int64_t> put_warmup_samples_us;
