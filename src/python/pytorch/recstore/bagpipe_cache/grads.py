@@ -198,6 +198,24 @@ class BagPipeGradMixin:
         all_reduce 与逐 id 判定开销。
         """
         t_start = time.perf_counter()
+        embedding_module = getattr(self, "embedding_module", None)
+        if bool(
+            getattr(embedding_module, "_bagpipe_cache_generation_mismatch", False)
+        ):
+            raise RuntimeError(
+                "GPU cache generation changed during BagPipe lookup; "
+                "local dirty state cannot be recovered safely"
+            )
+        check_generation = getattr(self, "_check_gpu_cache_generation", None)
+        if callable(check_generation):
+            check_generation()
+        last_lookup = getattr(
+            embedding_module, "_bagpipe_last_lookup_resident", None
+        )
+        if embedding_module is not None:
+            embedding_module._bagpipe_current_prepared_ids = None
+            embedding_module._bagpipe_last_lookup_resident = None
+            embedding_module._bagpipe_cache_generation_mismatch = False
 
         if unique_ids.numel() == 0:
             self._stats["bagpipe_update_ms"] += (time.perf_counter() - t_start) * 1e3
@@ -226,13 +244,31 @@ class BagPipeGradMixin:
         else:
             shared_mask = torch.zeros_like(ids_cuda, dtype=torch.bool)
         local_mask = ~shared_mask
+        residency_mask = None
+        all_resident = False
+        if last_lookup is not None and last_lookup[0] is ids_cuda:
+            if last_lookup[1] is None:
+                all_resident = True
+            else:
+                residency_mask = last_lookup[1]
+                local_mask = local_mask & residency_mask
 
-        # The forward lookup has completed.  Hits were resident and misses were
-        # backfilled by gpu_cache_lookup_flat, so every current ID is now in
-        # the C++ cache.  Register that fact before the next enqueue's hit test.
-        current_compact = self._compact_in_range(self._to_compact(ids_cuda))
-        self._cached_dev[current_compact] = True
-        self._ttl_dev[current_compact] = batch_num + self._ttl_margin
+        # The no-evict lookup returned the authoritative post-fill residency
+        # mask.  Failed inserts stay false and are retried on the next batch.
+        all_compact = self._to_compact(ids_cuda)
+        in_range = all_compact < self._latest_dev.numel()
+        current_compact = all_compact[in_range]
+        if all_resident:
+            self._cached_dev[current_compact] = True
+            self._ttl_dev[current_compact] = batch_num + self._ttl_margin
+        elif residency_mask is not None:
+            residency_mask = residency_mask[in_range]
+            self._cached_dev[current_compact[~residency_mask]] = False
+            resident_compact = current_compact[residency_mask]
+            self._cached_dev[resident_compact] = True
+            self._ttl_dev[resident_compact] = batch_num + self._ttl_margin
+        else:
+            self._cached_dev[current_compact] = False
 
         # ---- no_sync (local-only): 立即 best-effort 原位 SGD ----
         self._hot_add("bagpipe_no_sync_ids", local_mask.sum())
@@ -260,10 +296,8 @@ class BagPipeGradMixin:
                 self._dirty_dev[local_compact] = False
             else:
                 # PS 持久化走 dirty 张量 + eviction 值写回 (scatter, 无 tolist)。
-                # 本批 id 刚经过 lookup (C++ miss 路径会回填 GPU cache,
-                # op_torch.cc gpu_cache_lookup_flat), best-effort apply 必然
-                # 命中; 此处同步登记驻留 + 续期 TTL —— 簿记对 lookup 回填
-                # 是盲的, 不登记则这些条目既不参与命中判定也永不写回。
+                # local_mask already excludes rows whose no-evict insert
+                # failed, so best-effort apply and the dirty mark agree.
                 local_compact = self._compact_in_range(
                     self._to_compact(local_ids)
                 )

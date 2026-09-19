@@ -76,6 +76,7 @@ class _GradHarness(BagPipeGradMixin):
         self.device = torch.device("cpu")
         self._rank = rank
         self.kv_client = _FakeClient()
+        self.embedding_module = type("EmbeddingModule", (), {})()
         self.master_table_name = "table"
         self.lr = 0.01
         # 扁平张量簿记 (与 controller._alloc_bookkeeping 同构, 固定 64 大小)
@@ -210,6 +211,27 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         self.assertEqual(d_grads.shape, (2, 2))
         # no PS push from update_grads itself (persistence is at the barrier)
         self.assertEqual(harness.kv_client.updates, [])
+
+    def test_update_grads_uses_authoritative_lookup_residency(self):
+        harness = _GradHarness(rank=0)
+        ids = torch.tensor([10, 20, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [2.0, 2.0], [4.0, 4.0]])
+        # ID 20 is local-only but its no-evict insert failed.
+        harness.embedding_module._bagpipe_last_lookup_resident = (
+            ids,
+            torch.tensor([True, False, True]),
+        )
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+
+        self.assertEqual(harness.kv_client.best_effort_applies, [])
+        self.assertFalse(bool(harness._cached_dev[20].item()))
+        self.assertFalse(bool(harness._dirty_dev[20].item()))
+        self.assertTrue(bool(harness._cached_dev[10].item()))
+        self.assertTrue(bool(harness._cached_dev[30].item()))
+        self.assertIsNone(
+            harness.embedding_module._bagpipe_last_lookup_resident
+        )
 
     def test_update_grads_single_all_reduce_on_side_stream(self):
         """合并 now/later: 全部共享 id 走单次 all_reduce (侧流), 不再按
@@ -433,6 +455,27 @@ class TestPrefetchResidencyValidation(unittest.TestCase):
 
             self.assertIsNone(ctrl._prefetch_handles[7])
             self.assertTrue(ctrl._prefetch_all_hits[7])
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_external_cache_reset_fails_loudly(self):
+        class KV:
+            def __init__(self):
+                self.generation = 10
+
+            def get_gpu_cache_generation(self):
+                return self.generation
+
+        kv = KV()
+        ctrl = self._controller(kv)
+        try:
+            kv.generation = 11
+            with self.assertRaisesRegex(RuntimeError, "generation changed"):
+                ctrl._preissue_prefetch(
+                    7,
+                    torch.tensor([10], dtype=torch.int64),
+                    torch.tensor([10], dtype=torch.int64),
+                )
         finally:
             ctrl._cleanup_queue.put(None)
 

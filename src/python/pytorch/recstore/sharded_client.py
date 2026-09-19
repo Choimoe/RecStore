@@ -671,6 +671,37 @@ class ShardedRecstoreClient:
             normalized = normalized.contiguous()
         return fn(normalized, int(embedding_dim))
 
+    def gpu_cache_lookup_flat_no_evict(
+        self, keys: torch.Tensor, embedding_dim: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._gpu_cache_enabled:
+            raise RuntimeError(
+                "gpu_cache_lookup_flat_no_evict requires GPU cache to be enabled"
+            )
+        fn = getattr(self._client, "gpu_cache_lookup_flat_no_evict", None)
+        if callable(fn):
+            normalized = self._normalize_ids(keys, keep_device=True)
+            if not normalized.is_contiguous():
+                normalized = normalized.contiguous()
+            return fn(normalized, int(embedding_dim))
+        raise RuntimeError(
+            "gpu_cache_lookup_flat_no_evict requires a RecStore client "
+            "exposing gpu_cache_lookup_flat_no_evict()."
+        )
+
+    def get_gpu_cache_generation(self) -> int:
+        getter = getattr(self._client, "get_gpu_cache_generation", None)
+        if callable(getter):
+            return int(getter())
+        ops = getattr(self._client, "ops", None)
+        getter = getattr(ops, "get_gpu_cache_generation", None)
+        if not callable(getter):
+            raise RuntimeError(
+                "get_gpu_cache_generation requires a RecStore client or ops "
+                "library exposing get_gpu_cache_generation()."
+            )
+        return int(getter())
+
     def query_gpu_cache(self, keys: torch.Tensor, embedding_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
         fn = getattr(self._client, "query_gpu_cache", None)
         if not callable(fn):

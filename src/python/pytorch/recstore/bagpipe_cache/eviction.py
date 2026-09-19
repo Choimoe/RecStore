@@ -224,6 +224,14 @@ class BagPipeEvictionMixin:
         except Exception:
             pass
         self._flush_dirty_at_shutdown()
+        prepared_ids = getattr(self, "_prepared_ids", None)
+        if prepared_ids is not None:
+            prepared_ids.clear()
+        embedding_module = getattr(self, "embedding_module", None)
+        if embedding_module is not None:
+            embedding_module._bagpipe_current_prepared_ids = None
+            embedding_module._bagpipe_last_lookup_resident = None
+            embedding_module._bagpipe_cache_generation_mismatch = False
         self._cleanup_queue.put(None)
 
     def _flush_dirty_at_shutdown(self) -> None:

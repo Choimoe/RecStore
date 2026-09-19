@@ -902,8 +902,35 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             ids_for_query = ids_for_query.to(compute_device)
         if not ids_for_query.is_contiguous():
             ids_for_query = ids_for_query.contiguous()
+
+        # BagPipe's enqueue already deduplicated this exact batch. Query the
+        # unique rows once, then expand back to raw feature-major order.
+        prepared = getattr(self, "_bagpipe_current_prepared_ids", None)
+        gather_inverse = None
+        if prepared is not None:
+            prepared_ids, prepared_inverse, raw_count = prepared
+            if (
+                int(raw_count) == ids_for_query.numel()
+                and prepared_ids.device == ids_for_query.device
+            ):
+                ids_for_query = prepared_ids
+                gather_inverse = prepared_inverse
+
         assume_hits = bool(getattr(self, "_bagpipe_all_cache_hits", False))
         self._bagpipe_all_cache_hits = False
+        expected_generation = getattr(self, "_bagpipe_cache_generation", None)
+        generation_getter = getattr(
+            self.kv_client, "get_gpu_cache_generation", None
+        )
+        if (
+            assume_hits
+            and expected_generation is not None
+            and callable(generation_getter)
+            and int(generation_getter()) != int(expected_generation)
+        ):
+            assume_hits = False
+            self._bagpipe_cache_generation_mismatch = True
+
         probe_path = os.environ.get("RS_DEMO_BAGPIPE_PROBE_LOG")
         if probe_path:
             try:
@@ -918,10 +945,28 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             embeddings = self.kv_client.gpu_cache_lookup_flat_assuming_hits(
                 ids_for_query, embedding_dim
             )
+            resident = None
         else:
-            embeddings = self.kv_client.gpu_cache_lookup_flat(
-                ids_for_query, embedding_dim
+            lookup_no_evict = getattr(
+                self.kv_client, "gpu_cache_lookup_flat_no_evict", None
             )
+            if callable(lookup_no_evict):
+                embeddings, resident = lookup_no_evict(
+                    ids_for_query, embedding_dim
+                )
+                self._bagpipe_last_lookup_resident = (
+                    ids_for_query,
+                    resident,
+                )
+            else:
+                embeddings = self.kv_client.gpu_cache_lookup_flat(
+                    ids_for_query, embedding_dim
+                )
+                self._bagpipe_last_lookup_resident = None
+        if assume_hits:
+            self._bagpipe_last_lookup_resident = (ids_for_query, resident)
+        if gather_inverse is not None:
+            embeddings = embeddings.index_select(0, gather_inverse)
         if embeddings.device != compute_device:
             embeddings = embeddings.to(compute_device)
         return embeddings

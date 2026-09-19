@@ -417,6 +417,12 @@ class RecStoreRunner(BenchmarkRunner):
                 )
                 if callable(disable_bypass):
                     disable_bypass(False)
+                # BagPipe also owns residency across CPU-side update paths.
+                disable_clear_after_update = getattr(
+                    client, "set_clear_gpu_cache_after_cpu_update", None
+                )
+                if callable(disable_clear_after_update):
+                    disable_clear_after_update(False)
 
                 master_table_name = eb_configs[0]["name"] if eb_configs else ""
                 plugin = OptimizationPluginRegistry.create(

@@ -132,7 +132,14 @@ class BagPipeCacheController(
         # pre-issued at enqueue, lookahead steps ahead of its consumption.
         self._prefetch_handles: Dict[int, Optional[PrefetchSlot]] = {}
         self._prefetch_all_hits: Dict[int, bool] = {}
+        self._prepared_ids: Dict[
+            int, Optional[Tuple[torch.Tensor, torch.Tensor, int]]
+        ] = {}
         self._max_inflight_prefetch = 4
+        generation_getter = getattr(kv_client, "get_gpu_cache_generation", None)
+        self._cache_generation = (
+            int(generation_getter()) if callable(generation_getter) else None
+        )
         # TTL margin beyond the last-seen batch: ids in this dataset recur
         # only every ~epoch_length batches, so a TTL of exactly "last use"
         # expires every entry between recurrences and the cache collapses to
@@ -337,3 +344,19 @@ class BagPipeCacheController(
         if self._dirty_dev is None:
             return 0
         return int(self._dirty_dev.sum().item())
+
+    def _check_gpu_cache_generation(self) -> None:
+        """Fail loudly if another component reset the owned C++ cache."""
+        getter = getattr(self.kv_client, "get_gpu_cache_generation", None)
+        if not callable(getter):
+            return
+        current = int(getter())
+        if self._cache_generation is None:
+            self._cache_generation = current
+            return
+        if current != self._cache_generation:
+            raise RuntimeError(
+                "GPU cache generation changed while BagPipe owns it "
+                f"({self._cache_generation} -> {current}); refusing to "
+                "continue with a stale residency mirror"
+            )

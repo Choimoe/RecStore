@@ -626,6 +626,23 @@ class RecStoreClient:
             keys = keys.contiguous()
         return self.ops.gpu_cache_lookup_flat(keys, int(embedding_dim))
 
+    def gpu_cache_lookup_flat_no_evict(
+        self, keys: torch.Tensor, embedding_dim: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Lookup rows and fill misses without evicting residents.
+
+        Returns ``(values, resident_mask)``; the mask is authoritative C++
+        residency state after the stream-ordered fill.
+        """
+        keys = self._normalize_ids(keys, preserve_device=True)
+        if not keys.is_contiguous():
+            keys = keys.contiguous()
+        return self.ops.gpu_cache_lookup_flat_no_evict(keys, int(embedding_dim))
+
+    def get_gpu_cache_generation(self) -> int:
+        """Return a generation that changes whenever the C++ cache is reset."""
+        return int(self.ops.get_gpu_cache_generation())
+
     def gpu_cache_lookup_flat_assuming_hits(
         self, keys: torch.Tensor, embedding_dim: int
     ) -> torch.Tensor:

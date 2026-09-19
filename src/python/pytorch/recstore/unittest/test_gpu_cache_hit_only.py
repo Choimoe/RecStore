@@ -94,6 +94,37 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
             )
         )
 
+    def test_no_evict_lookup_returns_values_and_residency_mask(self) -> None:
+        table_name = f"gpu_cache_no_evict_lookup_{time.time_ns()}"
+        self.client.init_data(
+            name=table_name, shape=(256, 4), dtype=torch.float32
+        )
+        keys = torch.arange(80, dtype=torch.int64, device="cuda")
+        expected = self.client.local_lookup_flat(table_name, keys)
+
+        values, resident = self.client.gpu_cache_lookup_flat_no_evict(
+            keys, 4
+        )
+
+        self.assertTrue(torch.equal(values, expected))
+        self.assertTrue(torch.equal(resident, self.client.contains_gpu_cache(keys)))
+        self.assertTrue(bool(resident.any().item()))
+
+        more_keys = torch.arange(
+            100, 140, dtype=torch.int64, device="cuda"
+        )
+        self.client.gpu_cache_lookup_flat_no_evict(more_keys, 4)
+        old_values = self.client.gpu_cache_lookup_flat_assuming_hits(
+            keys[resident], 4
+        )
+        self.assertTrue(torch.equal(old_values, expected[resident]))
+
+    def test_gpu_cache_generation_changes_on_clear(self) -> None:
+        before = self.client.get_gpu_cache_generation()
+        self.client.clear_gpu_cache()
+        after = self.client.get_gpu_cache_generation()
+        self.assertGreater(after, before)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ bool EnableGpuCache(int64_t capacity, int64_t embedding_dim);
 void DisableGpuCache();
 void ClearGpuCache();
 bool IsGpuCacheEnabled();
+uint64_t GetGpuCacheGeneration();
 
 bool CanUseGpuCache(const torch::Tensor& keys, int64_t embedding_dim);
 

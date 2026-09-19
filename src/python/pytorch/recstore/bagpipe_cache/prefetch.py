@@ -86,6 +86,11 @@ class BagPipePrefetchMixin:
         ids_dev = unique_ids.to(self.device, dtype=torch.int64)
         inverse_dev = inverse.to(self.device)
         self._lookahead_ids.append((batch_num, ids_dev))
+        self._prepared_ids[batch_num] = (
+            ids_dev,
+            inverse_dev,
+            raw_count,
+        )
         compact = self._compact_in_range(self._to_compact(ids_dev))
         # enqueue 批号严格递增, 直接 scatter 即等价于 max(旧值, batch)
         self._latest_dev[compact] = batch_num
@@ -127,11 +132,18 @@ class BagPipePrefetchMixin:
         """
         t_start = time.perf_counter()
         self._wait_pending_sync_now()
+        self._check_gpu_cache_generation()
 
         if not self._lookahead_ids:
             return
         batch_num, unique_ids = self._lookahead_ids.popleft()
         self._current_batch = batch_num
+        if self.embedding_module is not None:
+            self.embedding_module._bagpipe_current_prepared_ids = (
+                self._prepared_ids.pop(batch_num, None)
+            )
+            self.embedding_module._bagpipe_cache_generation = self._cache_generation
+            self.embedding_module._bagpipe_cache_generation_mismatch = False
 
         slot = self._prefetch_handles.pop(batch_num, None)
         all_hits = bool(self._prefetch_all_hits.pop(batch_num, False))
@@ -177,9 +189,15 @@ class BagPipePrefetchMixin:
         pipeline: one handle is retired and one issued per step, so batches
         are still pre-issued at enqueue with the full lookahead lead time.
         """
+        self._check_gpu_cache_generation()
         if ids_dev.numel() == 0:
             self._prefetch_handles[batch_num] = None
             self._prefetch_all_hits[batch_num] = True
+            self._prepared_ids[batch_num] = (
+                ids_dev,
+                ids_dev,
+                0,
+            )
             return
 
         # 向量化命中判定: 驻留且未过期 (compact 索引)。控制流只用 numel

@@ -732,6 +732,77 @@ gpu_cache_lookup_flat_torch(const torch::Tensor& keys,
   return cpu_values;
 }
 
+std::tuple<torch::Tensor, torch::Tensor>
+gpu_cache_lookup_flat_no_evict_torch(const torch::Tensor& keys,
+                                     int64_t embedding_dim) {
+  ResetLocalLookupFlatProfile();
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  gpu::ResetLastGpuCacheProfile();
+#endif
+  const auto total_start = SteadyNow();
+  const auto orig_device = keys.device();
+
+  TORCH_CHECK(keys.dim() == 1, "Keys tensor must be 1-dimensional");
+  TORCH_CHECK(keys.scalar_type() == torch::kInt64,
+              "Keys tensor must have dtype int64");
+  TORCH_CHECK(keys.is_contiguous(), "Keys tensor must be contiguous");
+  TORCH_CHECK(embedding_dim > 0, "Embedding dimension must be positive");
+  TORCH_CHECK(gpu::CanUseGpuCache(keys, embedding_dim),
+              "gpu_cache_lookup_flat_no_evict requires an enabled GPU cache "
+              "on the keys' CUDA device");
+
+  const int64_t num_keys = keys.size(0);
+  auto resident = torch::ones({num_keys}, keys.options().dtype(torch::kBool));
+  if (num_keys == 0) {
+    return {
+        torch::empty({0, embedding_dim}, keys.options().dtype(torch::kFloat32)),
+        resident};
+  }
+
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  auto cache_result = gpu::QueryGpuCache(keys, embedding_dim);
+  RecordGpuCacheLookupOutcome(
+      num_keys,
+      static_cast<double>(num_keys - cache_result.missing_count),
+      static_cast<double>(num_keys));
+  if (cache_result.missing_count == 0) {
+    g_last_local_lookup_flat_profile[kLookupTotalMs] =
+        ElapsedMs(total_start);
+    return {cache_result.values, resident};
+  }
+
+  const auto backend_start = SteadyNow();
+  auto miss_cpu_keys = cache_result.missing_keys_cpu.contiguous();
+  const int64_t miss_count = miss_cpu_keys.size(0);
+  auto miss_cpu_values = torch::empty(
+      {miss_count, embedding_dim},
+      torch::TensorOptions().device(torch::kCPU).dtype(torch::kFloat32));
+  auto op = GetKVClientOp();
+  base::RecTensor rec_miss_keys =
+      ToRecTensor(miss_cpu_keys, base::DataType::UINT64);
+  base::RecTensor rec_miss_values =
+      ToRecTensor(miss_cpu_values, base::DataType::FLOAT32);
+  op->EmbRead(rec_miss_keys, rec_miss_values);
+  gpu::AddGpuCacheBackendLookupMs(ElapsedMs(backend_start));
+
+  auto miss_keys_cuda = miss_cpu_keys.to(orig_device, /*non_blocking=*/false);
+  auto miss_values_cuda =
+      miss_cpu_values.to(orig_device, /*non_blocking=*/false);
+  auto inserted = gpu::FillGpuCacheNoEvict(miss_keys_cuda, miss_values_cuda);
+  gpu::ScatterMissValues(&cache_result.values,
+                         cache_result.missing_positions_cpu,
+                         miss_values_cuda);
+  auto positions_cuda = cache_result.missing_positions_cpu.to(orig_device);
+  resident.index_put_({positions_cuda}, inserted);
+  g_last_local_lookup_flat_profile[kLookupTotalMs] = ElapsedMs(total_start);
+  return {cache_result.values, resident};
+#else
+  (void)total_start;
+  (void)orig_device;
+  TORCH_CHECK(false, "GPU cache support is unavailable");
+#endif
+}
+
 // Async prefetch: returns a unique prefetch id (uint64_t)
 int64_t emb_prefetch_torch(const torch::Tensor& keys) {
   TORCH_CHECK(keys.dim() == 1, "Keys tensor must be 1-dimensional");
@@ -1250,6 +1321,14 @@ torch::Tensor contains_gpu_cache_torch(const torch::Tensor& keys) {
 #endif
 }
 
+int64_t get_gpu_cache_generation_torch() {
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  return static_cast<int64_t>(gpu::GetGpuCacheGeneration());
+#else
+  return 0;
+#endif
+}
+
 void invalidate_gpu_cache_torch(const torch::Tensor& keys) {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
   TORCH_CHECK(keys.dim() == 1, "keys must be 1-dimensional");
@@ -1458,6 +1537,8 @@ TORCH_LIBRARY(recstore_ops, m) {
   m.def("emb_read", emb_read_torch);
   m.def("local_lookup_flat", local_lookup_flat_torch);
   m.def("gpu_cache_lookup_flat", gpu_cache_lookup_flat_torch);
+  m.def("gpu_cache_lookup_flat_no_evict",
+        gpu_cache_lookup_flat_no_evict_torch);
   m.def("gpu_cache_lookup_flat_assuming_hits",
         gpu_cache_lookup_flat_assuming_hits_torch);
   m.def("emb_update", emb_update_torch);
@@ -1487,6 +1568,7 @@ TORCH_LIBRARY(recstore_ops, m) {
   m.def("prefill_gpu_cache", prefill_gpu_cache_torch);
   m.def("prefill_gpu_cache_no_evict", prefill_gpu_cache_no_evict_torch);
   m.def("contains_gpu_cache", contains_gpu_cache_torch);
+  m.def("get_gpu_cache_generation", get_gpu_cache_generation_torch);
   m.def("invalidate_gpu_cache", invalidate_gpu_cache_torch);
   m.def("apply_sgd_update_gpu_cache", apply_sgd_update_gpu_cache_torch);
   m.def("apply_sgd_update_gpu_cache_best_effort",

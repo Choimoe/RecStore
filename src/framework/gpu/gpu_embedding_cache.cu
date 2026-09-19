@@ -26,6 +26,7 @@ int64_t g_capacity = 0;
 int64_t g_embedding_dim = 0;
 int g_device_index = -1;
 cudaEvent_t g_last_cache_event = nullptr;
+uint64_t g_generation = 0;
 
 void RequireCudaTensor(const torch::Tensor& tensor, const char* name) {
   TORCH_CHECK(tensor.is_cuda(), name, " must be a CUDA tensor");
@@ -219,6 +220,7 @@ bool EnableGpuCache(int64_t capacity, int64_t embedding_dim) {
   g_capacity = capacity;
   g_embedding_dim = embedding_dim;
   g_device_index = device_index;
+  ++g_generation;
   return true;
 }
 
@@ -230,6 +232,7 @@ void DisableGpuCache() {
   g_capacity = 0;
   g_embedding_dim = 0;
   g_device_index = -1;
+  ++g_generation;
 }
 
 void ClearGpuCache() {
@@ -248,11 +251,17 @@ void ClearGpuCache() {
     g_cache = std::make_shared<CacheImpl>(
         static_cast<size_t>(g_capacity), static_cast<size_t>(g_embedding_dim));
   }
+  ++g_generation;
 }
 
 bool IsGpuCacheEnabled() {
   std::lock_guard<std::mutex> guard(g_mu);
   return g_cache != nullptr;
+}
+
+uint64_t GetGpuCacheGeneration() {
+  std::lock_guard<std::mutex> guard(g_mu);
+  return g_generation;
 }
 
 
