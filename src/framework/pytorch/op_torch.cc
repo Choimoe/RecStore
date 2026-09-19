@@ -1227,6 +1227,23 @@ void invalidate_gpu_cache_torch(const torch::Tensor& keys) {
 #endif
 }
 
+torch::Tensor gpu_cache_lookup_flat_assuming_hits_torch(
+    const torch::Tensor& keys, int64_t embedding_dim) {
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  TORCH_CHECK(keys.dim() == 1, "Keys tensor must be 1-dimensional");
+  TORCH_CHECK(keys.scalar_type() == torch::kInt64,
+              "Keys must have dtype int64");
+  TORCH_CHECK(keys.is_contiguous(), "Keys tensor must be contiguous");
+  TORCH_CHECK(keys.is_cuda(), "gpu_cache_lookup_flat_assuming_hits requires CUDA keys");
+  TORCH_CHECK(embedding_dim > 0, "Embedding dimension must be positive");
+  return gpu::LookupGpuCacheAssumingHits(keys, embedding_dim);
+#else
+  (void)keys;
+  (void)embedding_dim;
+  TORCH_CHECK(false, "GPU cache support is unavailable");
+#endif
+}
+
 bool apply_sgd_update_gpu_cache_torch(const torch::Tensor& keys,
                                       const torch::Tensor& grads,
                                       double learning_rate) {
@@ -1399,6 +1416,8 @@ TORCH_LIBRARY(recstore_ops, m) {
   m.def("emb_read", emb_read_torch);
   m.def("local_lookup_flat", local_lookup_flat_torch);
   m.def("gpu_cache_lookup_flat", gpu_cache_lookup_flat_torch);
+  m.def("gpu_cache_lookup_flat_assuming_hits",
+        gpu_cache_lookup_flat_assuming_hits_torch);
   m.def("emb_update", emb_update_torch);
   m.def("emb_update_table", emb_update_table_torch);
   m.def("emb_update_async", emb_update_async_torch);

@@ -14,6 +14,7 @@ _cached_dev), 与原版 BagPipe oracle 的 numpy 数组向量化同构 —— en
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -133,8 +134,21 @@ class BagPipePrefetchMixin:
         self._current_batch = batch_num
 
         slot = self._prefetch_handles.pop(batch_num, None)
+        all_hits = bool(self._prefetch_all_hits.pop(batch_num, False))
         if slot is not None:
-            self._fill_from_preissued(slot, compute_device)
+            all_hits = self._fill_from_preissued(slot, compute_device)
+        self.embedding_module._bagpipe_all_cache_hits = all_hits
+        probe_path = os.environ.get("RS_DEMO_BAGPIPE_PROBE_LOG")
+        if probe_path:
+            try:
+                with open(probe_path, "a", encoding="utf-8") as probe_file:
+                    probe_file.write(
+                        "[BagPipe-probe] prefill "
+                        f"batch={batch_num} slot={slot is not None} "
+                        f"all_hits={all_hits}\n"
+                    )
+            except OSError:
+                pass
 
         self._stats["bagpipe_prefill_ms"] += (time.perf_counter() - t_start) * 1e3
 
@@ -165,15 +179,7 @@ class BagPipePrefetchMixin:
         """
         if ids_dev.numel() == 0:
             self._prefetch_handles[batch_num] = None
-            return
-
-        outstanding = sum(
-            1 for h in self._prefetch_handles.values() if h is not None
-        )
-        if outstanding >= self._max_inflight_prefetch:
-            # 槽池饱和: 该批不预取, 未命中 id 由 lookup 的 C++ miss 回填补齐
-            self._prefetch_handles[batch_num] = None
-            self._stats["bagpipe_prefetch_throttled"] += 1.0
+            self._prefetch_all_hits[batch_num] = True
             return
 
         # 向量化命中判定: 驻留且未过期 (compact 索引)。控制流只用 numel
@@ -190,11 +196,33 @@ class BagPipePrefetchMixin:
         targets = compact[~hit]
         if targets.numel() == 0:
             self._prefetch_handles[batch_num] = None
+            self._prefetch_all_hits[batch_num] = True
             return
-        # 排序后一次 D2H, 免去 Python sorted() + torch.tensor 重建
-        order = targets.argsort()
-        targets = targets[order].contiguous()
-        ttl_dev = (self._latest_dev[targets] + self._ttl_margin).contiguous()
+        self._prefetch_all_hits[batch_num] = False
+
+        outstanding = sum(
+            1 for h in self._prefetch_handles.values() if h is not None
+        )
+        if outstanding >= self._max_inflight_prefetch:
+            # 槽池饱和: 该批不预取, 未命中 id 由 lookup 的 C++ miss 回填补齐
+            self._prefetch_handles[batch_num] = None
+            self._stats["bagpipe_prefetch_throttled"] += 1.0
+            probe_path = os.environ.get("RS_DEMO_BAGPIPE_PROBE_LOG")
+            if probe_path:
+                try:
+                    with open(probe_path, "a", encoding="utf-8") as probe_file:
+                        probe_file.write(
+                            "[BagPipe-probe] throttle "
+                            f"batch={batch_num} outstanding={outstanding}\n"
+                        )
+                except OSError:
+                    pass
+            return
+
+        # Preserve target/ttl ordering; the RDMA client does not require sorted
+        # keys.  This batch is the latest use, so its TTL is batch + margin.
+        targets = targets.contiguous()
+        ttl = batch_num + self._ttl_margin
         # kv_client / GPU cache 的 key 空间是 fused id
         ids_cpu = self._to_fused(targets).cpu()
         issue_ts = time.perf_counter()
@@ -209,14 +237,16 @@ class BagPipePrefetchMixin:
         self._prefetch_handles[batch_num] = PrefetchSlot(
             handle=handle,
             ids_cpu=ids_cpu,
-            ttl_dev=ttl_dev,
+            ttl=ttl,
             issue_ts=issue_ts,
             num_ids=int(ids_cpu.numel()),
         )
         self._stats["bagpipe_prefetch_batches"] += 1
         self._stats["bagpipe_prefetch_ids"] += float(ids_cpu.numel())
 
-    def _fill_from_preissued(self, slot: PrefetchSlot, compute_device: torch.device) -> None:
+    def _fill_from_preissued(
+        self, slot: PrefetchSlot, compute_device: torch.device
+    ) -> bool:
         """Wait for the pre-issued prefetch result and fill the GPU cache."""
         try:
             values = self.kv_client.wait_and_get(
@@ -226,7 +256,7 @@ class BagPipePrefetchMixin:
             )
         except Exception as exc:
             logger.warning("[BagPipe] prefetch wait failed: %s", exc)
-            return
+            return False
 
         ids_cuda = slot.ids_cpu.to(device=compute_device, dtype=torch.int64)
         if not ids_cuda.is_contiguous():
@@ -238,13 +268,13 @@ class BagPipePrefetchMixin:
             self.kv_client.prefill_gpu_cache(self.master_table_name, ids_cuda, values)
         except Exception as exc:
             logger.warning("[BagPipe] GPU cache prefill failed: %s", exc)
-            return
+            return False
 
         # 张量簿记: 驻留标记 + TTL 一次性 scatter (compact 索引;
         # 越界过滤与 ttl 同用一个 mask, 保持逐元素对齐)
-        ttl_dev = slot.ttl_dev.to(device=self.device, dtype=torch.int32)
         compact = self._to_compact(ids_cuda)
         in_range = compact < self._latest_dev.numel()
         compact = compact[in_range]
-        self._ttl_dev[compact] = ttl_dev[in_range]
+        self._ttl_dev[compact] = slot.ttl
         self._cached_dev[compact] = True
+        return True

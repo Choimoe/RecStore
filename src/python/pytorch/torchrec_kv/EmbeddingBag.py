@@ -902,9 +902,26 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             ids_for_query = ids_for_query.to(compute_device)
         if not ids_for_query.is_contiguous():
             ids_for_query = ids_for_query.contiguous()
-        embeddings = self.kv_client.gpu_cache_lookup_flat(
-            ids_for_query, embedding_dim
-        )
+        assume_hits = bool(getattr(self, "_bagpipe_all_cache_hits", False))
+        self._bagpipe_all_cache_hits = False
+        probe_path = os.environ.get("RS_DEMO_BAGPIPE_PROBE_LOG")
+        if probe_path:
+            try:
+                with open(probe_path, "a", encoding="utf-8") as probe_file:
+                    probe_file.write(
+                        "[EBC-probe] gpu_cache_lookup "
+                        f"assume_hits={assume_hits} num_ids={ids_for_query.numel()}\n"
+                    )
+            except OSError:
+                pass
+        if assume_hits:
+            embeddings = self.kv_client.gpu_cache_lookup_flat_assuming_hits(
+                ids_for_query, embedding_dim
+            )
+        else:
+            embeddings = self.kv_client.gpu_cache_lookup_flat(
+                ids_for_query, embedding_dim
+            )
         if embeddings.device != compute_device:
             embeddings = embeddings.to(compute_device)
         return embeddings

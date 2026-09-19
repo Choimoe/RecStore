@@ -13,7 +13,7 @@ class PrefetchSlot:
     """A batched prefetch in flight."""
     handle: int
     ids_cpu: torch.Tensor       # unique fused IDs prefetched (sorted, CPU)
-    ttl_dev: torch.Tensor       # expiry batch per ID, aligned with ids_cpu (device)
+    ttl: int                    # expiry batch; every ID in this slot shares it
     issue_ts: float
     num_ids: int
 

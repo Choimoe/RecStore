@@ -599,6 +599,24 @@ class RecStoreClient:
             keys = keys.contiguous()
         return self.ops.gpu_cache_lookup_flat(keys, int(embedding_dim))
 
+    def gpu_cache_lookup_flat_assuming_hits(
+        self, keys: torch.Tensor, embedding_dim: int
+    ) -> torch.Tensor:
+        """Cache-only lookup for a caller-verified all-hit key set.
+
+        Unlike :meth:`gpu_cache_lookup_flat`, this path does not synchronize
+        to materialize missing keys.  The caller must have prefilled every key
+        or otherwise proved that all keys are resident.
+        """
+        keys = self._normalize_ids(
+            keys, preserve_device=True, name=self._gpu_cache_table_name
+        )
+        if not keys.is_contiguous():
+            keys = keys.contiguous()
+        return self.ops.gpu_cache_lookup_flat_assuming_hits(
+            keys, int(embedding_dim)
+        )
+
     def query_gpu_cache(self, keys: torch.Tensor, embedding_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Query GPU cache. Returns (values, missing_keys).
 

@@ -238,6 +238,17 @@ class BagPipePlugin(OptimizationPlugin):
             return 0
         return self._controller.lookahead_value
 
+    @property
+    def prefetch_buffer_depth(self) -> int:
+        """Resource-aware depth for the runner's prepared-batch queue.
+
+        The runner's fill helper prepares ``depth + 1`` batches, so subtract
+        one to keep the unconsumed queue equal to the prefetch slot budget.
+        """
+        if self._controller is None:
+            return 0
+        return max(0, self._controller.max_inflight_prefetch - 1)
+
     def config_schema(self) -> Dict[str, Any]:
         return {
             "lookahead": {"type": "int", "range": (1, 16)},

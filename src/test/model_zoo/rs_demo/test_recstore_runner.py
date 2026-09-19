@@ -1051,6 +1051,10 @@ class TestRecStoreRunner(unittest.TestCase):
             def lookahead_depth(self) -> int:
                 return 1
 
+            @property
+            def prefetch_buffer_depth(self) -> int:
+                return 1
+
             def create_sparse_optimizer(self, modules, lr: float):
                 return self.optimizer
 

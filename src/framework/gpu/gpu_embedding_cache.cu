@@ -287,6 +287,37 @@ GpuCacheLookupResult QueryGpuCache(const torch::Tensor& keys,
   return MaterializeGpuCacheLookup(*lookup, keys.numel());
 }
 
+torch::Tensor LookupGpuCacheAssumingHits(const torch::Tensor& keys,
+                                          int64_t embedding_dim) {
+  RequireCudaTensor(keys, "keys");
+  TORCH_CHECK(keys.scalar_type() == torch::kInt64, "keys must be dtype int64");
+
+  c10::cuda::CUDAGuard device_guard(keys.device());
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  torch::Tensor values;
+  std::shared_ptr<CacheImpl> cache;
+  {
+    std::lock_guard<std::mutex> guard(g_mu);
+    TORCH_CHECK(g_cache != nullptr, "gpu cache is not enabled");
+    TORCH_CHECK(embedding_dim == g_embedding_dim,
+                "gpu cache embedding_dim mismatch");
+    RequireCacheDevice(keys, "keys");
+    cache = g_cache;
+
+    values = torch::empty(
+        {keys.numel(), embedding_dim},
+        keys.options().dtype(torch::kFloat32));
+
+    WaitForPriorCacheOpOnStreamLocked(stream.stream());
+    cache->GetAssumingHits(keys.data_ptr<int64_t>(),
+                           static_cast<size_t>(keys.numel()),
+                           values.data_ptr<float>(), stream.stream());
+    RetainCacheUntilStreamCompletes(cache, stream.stream());
+    RecordLastCacheOpOnStreamLocked(stream.stream());
+  }
+  return values;
+}
+
 void FillGpuCache(const torch::Tensor& keys_cuda,
                   const torch::Tensor& values_cuda) {
   if (keys_cuda.numel() == 0) {

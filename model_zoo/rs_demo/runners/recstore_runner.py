@@ -370,10 +370,26 @@ class RecStoreRunner(BenchmarkRunner):
             use_bagpipe = cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
 
             if use_bagpipe:
+                fused_id_prefixes = torch.tensor(
+                    [table_offsets[name] for name in default_cat_names],
+                    dtype=torch.int64,
+                    device=device,
+                )
+
                 def _id_extractor(sparse_features):
-                    return convert_kjt_ids_to_fused_ids_device(
-                        sparse_features, table_offsets
-                    )
+                    values = sparse_features.values().to(torch.int64)
+                    try:
+                        # DLRM has one ID per feature per sample, so a
+                        # broadcast add avoids repeat_interleave and length
+                        # reduction on the enqueue path.
+                        return (
+                            values.view(len(fused_id_prefixes), -1)
+                            + fused_id_prefixes[:, None]
+                        ).reshape(-1).contiguous()
+                    except RuntimeError:
+                        return convert_kjt_ids_to_fused_ids_device(
+                            sparse_features, table_offsets
+                        )
 
                 cache_capacity = (
                     cfg.optimization.cache_capacity
@@ -524,8 +540,8 @@ class RecStoreRunner(BenchmarkRunner):
 
             for step in range(cfg.steps):
                 step_wall_start = time.perf_counter()
-                observed_depth = read_path.depth * 2
-                target_buffer = read_path.desired_buffer_size
+                observed_depth = read_path.desired_buffer_size
+                target_buffer = observed_depth
                 _fill_prefetch_buffer(
                     prepared_batches, prepare_next_batch,
                     from_step=step, target_buffer=target_buffer, max_steps=cfg.steps,

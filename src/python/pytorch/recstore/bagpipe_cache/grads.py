@@ -227,6 +227,13 @@ class BagPipeGradMixin:
             shared_mask = torch.zeros_like(ids_cuda, dtype=torch.bool)
         local_mask = ~shared_mask
 
+        # The forward lookup has completed.  Hits were resident and misses were
+        # backfilled by gpu_cache_lookup_flat, so every current ID is now in
+        # the C++ cache.  Register that fact before the next enqueue's hit test.
+        current_compact = self._compact_in_range(self._to_compact(ids_cuda))
+        self._cached_dev[current_compact] = True
+        self._ttl_dev[current_compact] = batch_num + self._ttl_margin
+
         # ---- no_sync (local-only): 立即 best-effort 原位 SGD ----
         self._hot_add("bagpipe_no_sync_ids", local_mask.sum())
         local_ids = ids_cuda[local_mask]

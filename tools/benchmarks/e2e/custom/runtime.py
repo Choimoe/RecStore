@@ -162,7 +162,9 @@ def start_rdma_ps_cluster(
         rdma_wait_timeout_ms=120000,
         rdma_control_plane_timeout_ms=300000,
         rdma_qps_per_client_per_shard=32,
-        rdma_slots_per_qp=1,
+        rdma_slots_per_qp=int(
+            os.getenv("RECSTORE_E2E_RDMA_SLOTS_PER_QP", "4")
+        ),
         rdma_server_coroutines_per_thread=1,
         rdma_server_get_workers=0,
         rdma_profile_interval_ms=int(

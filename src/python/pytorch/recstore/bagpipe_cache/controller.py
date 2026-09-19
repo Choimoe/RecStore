@@ -131,7 +131,8 @@ class BagPipeCacheController(
         # retired (consumed) and one issued per step, so every batch is still
         # pre-issued at enqueue, lookahead steps ahead of its consumption.
         self._prefetch_handles: Dict[int, Optional[PrefetchSlot]] = {}
-        self._max_inflight_prefetch = 3
+        self._prefetch_all_hits: Dict[int, bool] = {}
+        self._max_inflight_prefetch = 4
         # TTL margin beyond the last-seen batch: ids in this dataset recur
         # only every ~epoch_length batches, so a TTL of exactly "last use"
         # expires every entry between recurrences and the cache collapses to
@@ -207,6 +208,16 @@ class BagPipeCacheController(
     def lookahead_value(self) -> int:
         """Dynamic lookahead, adjusted based on cache pressure (opt 9)."""
         return self._dynamic_lookahead
+
+    @property
+    def base_lookahead(self) -> int:
+        """Stable prefetch pipeline depth; dynamic pressure tuning ignores it."""
+        return self._base_lookahead
+
+    @property
+    def max_inflight_prefetch(self) -> int:
+        """Number of pre-issued RDMA prefetches the slot pool can support."""
+        return self._max_inflight_prefetch
 
     @property
     def depth(self) -> int:

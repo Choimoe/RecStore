@@ -34,6 +34,12 @@ class gpu_cache_api {
                      cudaStream_t stream,
                      const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) = 0;
 
+  // Read-only hit-only API. The caller guarantees every key is resident; no
+  // lock, LRU touch, miss reporting, or device synchronization is performed.
+  virtual void GetAssumingHits(const key_type* d_keys, const size_t len, float* d_values,
+                               cudaStream_t stream,
+                               const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) {}
+
   // Replace API, i.e. Follow the Query API to update the content of the cache to Most Recent
   virtual void Replace(const key_type* d_keys, const size_t len, const float* d_values,
                        cudaStream_t stream,
