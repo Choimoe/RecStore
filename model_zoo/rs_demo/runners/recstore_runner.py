@@ -26,6 +26,7 @@ from ..data.dlrm_source import (
     build_kjt_batch_from_dense_sparse_labels,
     build_train_dataloader,
     convert_kjt_ids_to_fused_ids,
+    convert_kjt_ids_to_fused_ids_device,
     get_default_cat_names,
     inject_project_paths,
 )
@@ -336,7 +337,7 @@ class RecStoreRunner(BenchmarkRunner):
 
             recstore.load_ops_library()
             client = recstore.RecStoreClient()
-            if cfg.nnodes == 1:
+            if cfg.ps_type.upper() in {"LOCAL_SHM", "HIERKV"}:
                 client.set_ps_backend(cfg.single_node_ps_backend)
             elif cfg.ps_type.upper() == "RDMA":
                 client.set_ps_backend("rdma")
@@ -362,7 +363,36 @@ class RecStoreRunner(BenchmarkRunner):
 
             if use_bagpipe:
                 def _id_extractor(sparse_features):
-                    return convert_kjt_ids_to_fused_ids(sparse_features, table_offsets)
+                    return convert_kjt_ids_to_fused_ids_device(
+                        sparse_features, table_offsets
+                    )
+
+                cache_capacity = (
+                    cfg.optimization.cache_capacity
+                    or cfg.gpu_cache_capacity
+                    or 160_000
+                )
+                if not client.is_gpu_cache_enabled():
+                    enabled = client.enable_gpu_cache(
+                        cache_capacity, cfg.embedding_dim
+                    )
+                    if not enabled:
+                        raise RuntimeError(
+                            "BagPipe requires GPU cache but enable_gpu_cache("
+                            f"capacity={cache_capacity}, dim={cfg.embedding_dim}) "
+                            "returned False"
+                        )
+                print(
+                    "[rs_demo] BagPipe GPU cache enabled: "
+                    f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
+                )
+                # BagPipe owns its cache policy.  The cold-start lookup must not
+                # trip the ops layer's low-hit bypass latch and clear the cache.
+                disable_bypass = getattr(
+                    client, "set_gpu_cache_lookup_bypass_enabled", None
+                )
+                if callable(disable_bypass):
+                    disable_bypass(False)
 
                 plugin = OptimizationPluginRegistry.create(
                     "bagpipe",
@@ -370,10 +400,11 @@ class RecStoreRunner(BenchmarkRunner):
                     kv_client=client,
                     lookahead=cfg.optimization.lookahead,
                     cleanup_proportion=cfg.optimization.cleanup_proportion,
-                    cache_capacity=cfg.optimization.cache_capacity,
+                    cache_capacity=cache_capacity,
                     embedding_dim=cfg.optimization.embedding_dim,
                     fuse_k=cfg.fuse_k,
                     table_offsets=table_offsets,
+                    master_table_name=eb_configs[0]["name"] if eb_configs else "",
                     device=device,
                     lr=0.01,
                     id_extractor=_id_extractor,
@@ -413,7 +444,6 @@ class RecStoreRunner(BenchmarkRunner):
             )
             criterion = build_criterion(cfg, unwrapped_module)
             dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
-            sparse_optimizer = recstore.SparseSGD([embedding_module], lr=0.01)
             record_pooled_grad = getattr(embedding_module, "record_pooled_grad", None)
 
             if _maybe_warmup_gpu_local_shm_fast_path(cfg=cfg, client=client, device=device):
