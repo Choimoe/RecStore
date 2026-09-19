@@ -66,5 +66,6 @@ void ApplySgdUpdateBestEffortGpuCache(const torch::Tensor& keys_cuda,
 void UpdateGpuCache(const torch::Tensor& keys_cuda,
                     const torch::Tensor& values_cuda);
 void InvalidateGpuCache(const torch::Tensor& keys_cuda);
+torch::Tensor InvalidateGpuCacheWithMask(const torch::Tensor& keys_cuda);
 
 } // namespace recstore::framework::gpu

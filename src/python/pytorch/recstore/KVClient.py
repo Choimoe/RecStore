@@ -526,6 +526,23 @@ class RecStoreClient:
                 raise RuntimeError("invalidate_gpu_cache requires CUDA ids")
         self.ops.invalidate_gpu_cache(ids)
 
+    def invalidate_gpu_cache_with_mask(
+        self, name: str, ids: torch.Tensor
+    ) -> torch.Tensor:
+        """Invalidate rows and return the authoritative removal mask."""
+        if name not in self._tensor_meta:
+            raise RuntimeError(f"Tensor '{name}' has not been initialized.")
+        self._ensure_gpu_cache_table(name)
+        ids = self._normalize_ids(ids, preserve_device=True, name=name)
+        if ids.device.type == "cpu":
+            if torch.cuda.is_available():
+                ids = ids.to(torch.device("cuda", torch.cuda.current_device()))
+            else:
+                raise RuntimeError(
+                    "invalidate_gpu_cache_with_mask requires CUDA ids"
+                )
+        return self.ops.invalidate_gpu_cache_with_mask(ids)
+
     def apply_sgd_update_gpu_cache(
         self,
         name: str,

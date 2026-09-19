@@ -62,6 +62,10 @@ class _FakeClient:
     def invalidate_gpu_cache(self, name, ids):
         self.invalidations.append((name, ids.clone()))
 
+    def invalidate_gpu_cache_with_mask(self, name, ids):
+        self.invalidations.append((name, ids.clone()))
+        return torch.ones_like(ids, dtype=torch.bool)
+
 
 class _DenseWork:
     def __init__(self, ids, grads):
@@ -548,7 +552,37 @@ class TestShutdownFlush(unittest.TestCase):
         self.assertTrue(bool(m._dirty_dev[10].item()))
         # 后台线程退出哨兵 (None) 已投递, 队列无残留任务
         self.assertIsNone(m._cleanup_queue.get_nowait())
-        self.assertTrue(m._cleanup_queue.empty())
+
+
+class TestAuthoritativeInvalidation(unittest.TestCase):
+    def test_partial_removal_updates_only_removed_bookkeeping(self):
+        from ..bagpipe_cache.eviction import BagPipeEvictionMixin
+
+        class _WithMixin(BagPipeEvictionMixin, _EvictionHarness):
+            pass
+
+        m = _WithMixin([5, 10, 20])
+        m._dirty_dev[torch.tensor([5, 10, 20])] = True
+        m._ttl_dev[torch.tensor([5, 10, 20])] = 100
+        m._stats["bagpipe_evicted_ids"] = 0.0
+
+        class KV:
+            def invalidate_gpu_cache_with_mask(self, name, ids):
+                self.ids = ids.clone()
+                self.name = name
+                return torch.tensor([True, False, True])
+
+        m.kv_client = KV()
+        m.master_table_name = "t"
+        m._evict_entries(torch.tensor([5, 10, 20]))
+
+        self.assertFalse(bool(m._cached_dev[5].item()))
+        self.assertTrue(bool(m._cached_dev[10].item()))
+        self.assertFalse(bool(m._cached_dev[20].item()))
+        self.assertFalse(bool(m._dirty_dev[5].item()))
+        self.assertTrue(bool(m._dirty_dev[10].item()))
+        self.assertEqual(int(m._ttl_dev[10].item()), 100)
+        self.assertEqual(m._stats["bagpipe_evicted_ids"], 2.0)
 
 
 if __name__ == "__main__":

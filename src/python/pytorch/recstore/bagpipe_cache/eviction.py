@@ -72,6 +72,32 @@ class BagPipeEvictionMixin:
                     ).indices.contiguous()
                     self._evict_entries(overflow_ids)
 
+            # No-evict fills can fail from set collisions even when the global
+            # count is below the high-water mark.  Retire a broader low-TTL
+            # slice so the next fill has replacement candidates.
+            insert_failures = getattr(self, "_insert_failures", 0)
+            if insert_failures > 0:
+                cached_count = self._cached_count()
+                n_evict = min(
+                    max(insert_failures * 2, 1024),
+                    self._max_evict_per_cleanup,
+                    cached_count,
+                )
+                if n_evict > 0:
+                    ttl_eff = torch.where(
+                        self._cached_dev,
+                        self._ttl_dev,
+                        torch.iinfo(torch.int32).max,
+                    )
+                    pressure_ids = torch.topk(
+                        ttl_eff, k=n_evict, largest=False
+                    ).indices.contiguous()
+                    self._evict_entries(pressure_ids)
+                self._insert_failures = 0
+                self._stats["bagpipe_insert_failures"] = float(
+                    insert_failures
+                )
+
         self._maybe_adjust_lookahead(current_batch)
 
         self._stats["bagpipe_cleanup_ms"] += (time.perf_counter() - t_start) * 1e3
@@ -137,7 +163,7 @@ class BagPipeEvictionMixin:
         if expired_ids.numel() == 0:
             return
 
-        self._stats["bagpipe_evicted_ids"] += float(expired_ids.numel())
+        requested_evictions = expired_ids
 
         dirty_m = self._dirty_dev[expired_ids]
         shared_t = self._shared_ids_tensor
@@ -155,14 +181,21 @@ class BagPipeEvictionMixin:
                 self._cleanup_queue.put((wb_ids, wb_vals, wb_event))
             self._stats["bagpipe_writeback_ids"] += float(wb_ids.numel())
 
-        try:
-            self.kv_client.invalidate_gpu_cache(
-                self.master_table_name, self._to_fused(expired_ids)
+        invalidator = getattr(
+            self.kv_client, "invalidate_gpu_cache_with_mask", None
+        )
+        if not callable(invalidator):
+            raise RuntimeError(
+                "BagPipe requires invalidate_gpu_cache_with_mask to keep its "
+                "residency mirror authoritative"
             )
-        except Exception as exc:
-            logger.warning("[BagPipe] invalidate_gpu_cache failed: %s", exc)
+        removed = invalidator(
+            self.master_table_name, self._to_fused(requested_evictions)
+        )
+        expired_ids = requested_evictions[removed]
+        self._stats["bagpipe_evicted_ids"] += float(expired_ids.numel())
 
-        # 清簿记 (compact 索引)
+        # 清簿记 (compact 索引); 只有 C++ 确认移除的行才改变状态。
         self._cached_dev[expired_ids] = False
         self._dirty_dev[expired_ids] = False
         self._ttl_dev[expired_ids] = 0

@@ -136,6 +136,7 @@ class BagPipeCacheController(
             int, Optional[Tuple[torch.Tensor, torch.Tensor, int]]
         ] = {}
         self._max_inflight_prefetch = 4
+        self._insert_failures = 0
         generation_getter = getattr(kv_client, "get_gpu_cache_generation", None)
         self._cache_generation = (
             int(generation_getter()) if callable(generation_getter) else None
@@ -242,6 +243,7 @@ class BagPipeCacheController(
             "bagpipe_prefetch_pruned": 0.0,
             "bagpipe_prefetch_local_nosync_kept": 0.0,
             "bagpipe_prefetch_throttled": 0.0,
+            "bagpipe_insert_failures": 0.0,
             "bagpipe_sync_now_overlap_ms": 0.0,
             "bagpipe_sync_now_ids": 0.0,
             "bagpipe_sync_later_ids": 0.0,

@@ -125,6 +125,29 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
         after = self.client.get_gpu_cache_generation()
         self.assertGreater(after, before)
 
+    def test_invalidate_with_mask_reports_authoritative_removal(self) -> None:
+        table_name = f"gpu_cache_invalidate_mask_{time.time_ns()}"
+        self.client.init_data(
+            name=table_name, shape=(256, 4), dtype=torch.float32
+        )
+        keys = torch.tensor([1, 3, 5, 7], dtype=torch.int64, device="cuda")
+        values = torch.arange(16, dtype=torch.float32, device="cuda").view(4, 4)
+        self.client.prefill_gpu_cache_no_evict(table_name, keys, values)
+
+        removed = self.client.invalidate_gpu_cache_with_mask(
+            table_name, keys[[1, 3]]
+        )
+        resident = self.client.contains_gpu_cache(keys)
+
+        self.assertTrue(torch.equal(removed, torch.ones_like(removed)))
+        self.assertEqual(
+            resident.tolist(), [True, False, True, False]
+        )
+        again = self.client.invalidate_gpu_cache_with_mask(
+            table_name, keys[[1, 3]]
+        )
+        self.assertFalse(bool(again.any().item()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1348,6 +1348,26 @@ void invalidate_gpu_cache_torch(const torch::Tensor& keys) {
 #endif
 }
 
+torch::Tensor invalidate_gpu_cache_with_mask_torch(const torch::Tensor& keys) {
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  TORCH_CHECK(keys.dim() == 1, "keys must be 1-dimensional");
+  TORCH_CHECK(keys.scalar_type() == torch::kInt64,
+              "keys must have dtype int64");
+  if (keys.numel() == 0) {
+    return torch::empty({0}, torch::TensorOptions().dtype(torch::kBool));
+  }
+  TORCH_CHECK(keys.is_cuda(), "invalidate_gpu_cache_with_mask requires CUDA keys");
+  auto keys_cuda = keys;
+  if (!keys_cuda.is_contiguous()) {
+    keys_cuda = keys_cuda.contiguous();
+  }
+  return gpu::InvalidateGpuCacheWithMask(keys_cuda);
+#else
+  (void)keys;
+  TORCH_CHECK(false, "GPU cache support is unavailable");
+#endif
+}
+
 torch::Tensor gpu_cache_lookup_flat_assuming_hits_torch(
     const torch::Tensor& keys, int64_t embedding_dim) {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
@@ -1570,6 +1590,7 @@ TORCH_LIBRARY(recstore_ops, m) {
   m.def("contains_gpu_cache", contains_gpu_cache_torch);
   m.def("get_gpu_cache_generation", get_gpu_cache_generation_torch);
   m.def("invalidate_gpu_cache", invalidate_gpu_cache_torch);
+  m.def("invalidate_gpu_cache_with_mask", invalidate_gpu_cache_with_mask_torch);
   m.def("apply_sgd_update_gpu_cache", apply_sgd_update_gpu_cache_torch);
   m.def("apply_sgd_update_gpu_cache_best_effort",
         apply_sgd_update_gpu_cache_best_effort_torch);

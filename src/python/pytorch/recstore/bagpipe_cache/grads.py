@@ -130,13 +130,16 @@ class BagPipeGradMixin:
         if cand_compact.numel() == 0:
             return
         sample = cand_compact[:k].contiguous()
-        try:
-            self.kv_client.invalidate_gpu_cache(
-                self.master_table_name, self._to_fused(sample)
+        invalidator = getattr(
+            self.kv_client, "invalidate_gpu_cache_with_mask", None
+        )
+        if not callable(invalidator):
+            raise RuntimeError(
+                "BagPipe requires invalidate_gpu_cache_with_mask to keep its "
+                "residency mirror authoritative"
             )
-        except Exception as exc:
-            logger.warning("[BagPipe] anti-entropy invalidate failed: %s", exc)
-            return
+        removed = invalidator(self.master_table_name, self._to_fused(sample))
+        sample = sample[removed]
         self._cached_dev[sample] = False
         self._dirty_dev[sample] = False
         self._ttl_dev[sample] = 0
@@ -289,10 +292,11 @@ class BagPipeGradMixin:
                     )
                 except Exception as exc:
                     logger.warning("[BagPipe] no_sync push failed: %s", exc)
+                # The in-place local apply already made these rows current;
+                # they stay resident while the PS push only persists them.
                 local_compact = self._compact_in_range(
                     self._to_compact(local_ids)
                 )
-                self._cached_dev[local_compact] = False
                 self._dirty_dev[local_compact] = False
             else:
                 # PS 持久化走 dirty 张量 + eviction 值写回 (scatter, 无 tolist)。

@@ -103,6 +103,11 @@ class gpu_cache : public gpu_cache_api<key_type> {
   void Remove(const key_type* d_keys, const size_t len, cudaStream_t stream,
               const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) override;
 
+  // Remove API with an authoritative per-key success mask.
+  void RemoveWithMask(const key_type* d_keys, const size_t len,
+                      bool* d_success, cudaStream_t stream,
+                      const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) override;
+
   // Dump API, i.e. dump some slabsets' keys from the cache
   void Dump(key_type* d_keys, size_t* d_dump_counter, const size_t start_set_index,
             const size_t end_set_index, cudaStream_t stream) override;

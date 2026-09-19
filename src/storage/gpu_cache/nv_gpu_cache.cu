@@ -1562,7 +1562,7 @@ template <typename key_type, typename slabset, typename ref_counter_type, typena
 __global__ void remove_kernel(const key_type* d_keys, const size_t len,
                               const size_t capacity_in_set, slabset* keys,
                               ref_counter_type* slot_counter, mutex* set_mutex,
-                              const size_t task_per_warp_tile) {
+                              const size_t task_per_warp_tile, bool* d_success) {
   cg::thread_block_tile<warp_size> warp_tile =
       cg::tiled_partition<warp_size>(cg::this_thread_block());
   const size_t lane_idx = warp_tile.thread_rank();
@@ -1575,6 +1575,9 @@ __global__ void remove_kernel(const key_type* d_keys, const size_t len,
   bool active = false;
   if (lane_idx < task_per_warp_tile && key_idx < len) {
     active = true;
+    if (d_success != nullptr) {
+      d_success[key_idx] = false;
+    }
     key = d_keys[key_idx];
     src_set = set_hasher::hash(key) % capacity_in_set;
     src_slab = slab_hasher::hash(key) % set_associativity;
@@ -1607,6 +1610,9 @@ __global__ void remove_kernel(const key_type* d_keys, const size_t len,
         if (lane_idx == (size_t)next_lane) {
           keys[next_set].set_[next_slab].slab_[found_lane] = deleted_key;
           slot_counter[found_offset] = 0;
+          if (d_success != nullptr) {
+            d_success[key_idx] = true;
+          }
           active = false;
         }
         active_mask = warp_tile.ballot(active);
@@ -1634,7 +1640,8 @@ template <typename key_type, typename slabset, typename ref_counter_type, typena
 __global__ void remove_kernel(const key_type* d_keys, const size_t len,
                               const size_t capacity_in_set, volatile slabset* keys,
                               volatile ref_counter_type* slot_counter,
-                              volatile int* set_mutex, const size_t task_per_warp_tile) {
+                              volatile int* set_mutex, const size_t task_per_warp_tile,
+                              bool* d_success) {
   cg::thread_block_tile<warp_size> warp_tile =
       cg::tiled_partition<warp_size>(cg::this_thread_block());
   const size_t lane_idx = warp_tile.thread_rank();
@@ -1647,6 +1654,9 @@ __global__ void remove_kernel(const key_type* d_keys, const size_t len,
   bool active = false;
   if (lane_idx < task_per_warp_tile && key_idx < len) {
     active = true;
+    if (d_success != nullptr) {
+      d_success[key_idx] = false;
+    }
     key = d_keys[key_idx];
     src_set = set_hasher::hash(key) % capacity_in_set;
     src_slab = slab_hasher::hash(key) % set_associativity;
@@ -1679,6 +1689,9 @@ __global__ void remove_kernel(const key_type* d_keys, const size_t len,
         if (lane_idx == (size_t)next_lane) {
           ((volatile key_type*)(keys[next_set].set_[next_slab].slab_))[found_lane] =
               deleted_key;
+          if (d_success != nullptr) {
+            d_success[key_idx] = true;
+          }
           slot_counter[found_offset] = 0;
           active = false;
         }
@@ -2293,7 +2306,8 @@ void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_si
   remove_kernel<key_type, slabset, ref_counter_type, set_hasher, slab_hasher, mutex, empty_key,
                 deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
       <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
-          d_keys, len, capacity_in_set_, keys_, slot_counter_, set_mutex_, task_per_warp_tile);
+          d_keys, len, capacity_in_set_, keys_, slot_counter_, set_mutex_, task_per_warp_tile,
+          /*d_success=*/nullptr);
 
   CUDA_CHECK(cudaGetLastError());
 }
@@ -2315,7 +2329,58 @@ void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_si
   remove_kernel<key_type, slabset, ref_counter_type, set_hasher, slab_hasher, empty_key,
                 deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
       <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
-          d_keys, len, capacity_in_set_, keys_, slot_counter_, set_mutex_, task_per_warp_tile);
+          d_keys, len, capacity_in_set_, keys_, slot_counter_, set_mutex_, task_per_warp_tile,
+          /*d_success=*/nullptr);
+
+  CUDA_CHECK(cudaGetLastError());
+}
+#endif
+
+#ifdef LIBCUDACXX_VERSION
+template <typename key_type, typename ref_counter_type, key_type empty_key, int set_associativity,
+          int warp_size, typename set_hasher, typename slab_hasher>
+void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_size, set_hasher,
+               slab_hasher>::RemoveWithMask(const key_type* d_keys, const size_t len,
+                                            bool* d_success, cudaStream_t stream,
+                                            const size_t task_per_warp_tile) {
+  if (len == 0) {
+    return;
+  }
+
+  nv::CudaDeviceRestorer dev_restorer;
+  dev_restorer.check_device(dev_);
+
+  const size_t keys_per_block = (BLOCK_SIZE_ / warp_size) * task_per_warp_tile;
+  const size_t grid_size = ((len - 1) / keys_per_block) + 1;
+  remove_kernel<key_type, slabset, ref_counter_type, set_hasher, slab_hasher, mutex, empty_key,
+                deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
+      <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
+          d_keys, len, capacity_in_set_, keys_, slot_counter_, set_mutex_, task_per_warp_tile,
+          d_success);
+
+  CUDA_CHECK(cudaGetLastError());
+}
+#else
+template <typename key_type, typename ref_counter_type, key_type empty_key, int set_associativity,
+          int warp_size, typename set_hasher, typename slab_hasher>
+void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_size, set_hasher,
+               slab_hasher>::RemoveWithMask(const key_type* d_keys, const size_t len,
+                                            bool* d_success, cudaStream_t stream,
+                                            const size_t task_per_warp_tile) {
+  if (len == 0) {
+    return;
+  }
+
+  nv::CudaDeviceRestorer dev_restorer;
+  dev_restorer.check_device(dev_);
+
+  const size_t keys_per_block = (BLOCK_SIZE_ / warp_size) * task_per_warp_tile;
+  const size_t grid_size = ((len - 1) / keys_per_block) + 1;
+  remove_kernel<key_type, slabset, ref_counter_type, set_hasher, slab_hasher, empty_key,
+                deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
+      <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
+          d_keys, len, capacity_in_set_, keys_, slot_counter_, set_mutex_, task_per_warp_tile,
+          d_success);
 
   CUDA_CHECK(cudaGetLastError());
 }

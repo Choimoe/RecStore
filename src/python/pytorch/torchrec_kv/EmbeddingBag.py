@@ -909,12 +909,16 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
         gather_inverse = None
         if prepared is not None:
             prepared_ids, prepared_inverse, raw_count = prepared
-            if (
-                int(raw_count) == ids_for_query.numel()
-                and prepared_ids.device == ids_for_query.device
-            ):
-                ids_for_query = prepared_ids
-                gather_inverse = prepared_inverse
+            if int(raw_count) != ids_for_query.numel():
+                raise RuntimeError(
+                    "BagPipe prepared-ID count does not match the lookup batch"
+                )
+            if prepared_ids.device != ids_for_query.device:
+                raise RuntimeError(
+                    "BagPipe prepared IDs and lookup IDs are on different devices"
+                )
+            ids_for_query = prepared_ids
+            gather_inverse = prepared_inverse
 
         assume_hits = bool(getattr(self, "_bagpipe_all_cache_hits", False))
         self._bagpipe_all_cache_hits = False
@@ -950,6 +954,11 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
             lookup_no_evict = getattr(
                 self.kv_client, "gpu_cache_lookup_flat_no_evict", None
             )
+            if not callable(lookup_no_evict) and prepared is not None:
+                raise RuntimeError(
+                    "BagPipe requires gpu_cache_lookup_flat_no_evict to own "
+                    "cache backfill"
+                )
             if callable(lookup_no_evict):
                 embeddings, resident = lookup_no_evict(
                     ids_for_query, embedding_dim
@@ -958,7 +967,7 @@ class RecStoreEmbeddingBagCollection(torch.nn.Module):
                     ids_for_query,
                     resident,
                 )
-            else:
+            elif prepared is None:
                 embeddings = self.kv_client.gpu_cache_lookup_flat(
                     ids_for_query, embedding_dim
                 )

@@ -605,6 +605,37 @@ class ShardedRecstoreClient:
             normalized_ids = normalized_ids.to(torch.device("cuda", torch.cuda.current_device()))
         invalidator(normalized_ids)
 
+    def invalidate_gpu_cache_with_mask(
+        self, name: str, ids: torch.Tensor
+    ) -> torch.Tensor:
+        if not self._gpu_cache_enabled:
+            raise RuntimeError(
+                "invalidate_gpu_cache_with_mask requires GPU cache to be enabled"
+            )
+        invalidator = getattr(
+            self._client, "invalidate_gpu_cache_with_mask", None
+        )
+        if callable(invalidator):
+            return invalidator(name, ids)
+        ops = getattr(self._client, "ops", None)
+        invalidator = getattr(ops, "invalidate_gpu_cache_with_mask", None)
+        if not callable(invalidator):
+            raise RuntimeError(
+                "invalidate_gpu_cache_with_mask requires a RecStore client or "
+                "ops library exposing invalidate_gpu_cache_with_mask()."
+            )
+        self._ensure_gpu_cache_table(name)
+        normalized_ids = self._normalize_ids(ids, keep_device=True)
+        if normalized_ids.numel() > 0 and normalized_ids.device.type == "cpu":
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "invalidate_gpu_cache_with_mask requires CUDA ids"
+                )
+            normalized_ids = normalized_ids.to(
+                torch.device("cuda", torch.cuda.current_device())
+            )
+        return invalidator(normalized_ids)
+
     def apply_sgd_update_gpu_cache(
         self,
         name: str,

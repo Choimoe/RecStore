@@ -216,7 +216,11 @@ class BagPipePrefetchMixin:
             # The flat mirror is policy state, not proof of C++ residency.
             # Validate it before allowing the lock-free hit-only lookup.
             contains = getattr(self.kv_client, "contains_gpu_cache", None)
-            if callable(contains) and compact.numel() == ids_dev.numel():
+            if not callable(contains):
+                raise RuntimeError(
+                    "BagPipe requires contains_gpu_cache to validate residency"
+                )
+            if compact.numel() == ids_dev.numel():
                 resident = contains(ids_dev)
                 if bool(resident.all().item()):
                     self._prefetch_handles[batch_num] = None
@@ -227,8 +231,9 @@ class BagPipePrefetchMixin:
                 hit_compact = hit_compact[resident]
                 targets = compact[~resident]
             else:
-                # Old ops cannot prove residency; never take hit-only lookup.
-                targets = torch.empty(0, dtype=targets.dtype, device=targets.device)
+                raise RuntimeError(
+                    "BagPipe bookkeeping dropped an in-range fused ID"
+                )
             self._prefetch_handles[batch_num] = None
             self._prefetch_all_hits[batch_num] = False
             if targets.numel() == 0:
@@ -303,17 +308,14 @@ class BagPipePrefetchMixin:
             prefill_no_evict = getattr(
                 self.kv_client, "prefill_gpu_cache_no_evict", None
             )
-            if callable(prefill_no_evict):
-                inserted = prefill_no_evict(
-                    self.master_table_name, ids_cuda, values
+            if not callable(prefill_no_evict):
+                raise RuntimeError(
+                    "BagPipe requires prefill_gpu_cache_no_evict to own "
+                    "cache eviction"
                 )
-            else:
-                # Legacy replace can evict silently, so this batch cannot use
-                # hit-only lookup. The next contains() check repairs the mirror.
-                self.kv_client.prefill_gpu_cache(
-                    self.master_table_name, ids_cuda, values
-                )
-                return False
+            inserted = prefill_no_evict(
+                self.master_table_name, ids_cuda, values
+            )
         except Exception as exc:
             logger.warning("[BagPipe] GPU cache prefill failed: %s", exc)
             return False
@@ -327,6 +329,13 @@ class BagPipePrefetchMixin:
         compact = compact[inserted]
         self._ttl_dev[compact] = slot.ttl
         self._cached_dev[compact] = True
-        return bool(inserted.all().item()) and int(inserted.numel()) == int(
-            slot.num_ids
+        inserted_count = int(inserted.sum().item())
+        if inserted_count < int(inserted.numel()):
+            self._insert_failures += int(inserted.numel()) - inserted_count
+            self._stats["bagpipe_insert_failures"] = float(
+                self._insert_failures
+            )
+        return (
+            inserted_count == int(inserted.numel())
+            and int(inserted.numel()) == int(slot.num_ids)
         )

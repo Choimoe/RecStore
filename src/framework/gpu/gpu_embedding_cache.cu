@@ -508,6 +508,34 @@ void InvalidateGpuCache(const torch::Tensor& keys_cuda) {
   }
 }
 
+torch::Tensor InvalidateGpuCacheWithMask(const torch::Tensor& keys_cuda) {
+  c10::cuda::CUDAGuard device_guard(keys_cuda.device());
+  const auto stream           = at::cuda::getCurrentCUDAStream();
+  std::shared_ptr<CacheImpl> cache;
+  torch::Tensor removed;
+  {
+    std::lock_guard<std::mutex> guard(g_mu);
+    TORCH_CHECK(g_cache != nullptr, "gpu cache is not enabled");
+    RequireCudaTensor(keys_cuda, "keys_cuda");
+    TORCH_CHECK(keys_cuda.scalar_type() == torch::kInt64,
+                "keys_cuda must have dtype int64");
+    RequireCacheDevice(keys_cuda, "keys_cuda");
+    cache = g_cache;
+    removed = torch::empty(
+        {keys_cuda.numel()}, keys_cuda.options().dtype(torch::kBool));
+    if (keys_cuda.numel() == 0) {
+      return removed;
+    }
+    WaitForPriorCacheOpOnStreamLocked(stream.stream());
+    cache->RemoveWithMask(keys_cuda.data_ptr<int64_t>(),
+                          static_cast<size_t>(keys_cuda.numel()),
+                          removed.data_ptr<bool>(), stream.stream());
+    RetainCacheUntilStreamCompletes(cache, stream.stream());
+    RecordLastCacheOpOnStreamLocked(stream.stream());
+  }
+  return removed;
+}
+
 bool ApplySgdUpdateGpuCache(const torch::Tensor& keys_cuda,
                             const torch::Tensor& grads_cuda,
                             double learning_rate) {
