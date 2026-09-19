@@ -345,6 +345,58 @@ void FillGpuCache(const torch::Tensor& keys_cuda,
   }
 }
 
+torch::Tensor ContainsGpuCache(const torch::Tensor& keys) {
+  RequireCudaTensor(keys, "keys");
+  TORCH_CHECK(keys.scalar_type() == torch::kInt64, "keys must be dtype int64");
+  TORCH_CHECK(keys.dim() == 1, "keys must be 1-dimensional");
+
+  c10::cuda::CUDAGuard device_guard(keys.device());
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  torch::Tensor success;
+  std::shared_ptr<CacheImpl> cache;
+  {
+    std::lock_guard<std::mutex> guard(g_mu);
+    TORCH_CHECK(g_cache != nullptr, "gpu cache is not enabled");
+    RequireCacheDevice(keys, "keys");
+    cache = g_cache;
+    success = torch::empty(
+        {keys.numel()}, keys.options().dtype(torch::kBool));
+    WaitForPriorCacheOpOnStreamLocked(stream.stream());
+    cache->Contains(keys.data_ptr<int64_t>(),
+                    static_cast<size_t>(keys.numel()),
+                    success.data_ptr<bool>(), stream.stream());
+    RetainCacheUntilStreamCompletes(cache, stream.stream());
+    RecordLastCacheOpOnStreamLocked(stream.stream());
+  }
+  return success;
+}
+
+torch::Tensor FillGpuCacheNoEvict(const torch::Tensor& keys_cuda,
+                                  const torch::Tensor& values_cuda) {
+  c10::cuda::CUDAGuard device_guard(keys_cuda.device());
+  const auto stream     = at::cuda::getCurrentCUDAStream();
+  std::shared_ptr<CacheImpl> cache;
+  torch::Tensor inserted;
+  {
+    std::lock_guard<std::mutex> guard(g_mu);
+    TORCH_CHECK(g_cache != nullptr, "gpu cache is not enabled");
+    ValidateCacheMutationTensors(keys_cuda, values_cuda);
+    RequireCacheDevice(keys_cuda, "keys_cuda");
+    RequireCacheDevice(values_cuda, "values_cuda");
+    cache = g_cache;
+    inserted = torch::empty(
+        {keys_cuda.numel()}, keys_cuda.options().dtype(torch::kBool));
+    WaitForPriorCacheOpOnStreamLocked(stream.stream());
+    cache->TryInsertNoEvict(keys_cuda.data_ptr<int64_t>(),
+                            static_cast<size_t>(keys_cuda.numel()),
+                            values_cuda.data_ptr<float>(),
+                            inserted.data_ptr<bool>(), stream.stream());
+    RetainCacheUntilStreamCompletes(cache, stream.stream());
+    RecordLastCacheOpOnStreamLocked(stream.stream());
+  }
+  return inserted;
+}
+
 void ScatterMissValues(torch::Tensor* output_values,
                        const torch::Tensor& missing_positions_cpu,
                        const torch::Tensor& miss_values_cuda) {

@@ -51,6 +51,49 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
 
         self.assertTrue(torch.equal(actual, expected))
 
+    def test_no_evict_prefill_reports_authoritative_residency(self) -> None:
+        table_name = f"gpu_cache_no_evict_{time.time_ns()}"
+        self.client.init_data(
+            name=table_name, shape=(256, 4), dtype=torch.float32
+        )
+        keys = torch.arange(80, dtype=torch.int64, device="cuda")
+        values = torch.arange(320, dtype=torch.float32, device="cuda").view(80, 4)
+
+        inserted = self.client.prefill_gpu_cache_no_evict(
+            table_name, keys, values
+        )
+        resident = self.client.contains_gpu_cache(keys)
+
+        self.assertTrue(torch.equal(inserted, resident))
+        self.assertTrue(bool(inserted.any().item()))
+        self.assertTrue(
+            torch.equal(
+                self.client.gpu_cache_lookup_flat_assuming_hits(
+                    keys[inserted], 4
+                ),
+                values[inserted],
+            )
+        )
+
+        # A no-evict insert must never remove an already resident row.
+        old_keys = keys[inserted]
+        old_values = values[inserted]
+        more_keys = torch.arange(
+            100, 140, dtype=torch.int64, device="cuda"
+        )
+        more_values = torch.arange(
+            160, dtype=torch.float32, device="cuda"
+        ).view(40, 4)
+        self.client.prefill_gpu_cache_no_evict(
+            table_name, more_keys, more_values
+        )
+        self.assertTrue(
+            torch.equal(
+                self.client.gpu_cache_lookup_flat_assuming_hits(old_keys, 4),
+                old_values,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

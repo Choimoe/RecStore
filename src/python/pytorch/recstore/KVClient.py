@@ -487,6 +487,33 @@ class RecStoreClient:
         self._ensure_gpu_cache_table(name)
         self.ops.prefill_gpu_cache(ids, values)
 
+    def prefill_gpu_cache_no_evict(
+        self, name: str, ids: torch.Tensor, values: torch.Tensor
+    ) -> torch.Tensor:
+        """Insert rows without evicting other cache entries.
+
+        Returns a bool tensor aligned with ``ids``; true means the row is
+        resident after this stream-ordered operation.
+        """
+        if name not in self._tensor_meta:
+            raise RuntimeError(f"Tensor '{name}' has not been initialized.")
+        ids = self._normalize_ids(ids, preserve_device=True, name=name)
+        if values.dim() != 2:
+            raise ValueError("values must be a 2-dimensional tensor")
+        if ids.size(0) != values.size(0):
+            raise ValueError("ids and values must have the same number of rows")
+        if ids.device.type == "cpu":
+            self._reject_gpu_cache_reserved_ids(ids)
+        self._ensure_gpu_cache_table(name)
+        return self.ops.prefill_gpu_cache_no_evict(ids, values)
+
+    def contains_gpu_cache(self, keys: torch.Tensor) -> torch.Tensor:
+        """Return a bool residency mask for fused keys."""
+        keys = self._normalize_ids(keys, preserve_device=True)
+        if not keys.is_contiguous():
+            keys = keys.contiguous()
+        return self.ops.contains_gpu_cache(keys)
+
     def invalidate_gpu_cache(self, name: str, ids: torch.Tensor) -> None:
         if name not in self._tensor_meta:
             raise RuntimeError(f"Tensor '{name}' has not been initialized.")

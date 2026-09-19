@@ -195,9 +195,26 @@ class BagPipePrefetchMixin:
 
         targets = compact[~hit]
         if targets.numel() == 0:
+            # The flat mirror is policy state, not proof of C++ residency.
+            # Validate it before allowing the lock-free hit-only lookup.
+            contains = getattr(self.kv_client, "contains_gpu_cache", None)
+            if callable(contains) and compact.numel() == ids_dev.numel():
+                resident = contains(ids_dev)
+                if bool(resident.all().item()):
+                    self._prefetch_handles[batch_num] = None
+                    self._prefetch_all_hits[batch_num] = True
+                    return
+                # Keep the mirror convergent and prefetch only real misses.
+                self._cached_dev[compact[~resident]] = False
+                hit_compact = hit_compact[resident]
+                targets = compact[~resident]
+            else:
+                # Old ops cannot prove residency; never take hit-only lookup.
+                targets = torch.empty(0, dtype=targets.dtype, device=targets.device)
             self._prefetch_handles[batch_num] = None
-            self._prefetch_all_hits[batch_num] = True
-            return
+            self._prefetch_all_hits[batch_num] = False
+            if targets.numel() == 0:
+                return
         self._prefetch_all_hits[batch_num] = False
 
         outstanding = sum(
@@ -265,16 +282,33 @@ class BagPipePrefetchMixin:
             values = values.contiguous()
 
         try:
-            self.kv_client.prefill_gpu_cache(self.master_table_name, ids_cuda, values)
+            prefill_no_evict = getattr(
+                self.kv_client, "prefill_gpu_cache_no_evict", None
+            )
+            if callable(prefill_no_evict):
+                inserted = prefill_no_evict(
+                    self.master_table_name, ids_cuda, values
+                )
+            else:
+                # Legacy replace can evict silently, so this batch cannot use
+                # hit-only lookup. The next contains() check repairs the mirror.
+                self.kv_client.prefill_gpu_cache(
+                    self.master_table_name, ids_cuda, values
+                )
+                return False
         except Exception as exc:
             logger.warning("[BagPipe] GPU cache prefill failed: %s", exc)
             return False
 
-        # 张量簿记: 驻留标记 + TTL 一次性 scatter (compact 索引;
-        # 越界过滤与 ttl 同用一个 mask, 保持逐元素对齐)
+        # Only rows that the no-evict kernel actually inserted are resident.
+        # This is the authoritative transition into the flat mirror.
         compact = self._to_compact(ids_cuda)
         in_range = compact < self._latest_dev.numel()
         compact = compact[in_range]
+        inserted = inserted[in_range]
+        compact = compact[inserted]
         self._ttl_dev[compact] = slot.ttl
         self._cached_dev[compact] = True
-        return True
+        return bool(inserted.all().item()) and int(inserted.numel()) == int(
+            slot.num_ids
+        )

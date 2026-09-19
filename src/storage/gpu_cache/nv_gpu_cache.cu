@@ -690,6 +690,126 @@ __global__ void get_assuming_hits_kernel(
 }
 #endif
 
+#ifdef LIBCUDACXX_VERSION
+// Read-only membership test. It is used to validate a controller's residency
+// mirror before taking the lock-free GetAssumingHits fast path.
+template <typename key_type, typename slabset, typename set_hasher,
+          typename slab_hasher, key_type empty_key, int set_associativity,
+          int warp_size>
+__global__ void contains_kernel(const key_type* d_keys, const size_t len,
+                                bool* d_success, const size_t capacity_in_set,
+                                const slabset* keys, const size_t task_per_warp_tile) {
+  cg::thread_block_tile<warp_size> warp_tile =
+      cg::tiled_partition<warp_size>(cg::this_thread_block());
+  const size_t lane_idx = warp_tile.thread_rank();
+  const size_t warp_tile_global_idx =
+      (blockIdx.x * (blockDim.x / warp_size)) + warp_tile.meta_group_rank();
+  const size_t key_idx =
+      (warp_tile_global_idx * task_per_warp_tile) + lane_idx;
+  key_type key = empty_key;
+  size_t set = 0;
+  size_t slab = 0;
+  bool active = false;
+  if (lane_idx < task_per_warp_tile && key_idx < len) {
+    active = true;
+    d_success[key_idx] = false;
+    key = d_keys[key_idx];
+    set = set_hasher::hash(key) % capacity_in_set;
+    slab = slab_hasher::hash(key) % set_associativity;
+  }
+
+  unsigned active_mask = warp_tile.ballot(active);
+  while (active_mask != 0) {
+    const int next_lane = __ffs(active_mask) - 1;
+    const key_type next_key = warp_tile.shfl(key, next_lane);
+    const size_t next_idx = warp_tile.shfl(key_idx, next_lane);
+    size_t next_set = warp_tile.shfl(set, next_lane);
+    size_t next_slab = warp_tile.shfl(slab, next_lane);
+
+    for (size_t counter = 0; counter < set_associativity; ++counter) {
+      const key_type read_key = keys[next_set].set_[next_slab].slab_[lane_idx];
+      const int found_lane =
+          __ffs(warp_tile.ballot(read_key == next_key)) - 1;
+      if (found_lane >= 0) {
+        if (lane_idx == static_cast<size_t>(next_lane)) {
+          d_success[next_idx] = true;
+          active = false;
+        }
+        active_mask = warp_tile.ballot(active);
+        break;
+      }
+      if (warp_tile.ballot(read_key == empty_key) != 0) {
+        if (lane_idx == static_cast<size_t>(next_lane)) {
+          active = false;
+        }
+        active_mask = warp_tile.ballot(active);
+        break;
+      }
+      next_slab = (next_slab + 1) % set_associativity;
+    }
+  }
+}
+#else
+template <typename key_type, typename slabset, typename set_hasher,
+          typename slab_hasher, key_type empty_key, int set_associativity,
+          int warp_size>
+__global__ void contains_kernel(const key_type* d_keys, const size_t len,
+                                bool* d_success, const size_t capacity_in_set,
+                                const volatile slabset* keys,
+                                const size_t task_per_warp_tile) {
+  cg::thread_block_tile<warp_size> warp_tile =
+      cg::tiled_partition<warp_size>(cg::this_thread_block());
+  const size_t lane_idx = warp_tile.thread_rank();
+  const size_t warp_tile_global_idx =
+      (blockIdx.x * (blockDim.x / warp_size)) + warp_tile.meta_group_rank();
+  const size_t key_idx =
+      (warp_tile_global_idx * task_per_warp_tile) + lane_idx;
+  key_type key = empty_key;
+  size_t set = 0;
+  size_t slab = 0;
+  bool active = false;
+  if (lane_idx < task_per_warp_tile && key_idx < len) {
+    active = true;
+    d_success[key_idx] = false;
+    key = d_keys[key_idx];
+    set = set_hasher::hash(key) % capacity_in_set;
+    slab = slab_hasher::hash(key) % set_associativity;
+  }
+
+  unsigned active_mask = warp_tile.ballot(active);
+  while (active_mask != 0) {
+    const int next_lane = __ffs(active_mask) - 1;
+    const key_type next_key = warp_tile.shfl(key, next_lane);
+    const size_t next_idx = warp_tile.shfl(key_idx, next_lane);
+    size_t next_set = warp_tile.shfl(set, next_lane);
+    size_t next_slab = warp_tile.shfl(slab, next_lane);
+
+    for (size_t counter = 0; counter < set_associativity; ++counter) {
+      const key_type read_key =
+          ((volatile key_type*)(keys[next_set].set_[next_slab].slab_))[lane_idx];
+      const int found_lane =
+          __ffs(warp_tile.ballot(read_key == next_key)) - 1;
+      if (found_lane >= 0) {
+        if (lane_idx == static_cast<size_t>(next_lane)) {
+          d_success[next_idx] = true;
+          active = false;
+        }
+        active_mask = warp_tile.ballot(active);
+        break;
+      }
+      if (warp_tile.ballot(read_key == empty_key) != 0) {
+        if (lane_idx == static_cast<size_t>(next_lane)) {
+          active = false;
+        }
+        active_mask = warp_tile.ballot(active);
+        break;
+      }
+      next_slab = (next_slab + 1) % set_associativity;
+    }
+  }
+}
+#endif
+
 template <typename key_type, key_type empty_key>
 struct deleted_key {
   static constexpr key_type value = static_cast<key_type>(empty_key - static_cast<key_type>(1));
@@ -708,7 +828,8 @@ __global__ void insert_replace_kernel(const key_type* d_keys, const float* d_val
                                       mutex* set_mutex,
                                       const atomic_ref_counter_type* global_counter,
                                       const size_t capacity_in_set,
-                                      const size_t task_per_warp_tile) {
+                                      const size_t task_per_warp_tile, const bool no_evict,
+                                      bool* d_success) {
   // Lane(thread) ID within a warp_tile
   cg::thread_block_tile<warp_size> warp_tile =
       cg::tiled_partition<warp_size>(cg::this_thread_block());
@@ -728,6 +849,9 @@ __global__ void insert_replace_kernel(const key_type* d_keys, const float* d_val
   if (lane_idx < task_per_warp_tile) {
     if (key_idx < len) {
       active = true;
+      if (d_success != nullptr) {
+        d_success[key_idx] = true;
+      }
       key = d_keys[key_idx];
       src_set = set_hasher::hash(key) % capacity_in_set;
       src_slab = slab_hasher::hash(key) % set_associativity;
@@ -768,6 +892,15 @@ __global__ void insert_replace_kernel(const key_type* d_keys, const float* d_val
       // When all the slabs inside a slabset have been searched
       // and no empty slots or target slots are found. Replace with LRU
       if (counter >= set_associativity) {
+        if (no_evict) {
+          if (lane_idx == (size_t)next_lane) {
+            d_success[next_idx] = false;
+            active = false;
+          }
+          active_mask = warp_tile.ballot(active);
+          break;
+        }
+
         // (sub)Warp all-reduction, the reduction result store in all threads
         warp_min_reduction<ref_counter_type, warp_size>(warp_tile, min_slot_counter_val,
                                                         slab_distance, slot_distance);
@@ -868,7 +1001,8 @@ __global__ void insert_replace_kernel(const key_type* d_keys, const float* d_val
                                       volatile ref_counter_type* slot_counter,
                                       volatile int* set_mutex, ref_counter_type* global_counter,
                                       const size_t capacity_in_set,
-                                      const size_t task_per_warp_tile) {
+                                      const size_t task_per_warp_tile, const bool no_evict,
+                                      bool* d_success) {
   // Lane(thread) ID within a warp_tile
   cg::thread_block_tile<warp_size> warp_tile =
       cg::tiled_partition<warp_size>(cg::this_thread_block());
@@ -888,6 +1022,9 @@ __global__ void insert_replace_kernel(const key_type* d_keys, const float* d_val
   if (lane_idx < task_per_warp_tile) {
     if (key_idx < len) {
       active = true;
+      if (d_success != nullptr) {
+        d_success[key_idx] = true;
+      }
       key = d_keys[key_idx];
       src_set = set_hasher::hash(key) % capacity_in_set;
       src_slab = slab_hasher::hash(key) % set_associativity;
@@ -928,6 +1065,15 @@ __global__ void insert_replace_kernel(const key_type* d_keys, const float* d_val
       // When all the slabs inside a slabset have been searched
       // and no empty slots or target slots are found. Replace with LRU
       if (counter >= set_associativity) {
+        if (no_evict) {
+          if (lane_idx == (size_t)next_lane) {
+            d_success[next_idx] = false;
+            active = false;
+          }
+          active_mask = warp_tile.ballot(active);
+          break;
+        }
+
         // (sub)Warp all-reduction, the reduction result store in all threads
         warp_min_reduction<ref_counter_type, warp_size>(warp_tile, min_slot_counter_val,
                                                         slab_distance, slot_distance);
@@ -1838,6 +1984,54 @@ void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_si
 #ifdef LIBCUDACXX_VERSION
 template <typename key_type, typename ref_counter_type, key_type empty_key, int set_associativity,
           int warp_size, typename set_hasher, typename slab_hasher>
+void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_size, set_hasher,
+               slab_hasher>::Contains(const key_type* d_keys, const size_t len,
+                                      bool* d_success, cudaStream_t stream,
+                                      const size_t task_per_warp_tile) {
+  if (len == 0) {
+    return;
+  }
+
+  nv::CudaDeviceRestorer dev_restorer;
+  dev_restorer.check_device(dev_);
+
+  const size_t keys_per_block =
+      (BLOCK_SIZE_ / warp_size) * task_per_warp_tile;
+  const size_t grid_size = ((len - 1) / keys_per_block) + 1;
+  contains_kernel<key_type, slabset, set_hasher, slab_hasher, empty_key,
+                  set_associativity, warp_size>
+      <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
+          d_keys, len, d_success, capacity_in_set_, keys_, task_per_warp_tile);
+  CUDA_CHECK(cudaGetLastError());
+}
+#else
+template <typename key_type, typename ref_counter_type, key_type empty_key, int set_associativity,
+          int warp_size, typename set_hasher, typename slab_hasher>
+void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_size, set_hasher,
+               slab_hasher>::Contains(const key_type* d_keys, const size_t len,
+                                      bool* d_success, cudaStream_t stream,
+                                      const size_t task_per_warp_tile) {
+  if (len == 0) {
+    return;
+  }
+
+  nv::CudaDeviceRestorer dev_restorer;
+  dev_restorer.check_device(dev_);
+
+  const size_t keys_per_block =
+      (BLOCK_SIZE_ / warp_size) * task_per_warp_tile;
+  const size_t grid_size = ((len - 1) / keys_per_block) + 1;
+  contains_kernel<key_type, slabset, set_hasher, slab_hasher, empty_key,
+                  set_associativity, warp_size>
+      <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
+          d_keys, len, d_success, capacity_in_set_, keys_, task_per_warp_tile);
+  CUDA_CHECK(cudaGetLastError());
+}
+#endif
+
+#ifdef LIBCUDACXX_VERSION
+template <typename key_type, typename ref_counter_type, key_type empty_key, int set_associativity,
+          int warp_size, typename set_hasher, typename slab_hasher>
 gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_size, set_hasher,
           slab_hasher>::~gpu_cache() {
   // Device Restorer
@@ -1985,7 +2179,9 @@ void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_si
                         deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
       <<<grid_size, BLOCK_SIZE_, 0, stream>>>(d_keys, d_values, embedding_vec_size_, len, keys_,
                                               vals_, slot_counter_, set_mutex_, global_counter_,
-                                              capacity_in_set_, task_per_warp_tile);
+                                              capacity_in_set_, task_per_warp_tile,
+                                              /*no_evict=*/false,
+                                              /*d_success=*/nullptr);
 
   // Check for GPU error before return
   CUDA_CHECK(cudaGetLastError());
@@ -2014,10 +2210,67 @@ void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_si
   insert_replace_kernel<key_type, slabset, ref_counter_type, set_hasher, slab_hasher, empty_key,
                         deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
       <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
-      d_keys, d_values, embedding_vec_size_, len, keys_, vals_, slot_counter_, set_mutex_,
-      global_counter_, capacity_in_set_, task_per_warp_tile);
+          d_keys, d_values, embedding_vec_size_, len, keys_, vals_, slot_counter_, set_mutex_,
+          global_counter_, capacity_in_set_, task_per_warp_tile,
+          /*no_evict=*/false,
+          /*d_success=*/nullptr);
 
   // Check for GPU error before return
+  CUDA_CHECK(cudaGetLastError());
+}
+#endif
+
+#ifdef LIBCUDACXX_VERSION
+template <typename key_type, typename ref_counter_type, key_type empty_key, int set_associativity,
+          int warp_size, typename set_hasher, typename slab_hasher>
+void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_size, set_hasher,
+               slab_hasher>::TryInsertNoEvict(const key_type* d_keys, const size_t len,
+                                             const float* d_values, bool* d_success,
+                                             cudaStream_t stream,
+                                             const size_t task_per_warp_tile) {
+  if (len == 0) {
+    return;
+  }
+
+  nv::CudaDeviceRestorer dev_restorer;
+  dev_restorer.check_device(dev_);
+
+  const size_t keys_per_block =
+      (BLOCK_SIZE_ / warp_size) * task_per_warp_tile;
+  const size_t grid_size = ((len - 1) / keys_per_block) + 1;
+  insert_replace_kernel<key_type, slabset, ref_counter_type, mutex, atomic_ref_counter_type,
+                        set_hasher, slab_hasher, empty_key,
+                        deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
+      <<<grid_size, BLOCK_SIZE_, 0, stream>>>(d_keys, d_values, embedding_vec_size_, len, keys_,
+                                              vals_, slot_counter_, set_mutex_, global_counter_,
+                                              capacity_in_set_, task_per_warp_tile,
+                                              /*no_evict=*/true, d_success);
+  CUDA_CHECK(cudaGetLastError());
+}
+#else
+template <typename key_type, typename ref_counter_type, key_type empty_key, int set_associativity,
+          int warp_size, typename set_hasher, typename slab_hasher>
+void gpu_cache<key_type, ref_counter_type, empty_key, set_associativity, warp_size, set_hasher,
+               slab_hasher>::TryInsertNoEvict(const key_type* d_keys, const size_t len,
+                                             const float* d_values, bool* d_success,
+                                             cudaStream_t stream,
+                                             const size_t task_per_warp_tile) {
+  if (len == 0) {
+    return;
+  }
+
+  nv::CudaDeviceRestorer dev_restorer;
+  dev_restorer.check_device(dev_);
+
+  const size_t keys_per_block =
+      (BLOCK_SIZE_ / warp_size) * task_per_warp_tile;
+  const size_t grid_size = ((len - 1) / keys_per_block) + 1;
+  insert_replace_kernel<key_type, slabset, ref_counter_type, set_hasher, slab_hasher, empty_key,
+                        deleted_key<key_type, empty_key>::value, set_associativity, warp_size>
+      <<<grid_size, BLOCK_SIZE_, 0, stream>>>(
+          d_keys, d_values, embedding_vec_size_, len, keys_, vals_, slot_counter_, set_mutex_,
+          global_counter_, capacity_in_set_, task_per_warp_tile,
+          /*no_evict=*/true, d_success);
   CUDA_CHECK(cudaGetLastError());
 }
 #endif

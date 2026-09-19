@@ -40,10 +40,22 @@ class gpu_cache_api {
                                cudaStream_t stream,
                                const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) {}
 
+  // Read-only membership API. d_success[key index] is true iff the key is
+  // resident. Like GetAssumingHits, this does not lock or copy values.
+  virtual void Contains(const key_type* d_keys, const size_t len, bool* d_success,
+                        cudaStream_t stream,
+                        const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) {}
+
   // Replace API, i.e. Follow the Query API to update the content of the cache to Most Recent
   virtual void Replace(const key_type* d_keys, const size_t len, const float* d_values,
                        cudaStream_t stream,
                        const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) = 0;
+
+  // Insert only into empty/tombstone slots. Existing entries are kept. The
+  // caller owns eviction and must not use Replace on the same cache.
+  virtual void TryInsertNoEvict(const key_type* d_keys, const size_t len,
+                                const float* d_values, bool* d_success, cudaStream_t stream,
+                                const size_t task_per_warp_tile = TASK_PER_WARP_TILE_MACRO) {}
 
   // Update API, i.e. update the embeddings which exist in the cache
   virtual void Update(const key_type* d_keys, const size_t len, const float* d_values,

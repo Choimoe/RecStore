@@ -361,6 +361,83 @@ class TestCompactTranslation(unittest.TestCase):
             ctrl._cleanup_queue.put(None)
 
 
+
+class TestPrefetchResidencyValidation(unittest.TestCase):
+    def _controller(self, kv_client):
+        from ..bagpipe_cache.controller import BagPipeCacheController
+
+        return BagPipeCacheController(
+            embedding_module=None,
+            kv_client=kv_client,
+            lookahead_value=4,
+            cleanup_batch_proportion=0.25,
+            cache_capacity=10,
+            embedding_dim=4,
+            fuse_k=6,
+            table_offsets={"a": 0},
+            master_table_name="t",
+            device=torch.device("cpu"),
+            id_extractor=lambda sf: sf,
+            table_sizes={"a": 100},
+        )
+
+    def test_stale_mirror_is_repaired_before_hit_only_lookup(self):
+        class KV:
+            def __init__(self):
+                self.prefetched = []
+
+            def contains_gpu_cache(self, keys):
+                # ID 20 was evicted behind the Python mirror's back.
+                return keys == 10
+
+            def prefetch(self, ids):
+                self.prefetched.append(ids.clone())
+                return 777
+
+        kv = KV()
+        ctrl = self._controller(kv)
+        try:
+            ids = torch.tensor([10, 20], dtype=torch.int64)
+            compact = ctrl._to_compact(ids)
+            ctrl._latest_dev[compact] = 7
+            ctrl._ttl_dev[compact] = 100
+            ctrl._cached_dev[compact] = True
+
+            ctrl._preissue_prefetch(7, ids, compact)
+
+            self.assertFalse(bool(ctrl._cached_dev[20].item()))
+            self.assertTrue(bool(ctrl._cached_dev[10].item()))
+            self.assertFalse(ctrl._prefetch_all_hits[7])
+            self.assertEqual(kv.prefetched[0].tolist(), [20])
+            self.assertEqual(ctrl._prefetch_handles[7].ids_cpu.tolist(), [20])
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_validated_all_hits_skip_prefetch_and_enable_fast_lookup(self):
+        class KV:
+            def contains_gpu_cache(self, keys):
+                return torch.ones_like(keys, dtype=torch.bool)
+
+            def prefetch(self, ids):
+                raise AssertionError("all-hit batch must not prefetch")
+
+        ctrl = self._controller(KV())
+        try:
+            ids = torch.tensor([10, 20], dtype=torch.int64)
+            compact = ctrl._to_compact(ids)
+            ctrl._latest_dev[compact] = 7
+            ctrl._ttl_dev[compact] = 100
+            ctrl._cached_dev[compact] = True
+
+            ctrl._preissue_prefetch(7, ids, compact)
+
+            self.assertIsNone(ctrl._prefetch_handles[7])
+            self.assertTrue(ctrl._prefetch_all_hits[7])
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+
+
 class _EvictionHarness:
     """BagPipeEvictionMixin 的最小宿主: 身份映射 + 固定 64 槽簿记."""
 

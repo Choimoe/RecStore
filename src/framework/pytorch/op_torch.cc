@@ -1208,6 +1208,48 @@ void prefill_gpu_cache_torch(const torch::Tensor& keys,
 #endif
 }
 
+torch::Tensor prefill_gpu_cache_no_evict_torch(const torch::Tensor& keys,
+                                               const torch::Tensor& values) {
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  TORCH_CHECK(keys.dim() == 1, "keys must be 1-dimensional");
+  TORCH_CHECK(keys.scalar_type() == torch::kInt64,
+              "keys must have dtype int64");
+  TORCH_CHECK(values.dim() == 2, "values must be 2-dimensional");
+  TORCH_CHECK(values.scalar_type() == torch::kFloat32,
+              "values must have dtype float32");
+  TORCH_CHECK(keys.size(0) == values.size(0),
+              "keys and values must have the same number of rows");
+  if (keys.numel() == 0) {
+    return torch::empty({0}, torch::TensorOptions().dtype(torch::kBool));
+  }
+  TORCH_CHECK(keys.is_cuda() || values.is_cuda(),
+              "prefill_gpu_cache_no_evict requires keys or values on CUDA");
+  const auto cache_device = values.is_cuda() ? values.device() : keys.device();
+  auto keys_cuda          = keys.is_cuda() ? keys : keys.to(cache_device);
+  auto values_cuda        = values.is_cuda() ? values : values.to(cache_device);
+  if (!keys_cuda.is_contiguous()) {
+    keys_cuda = keys_cuda.contiguous();
+  }
+  if (!values_cuda.is_contiguous()) {
+    values_cuda = values_cuda.contiguous();
+  }
+  return gpu::FillGpuCacheNoEvict(keys_cuda, values_cuda);
+#else
+  (void)keys;
+  (void)values;
+  TORCH_CHECK(false, "GPU cache support is unavailable");
+#endif
+}
+
+torch::Tensor contains_gpu_cache_torch(const torch::Tensor& keys) {
+#ifdef RECSTORE_ENABLE_GPU_CACHE
+  return gpu::ContainsGpuCache(keys);
+#else
+  (void)keys;
+  TORCH_CHECK(false, "GPU cache support is unavailable");
+#endif
+}
+
 void invalidate_gpu_cache_torch(const torch::Tensor& keys) {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
   TORCH_CHECK(keys.dim() == 1, "keys must be 1-dimensional");
@@ -1443,6 +1485,8 @@ TORCH_LIBRARY(recstore_ops, m) {
   m.def("disable_gpu_cache", disable_gpu_cache_torch);
   m.def("clear_gpu_cache", clear_gpu_cache_torch);
   m.def("prefill_gpu_cache", prefill_gpu_cache_torch);
+  m.def("prefill_gpu_cache_no_evict", prefill_gpu_cache_no_evict_torch);
+  m.def("contains_gpu_cache", contains_gpu_cache_torch);
   m.def("invalidate_gpu_cache", invalidate_gpu_cache_torch);
   m.def("apply_sgd_update_gpu_cache", apply_sgd_update_gpu_cache_torch);
   m.def("apply_sgd_update_gpu_cache_best_effort",

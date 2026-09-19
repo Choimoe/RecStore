@@ -45,8 +45,11 @@ GpuCacheLookupResult
 QueryGpuCache(const torch::Tensor& keys, int64_t embedding_dim);
 torch::Tensor LookupGpuCacheAssumingHits(const torch::Tensor& keys,
                                           int64_t embedding_dim);
+torch::Tensor ContainsGpuCache(const torch::Tensor& keys);
 void FillGpuCache(const torch::Tensor& keys_cuda,
                   const torch::Tensor& values_cuda);
+torch::Tensor FillGpuCacheNoEvict(const torch::Tensor& keys_cuda,
+                                  const torch::Tensor& values_cuda);
 void ScatterMissValues(torch::Tensor* output_values,
                        const torch::Tensor& missing_positions_cpu,
                        const torch::Tensor& miss_values_cuda);
