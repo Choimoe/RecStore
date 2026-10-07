@@ -2,58 +2,69 @@
 
 ## ps_server_helpers.py
 
-`src/test/scripts/ps_server_helpers.py` 模块提供了一系列辅助函数，用于在测试环境中查找、检测和配置 `ps_server`。它通常与 `ps_server_runner.py` 配合使用，用于自动化测试流程。
+`src/test/scripts/ps_server_helpers.py` 模块提供了一系列辅助函数，用于在测试环境中查找、检测和配置 `ps_server`。端口探活与启动决策实际委托给 C++ 侧启动器 `ps_server_launcher_cli`（见下文），Python 侧负责读取配置、整理 RDMA runner 参数并在 CI 中判定跳过。
 
 | 变量名 | 说明 | 默认值 |
 | :--- | :--- | :--- |
-| `PS_SERVER_PATH` | 指定 `ps_server` 的绝对路径 | 自动查找 |
-| `RECSTORE_CONFIG` | 指定 `recstore_config.json` 路径 | None |
-| `PS_LOG_DIR` | 指定日志输出目录 | `./logs` |
+| `RECSTORE_CONFIG` | 指定 `recstore_config.json` 路径 | 自动查找 |
+| `PS_LOG_DIR` | 指定日志输出目录 | `/tmp/recstore_ps` |
 | `PS_TIMEOUT` | 启动超时时间（秒） | 60 |
 | `PS_NUM_SHARDS` | 期望的分片数量 | 2 |
-| `NO_PS_SERVER` | 强制跳过启动服务器 (Set to '1' or 'true') | False |
 
-### `find_ps_server_binary()`
+### `find_ps_server_binary()` / `find_ps_server_launcher_cli()`
 
-在 `build/bin/ps_server` 等常见构建目录中查找可执行文件。
+返回 `build/bin/` 下的 `ps_server` 与 `ps_server_launcher_cli` 可执行文件路径。
 
-| | 说明 |
+### `run_launcher_decision(config_path=None)`
+
+调用 `ps_server_launcher_cli decision` 并解析其 JSON 输出，返回启动决策（是否启动、失败原因、配置端口、已开放端口等）。返回码 `2` 表示“判定失败”，会在结果里带上 `should_fail`。
+
+### `find_config_file()` / `load_config()`
+
+按 `RECSTORE_CONFIG` → 自当前目录向上查找 `recstore_config.json` → 仓库根目录的顺序定位当前配置；`load_config()` 返回 `(path, dict)`，找不到时返回 `(None, {})`。
+
+### `get_backend_type()`
+
+返回 `cache_ps.ps_type`（大写），默认 `GRPC`。
+
+### `get_rdma_runner_config()`
+
+从配置中提取 PetPS RDMA 测试所需的参数，并对 `distributed_client` / `rdma_deployment` 做严格校验，缺失或非法时直接抛 `ValueError`。返回字段：
+
+| 键名 | 来源 |
 | :--- | :--- |
-| **返回值** | `ps_server` 的绝对路径。 |
-| **查找顺序** | `OS ENV(PS_SERVER_PATH)` -> `./bin` -> `./build/bin` -> 上级目录的构建路径。 |
+| `num_servers` | `distributed_client.num_shards` |
+| `value_size` | `base_kv_config.value.default_value_size_hint`（回退 `value_size` / 512） |
+| `max_kv_num_per_request` | `distributed_client.max_keys_per_request` |
+| `num_clients` | `rdma_deployment.num_clients` |
+| `rdma_deployment_nodes` | `rdma_deployment.nodes` |
 
-### `check_ps_server_running(ports=None)`
+校验项包括：`num_shards` / `max_keys_per_request` / `num_clients` / `epoch` 为正整数，`rdma_deployment.nodes` 非空，`deployment_id` 非空，`protocol_version == 1`。
 
-检查 Parameter Server 的默认端口（或指定端口）是否已在监听。
+### `get_rdma_skip_reason()`
 
-| | 说明 |
-| :--- | :--- |
-| **参数** | `ports` (list, optional): 要检查的端口列表。默认为 `[15000, 15001, 15002, 15003]`。 |
-| **返回值** | `(is_running: bool, open_ports: list)` |
+当 `/dev/infiniband` 下没有 `uverbs*` 设备时返回跳过原因，否则返回 `None`；配套常量 `RDMA_SKIP_EXIT_CODE = 77`。
+
+### `get_ports_from_config()` / `check_ps_server_running(ports=None)`
+
+基于启动器决策读取配置端口并探活。`check_ps_server_running` 返回 `(is_running: bool, open_ports: list)`。
 
 ### `should_skip_server_start()`
 
-判断当前测试是否应该跳过启动 `ps_server` 的步骤。判断逻辑:
-
-- 检查环境变量 `CI` 或 `GITHUB_ACTIONS`。
-- 检查环境变量 `NO_PS_SERVER`。
-- 检查端口是否已被占用（意味着服务已经在运行）。
-
-返回值: `(skip: bool, reason: str)`
+根据启动器决策判断是否跳过启动 `ps_server`，返回 `(skip: bool, reason: str)`。判定失败时抛 `RuntimeError`；`already_running` / `ci_reuse_running` / `NO_PS_SERVER` 直接跳过；CI 下 `ci_server_not_ready` 会以明确原因返回不跳过。
 
 ### `get_server_config()`
 
-获取标准化的服务器配置字典，优先读取环境变量。
-
-返回值字典:
+返回标准化服务器配置字典：
 
 | 键名 | 说明 |
 | :--- | :--- |
-| `server_path` | 二进制文件路径 |
-| `config_path` | 配置文件路径 (`RECSTORE_CONFIG`) |
-| `log_dir` | 日志目录 (`PS_LOG_DIR`) |
-| `timeout` | 超时时间 (`PS_TIMEOUT`) |
-| `num_shards` | 分片数量 (`PS_NUM_SHARDS`) |
+| `server_path` | `ps_server` 二进制路径 |
+| `launcher_cli` | `ps_server_launcher_cli` 路径 |
+| `config_path` | 配置文件路径（`RECSTORE_CONFIG`） |
+| `log_dir` | 日志目录（`PS_LOG_DIR`） |
+| `timeout` | 超时时间（`PS_TIMEOUT`） |
+| `num_shards` | 分片数量（`PS_NUM_SHARDS`） |
 
 ## ps_server_launcher (C++)
 

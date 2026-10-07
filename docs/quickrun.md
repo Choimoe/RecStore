@@ -21,10 +21,10 @@ python3 -c "import torch, torchrec, fbgemm_gpu, torchmetrics; print(torch.__vers
 在仓库根目录执行：
 
 ```bash title="自动读取配置文件，启动ps客户端"
-./buidl/bin/ps_server
+./build/bin/ps_server
 ```
 
-配置文件相关信息可以参考：[项目配置](../config)
+配置文件相关信息可以参考：[项目配置](config.md)
 
 ## 2. 运行计算层模型
 
@@ -55,5 +55,5 @@ bash scripts/process_single_day.sh ./partial_data ./processed_day_0_data > proce
 
 你可以：
 
-- 在 [性能分析](../dev/performance/) 阅读更详细的性能分析工具。
-- 在 [分布式训练](../dev/distributed/) 查看如何使用分布式 RecStore。
+- 在 [性能分析](dev/performance.md) 阅读更详细的性能分析工具。
+- 在 [分布式训练](dev/distributed.md) 查看如何使用分布式 RecStore。

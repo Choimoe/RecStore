@@ -18,7 +18,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `num_shards` | integer | 是 | 分片数量，应等于 `servers` 数组长度 |
 | `servers` | array | 是 | 服务器节点配置数组 |
 
-作用位置：通信协议选择见 [src/framework/op.cc](../src/framework/op.cc)、[src/ps/grpc/grpc_ps_server.cpp](../src/ps/grpc/grpc_ps_server.cpp) 和 [src/ps/brpc/brpc_ps_server.cpp](../src/ps/brpc/brpc_ps_server.cpp)。同时也可通过统一入口可执行程序 [src/ps/ps_server.cpp](../src/ps/ps_server.cpp) 按 `ps_type` 自动选择 GRPC 或 bRPC；批量限制与线程数在 [src/ps/grpc/grpc_ps_client.h](../src/ps/grpc/grpc_ps_client.h) 及 [src/storage/kv_engine/base_kv.h](../src/storage/kv_engine/base_kv.h) 中生效；分片与 servers 列表用于分布式路由。
+作用位置：通信协议选择见 `src/framework/op.cc`、`src/ps/grpc/grpc_ps_server.cpp` 和 `src/ps/brpc/brpc_ps_server.cpp`。同时也可通过统一入口可执行程序 `src/ps/ps_server.cpp` 按 `ps_type` 自动选择 GRPC 或 bRPC；批量限制与线程数在 `src/ps/grpc/grpc_ps_client.h` 及 `src/storage/kv_engine/base_kv.h` 中生效；分片与 servers 列表用于分布式路由。
 
 ### 1.2 servers 数组配置
 
@@ -35,7 +35,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 
 ### 1.3 base_kv_config 配置
 
-`base_kv_config` 定义底层键值存储引擎的配置，由 [src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h) 的 `ResolveEngine` 解析 `engine_type`；具体字段校验在对应引擎构造时完成。
+`base_kv_config` 定义底层键值存储引擎的配置，由 `src/storage/kv_engine/engine_selector.h` 的 `ResolveEngine` 解析 `engine_type`；具体字段校验在对应引擎构造时完成。
 
 #### 通用必填字段（非 HYBRID 模式）
 
@@ -46,7 +46,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `index` | object | Composite | 索引配置，见 [composite_kvengine.md](./storage/composite_kvengine.md) |
 | `value` | object | Composite | 值存储配置，见 [composite_kvengine.md](./storage/composite_kvengine.md) |
 
-作用位置：字段最终进入 `BaseKVConfig.json_config_`，在 [src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h) 中推导引擎类型，并在 [src/storage/kv_engine/base_kv.h](../src/storage/kv_engine/base_kv.h) 及对应引擎实现中用于容量预分配与值大小约束。
+作用位置：字段最终进入 `BaseKVConfig.json_config_`，在 `src/storage/kv_engine/engine_selector.h` 中推导引擎类型，并在 `src/storage/kv_engine/base_kv.h` 及对应引擎实现中用于容量预分配与值大小约束。
 
 ???+ note "注意"
     Composite 配置请使用嵌套 `index` / `value`，不要混用已废弃的顶层 `index_type`、`value_type`、`value_memory_management` 等字段。组件类型与 allocator 明细见 [composite_kvengine.md](./storage/composite_kvengine.md)。
@@ -70,7 +70,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 - `value.type` 取值：`DRAM_VALUE_STORE` / `SSD_VALUE_STORE` / `TIERED_VALUE_STORE`
 - 旧字段 `path`、`index.io.file_path`、`value.ssd_allocator.io.file_path` 会被拒绝
 
-仓库根目录 `recstore_config.json`（可由 [recstore_config_generator.py](../recstore_config_generator.py) 生成）的**默认 KV 组合**为：
+仓库根目录 `recstore_config.json` 的**默认 KV 组合**为：
 
 | 字段 | 默认值 |
 |------|--------|
@@ -79,7 +79,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `value.type` | `DRAM_VALUE_STORE` |
 | `value.dram_allocator.type` | `CONCURRENT_SLAB_MEMORY_POOL` |
 
-引擎推导实现位置：[src/storage/kv_engine/engine_selector.h](../src/storage/kv_engine/engine_selector.h)
+引擎推导实现位置：`src/storage/kv_engine/engine_selector.h`
 
 ## 2. distributed_client 配置
 
@@ -92,7 +92,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `max_keys_per_request` | integer | 否（默认 500） | 单次请求最大键数量 |
 | `servers` | array | 是 | 服务器节点配置，结构同 `cache_ps.servers` |
 
-作用位置：分片数与哈希方法在 [src/ps/brpc/dist_brpc_ps_client.cpp](../src/ps/brpc/dist_brpc_ps_client.cpp) 与 [src/ps/grpc/dist_grpc_ps_client.cpp](../src/ps/grpc/dist_grpc_ps_client.cpp) 的 `GetShardId`、`PartitionKeys` 中决定路由；`max_keys_per_request` 限制单分片请求大小；`servers` 列表在 `InitializeClients` 中生成各分片客户端。
+作用位置：分片数与哈希方法在 `src/ps/brpc/dist_brpc_ps_client.cpp` 与 `src/ps/grpc/dist_grpc_ps_client.cpp` 的 `GetShardId`、`PartitionKeys` 中决定路由；`max_keys_per_request` 限制单分片请求大小；`servers` 列表在 `InitializeClients` 中生成各分片客户端。
 
 ## 3. client 配置
 
@@ -104,7 +104,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `port` | integer | 是 | 服务器端口 |
 | `shard` | integer | 是 | 目标分片编号 |
 
-作用位置：单节点客户端在 [src/ps/grpc/grpc_ps_client.cpp](../src/ps/grpc/grpc_ps_client.cpp) 读取以上字段创建 gRPC 通道并标识分片，在 [src/ps/grpc/grpc_ps_client.h](../src/ps/grpc/grpc_ps_client.h) 中保存元数据。
+作用位置：单节点客户端在 `src/ps/grpc/grpc_ps_client.cpp` 读取以上字段创建 gRPC 通道并标识分片，在 `src/ps/grpc/grpc_ps_client.h` 中保存元数据。
 
 ???+ tip "动态覆盖"
     运行时可用 `client.set_ps_config(host, port)` 覆盖配置文件里的 `host` 和 `port`。接口说明见 [计算层接口](./calc/interfaces.md)。
@@ -117,11 +117,11 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 |------|------|------|--------|------|
 | `report_API` | string | 否 | `http://127.0.0.1:8081/report` | `report()` 异步上报接口地址，通常由该服务写入 ClickHouse 并供 Grafana 展示 |
 
-作用位置：`report_API` 由 [src/base/report/report_client.cpp](../src/base/report/report_client.cpp) 读取；当该字段缺失时会回退到默认地址 `http://127.0.0.1:8081/report`。
+作用位置：`report_API` 由 `src/base/report/report_client.cpp` 读取；当该字段缺失时会回退到默认地址 `http://127.0.0.1:8081/report`。
 
 ## 5. hugectr 配置
 
-`hugectr` 顶层配置用于 HugeCTR 入口的运行时后端选择。它不会修改 `CommonOp` 语义，而是只影响 [src/framework/hugectr/op_hugectr.cc](../src/framework/hugectr/op_hugectr.cc) 内部的 backend 分发。
+`hugectr` 顶层配置用于 HugeCTR 入口的运行时后端选择。它不会修改 `CommonOp` 语义，而是只影响 `src/framework/hugectr/op_hugectr.cc` 内部的 backend 分发。
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|

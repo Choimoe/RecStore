@@ -731,7 +731,7 @@ TEST_P(KVEngineCartesianTest, ConcurrentPutTest) {
             std::string value = CreateFixedLengthValue(base_value);
 
             try {
-              kv_engine_->Put(key, value, 0);
+              kv_engine_->Put(key, value, t);
             } catch (const std::exception& e) {
               failed_operations++;
             }
@@ -851,7 +851,7 @@ TEST_P(KVEngineCartesianTest, ConcurrentReadWriteTest) {
                 std::string base_value = "mixed_thread_" + std::to_string(t) +
                                          "_value_" + std::to_string(i);
                 std::string value = CreateFixedLengthValue(base_value);
-                kv_engine_->Put(key, value, 0);
+                kv_engine_->Put(key, value, t);
                 successful_operations++;
               } else {
                 std::string retrieved_value;
@@ -959,7 +959,7 @@ TEST_P(KVEngineCartesianTest, DataConsistencyTest) {
               std::string value = CreateFixedLengthValue(base_value);
 
               try {
-                kv_engine_->Put(key, value, 0);
+                kv_engine_->Put(key, value, t);
                 total_updates++;
               } catch (const std::exception& e) {
               }

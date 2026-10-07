@@ -57,15 +57,27 @@ class RecstoreClient:
 
         self.ops.emb_update_table(table_name, keys, grads)
 
-    def init_embedding_table(self, table_name: str, num_embeddings: int, embedding_dim: int) -> bool:
+    def init_embedding_table(
+        self,
+        table_name: str,
+        num_embeddings: int,
+        embedding_dim: int,
+        table_id: int = 0,
+    ) -> bool:
         if not table_name:
             raise ValueError("table_name must be non-empty")
         if not isinstance(num_embeddings, int) or num_embeddings <= 0:
             raise ValueError("num_embeddings must be a positive integer")
         if not isinstance(embedding_dim, int) or embedding_dim <= 0:
             raise ValueError("embedding_dim must be a positive integer")
+        if not isinstance(table_id, int) or table_id < 0:
+            raise ValueError("table_id must be a non-negative integer")
 
-        return bool(self.ops.init_embedding_table(table_name, num_embeddings, embedding_dim))
+        return bool(
+            self.ops.init_embedding_table(
+                table_name, num_embeddings, embedding_dim, table_id
+            )
+        )
 
     def emb_write(self, keys: torch.Tensor, values: torch.Tensor) -> None:
         if keys.dtype != torch.int64:
