@@ -747,9 +747,6 @@ gpu_cache_lookup_flat_no_evict_torch(const torch::Tensor& keys,
               "Keys tensor must have dtype int64");
   TORCH_CHECK(keys.is_contiguous(), "Keys tensor must be contiguous");
   TORCH_CHECK(embedding_dim > 0, "Embedding dimension must be positive");
-  TORCH_CHECK(gpu::CanUseGpuCache(keys, embedding_dim),
-              "gpu_cache_lookup_flat_no_evict requires an enabled GPU cache "
-              "on the keys' CUDA device");
 
   const int64_t num_keys = keys.size(0);
   auto resident = torch::ones({num_keys}, keys.options().dtype(torch::kBool));
@@ -760,6 +757,9 @@ gpu_cache_lookup_flat_no_evict_torch(const torch::Tensor& keys,
   }
 
 #ifdef RECSTORE_ENABLE_GPU_CACHE
+  TORCH_CHECK(gpu::CanUseGpuCache(keys, embedding_dim),
+              "gpu_cache_lookup_flat_no_evict requires an enabled GPU cache "
+              "on the keys' CUDA device");
   auto cache_result = gpu::QueryGpuCache(keys, embedding_dim);
   RecordGpuCacheLookupOutcome(
       num_keys,
