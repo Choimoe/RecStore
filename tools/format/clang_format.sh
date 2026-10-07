@@ -42,8 +42,10 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-if ! command -v clang-format >/dev/null 2>&1; then
-  echo "clang-format is required but was not found in PATH." >&2
+clang_format_bin="${CLANG_FORMAT:-clang-format}"
+
+if ! command -v "$clang_format_bin" >/dev/null 2>&1; then
+  echo "$clang_format_bin is required but was not found in PATH." >&2
   exit 127
 fi
 
@@ -88,7 +90,7 @@ if [[ ${#files[@]} -eq 0 ]]; then
 fi
 
 if [[ "$mode" == "check" ]]; then
-  clang-format --dry-run --Werror "${files[@]}"
+  "$clang_format_bin" --dry-run --Werror "${files[@]}"
 else
-  clang-format -i "${files[@]}"
+  "$clang_format_bin" -i "${files[@]}"
 fi

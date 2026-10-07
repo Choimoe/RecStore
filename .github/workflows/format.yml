@@ -40,9 +40,13 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang-format
+          # Pin the clang-format major version so the check does not drift when
+          # the runner image changes. The tracked sources are formatted with
+          # clang-format 18.
+          sudo apt-get install -y clang-format-18
 
       - name: Check formatting
         env:
+          CLANG_FORMAT: clang-format-18
           FORMAT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: tools/format/clang_format.sh --check --changed
