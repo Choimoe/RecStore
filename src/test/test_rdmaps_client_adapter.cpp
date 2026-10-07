@@ -168,23 +168,23 @@ json FabricDeploymentConfig() {
   config["rdma_deployment"]["num_clients"]      = 1;
   config["rdma_deployment"]["nodes"]            = json::array(
       {json{{"node_id", 0},
-            {"role", "server"},
-            {"device", "mlx5_0"},
-            {"port", 1},
-            {"gid_index", 0},
-            {"mode", "ib"}},
+                       {"role", "server"},
+                       {"device", "mlx5_0"},
+                       {"port", 1},
+                       {"gid_index", 0},
+                       {"mode", "ib"}},
                   json{{"node_id", 1},
-            {"role", "server"},
-            {"device", "mlx5_0"},
-            {"port", 1},
-            {"gid_index", 0},
-            {"mode", "ib"}},
+                       {"role", "server"},
+                       {"device", "mlx5_0"},
+                       {"port", 1},
+                       {"gid_index", 0},
+                       {"mode", "ib"}},
                   json{{"node_id", 2},
-            {"role", "client"},
-            {"device", "mlx5_0"},
-            {"port", 1},
-            {"gid_index", 0},
-            {"mode", "ib"}}});
+                       {"role", "client"},
+                       {"device", "mlx5_0"},
+                       {"port", 1},
+                       {"gid_index", 0},
+                       {"mode", "ib"}}});
   return config;
 }
 
@@ -355,12 +355,12 @@ TEST(ResolvedRdmaDeploymentTest, RejectsMissingRocEv2NetworkFields) {
   config["rdma_deployment"]["protocol_version"] = 1;
   config["rdma_deployment"]["num_clients"]      = 1;
   config["rdma_deployment"]["nodes"]            = json::array({json{
-      {"node_id", 0},
-      {"role", "server"},
-      {"device", "mlx5_0"},
-      {"port", 1},
-      {"gid_index", 0},
-      {"mode", "rocev2"}}});
+                 {"node_id", 0},
+                 {"role", "server"},
+                 {"device", "mlx5_0"},
+                 {"port", 1},
+                 {"gid_index", 0},
+                 {"mode", "rocev2"}}});
   EXPECT_THROW(ParseResolvedRdmaDeploymentConfig(config),
                std::invalid_argument);
 }

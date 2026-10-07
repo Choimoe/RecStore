@@ -46,10 +46,9 @@ public:
   int UpdateParameter(const std::string& table_name,
                       const base::ConstArray<uint64_t>& keys,
                       const base::RecTensor& grads) override;
-  uint64_t SubmitUpdateParameterAsync(
-      const std::string& table_name,
-      const base::ConstArray<uint64_t>& keys,
-      const base::RecTensor& grads) override;
+  uint64_t SubmitUpdateParameterAsync(const std::string& table_name,
+                                      const base::ConstArray<uint64_t>& keys,
+                                      const base::RecTensor& grads) override;
   int WaitUpdateParameter(uint64_t update_id) override;
   int InitEmbeddingTable(const std::string& table_name,
                          const EmbeddingTableConfig& config) override;
@@ -57,8 +56,8 @@ public:
   uint64_t PrefetchParameter(const base::ConstArray<uint64_t>& keys) override;
   bool IsPrefetchDone(uint64_t prefetch_id) override;
   void WaitForPrefetch(uint64_t prefetch_id) override;
-  bool GetPrefetchResult(uint64_t prefetch_id,
-                         base::RecTensor& values) override;
+  bool
+  GetPrefetchResult(uint64_t prefetch_id, base::RecTensor& values) override;
 
 private:
   struct TableState {

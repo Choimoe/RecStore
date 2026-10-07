@@ -220,7 +220,7 @@ const float* RdmaDistributedExecutor::BorrowBatchResult(
       return nullptr;
     }
   }
-  auto* client = ClientAt(pending.client_index);
+  auto* client          = ClientAt(pending.client_index);
   std::size_t key_count = 0;
   const float* payload  = client->BorrowGetResultPayload(
       pending.rpc_id, &key_count, response_bytes, status_code);
@@ -390,8 +390,9 @@ int RdmaDistributedExecutor::PutParameter(
           static_cast<std::size_t>(dim) * sizeof(float));
     }
     const int rc =
-        ClientAt(chunk.client_index)->PutParameter(
-            base::ConstArray<std::uint64_t>(chunk.keys), chunk_values);
+        ClientAt(chunk.client_index)
+            ->PutParameter(
+                base::ConstArray<std::uint64_t>(chunk.keys), chunk_values);
     if (rc != 0) {
       return rc;
     }
@@ -415,7 +416,8 @@ int RdmaDistributedExecutor::UpdateParameter(
             "RDMA UPDATE chunk position is out of range");
       }
       std::memcpy(
-          chunk_grads.data_as<float>() + chunk_row++ * static_cast<std::size_t>(dim),
+          chunk_grads.data_as<float>() +
+              chunk_row++ * static_cast<std::size_t>(dim),
           grads.data_as<float>() + position * static_cast<std::size_t>(dim),
           static_cast<std::size_t>(dim) * sizeof(float));
     }
@@ -438,7 +440,7 @@ int RdmaDistributedExecutor::WaitUpdateRpcs(
   try {
     for (; index < shard_rpcs->size(); ++index) {
       const auto [client_index, rpc_id] = (*shard_rpcs)[index];
-      auto* client = ClientAt(client_index);
+      auto* client                      = ClientAt(client_index);
       if (client->WaitUpdateParameter(rpc_id) != 0) {
         result = -1;
       }

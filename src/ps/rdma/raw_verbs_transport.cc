@@ -245,17 +245,17 @@ RawVerbsTransport::RawVerbsTransport(const RawVerbsConfig& config)
   impl_->gid_index  = opened.gid_index;
   if (config.local_lane == 0) {
     const char* role = config.connect_to_servers ? "client" : "server";
-    LOG(INFO) << "component=rdma_verbs event=fabric_ready"
-              << " role=" << role << " node_id=" << config.global_id
-              << " device=" << config.device_name
-              << " port=" << static_cast<int>(config.port_num)
-              << " gid_index=" << config.gid_index
-              << " gid=" << GidString(opened.gid) << " link_layer="
-              << (opened.port_attr.link_layer == IBV_LINK_LAYER_INFINIBAND
-                      ? "ib"
-                      : "ethernet")
-              << " active_mtu_bytes="
-              << (128 << static_cast<int>(opened.port_attr.active_mtu));
+    LOG(INFO)
+        << "component=rdma_verbs event=fabric_ready" << " role=" << role
+        << " node_id=" << config.global_id << " device=" << config.device_name
+        << " port=" << static_cast<int>(config.port_num)
+        << " gid_index=" << config.gid_index << " gid=" << GidString(opened.gid)
+        << " link_layer="
+        << (opened.port_attr.link_layer == IBV_LINK_LAYER_INFINIBAND
+                ? "ib"
+                : "ethernet")
+        << " active_mtu_bytes="
+        << (128 << static_cast<int>(opened.port_attr.active_mtu));
   }
   impl_->pd = ibv_alloc_pd(impl_->context);
   if (impl_->pd == nullptr) {
@@ -457,8 +457,8 @@ RawVerbsNodeMeta RawVerbsTransport::LocalMeta() const {
   meta.protocol_version     = impl_->config.protocol_version;
   meta.node_role            = static_cast<std::uint8_t>(
       impl_->config.global_id < impl_->config.num_servers
-                     ? recstore::RdmaNodeRole::kServer
-                     : recstore::RdmaNodeRole::kClient);
+          ? recstore::RdmaNodeRole::kServer
+          : recstore::RdmaNodeRole::kClient);
   meta.port_num   = impl_->config.port_num;
   meta.link_layer = static_cast<std::uint8_t>(
       port_attr.link_layer == IBV_LINK_LAYER_INFINIBAND

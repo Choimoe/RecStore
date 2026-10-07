@@ -64,17 +64,17 @@ TEST(RdmaRcProtocolTest, PutPayloadAcceptsConstArraySlice) {
 
 TEST(RdmaRcProtocolTest, FlatUpdatePayloadMatchesRowPayload) {
   std::vector<std::uint64_t> keys = {10, 20};
-  std::vector<float> value_flat = {1.0f, 2.0f, 3.0f, 4.0f};
+  std::vector<float> value_flat   = {1.0f, 2.0f, 3.0f, 4.0f};
   base::RecTensor values(value_flat.data(), {2, 2});
-  const std::vector<float> flat_values   = {1.0f, 2.0f, 3.0f, 4.0f};
+  const std::vector<float> flat_values = {1.0f, 2.0f, 3.0f, 4.0f};
   std::string row_payload;
   std::string flat_payload;
   std::string error;
 
-  ASSERT_GT(petps::UpdatePayloadBytes(
-                base::ConstArray<std::uint64_t>(keys), values,
-                &row_payload, &error),
-            0u)
+  ASSERT_GT(
+      petps::UpdatePayloadBytes(
+          base::ConstArray<std::uint64_t>(keys), values, &row_payload, &error),
+      0u)
       << error;
   ASSERT_GT(petps::UpdatePayloadBytesFlat(
                 base::ConstArray<std::uint64_t>(keys),

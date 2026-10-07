@@ -62,12 +62,12 @@ public:
       const std::vector<shard_routing::ShardChunk>& chunks,
       std::size_t max_in_flight);
   int WaitUpdateParameterFlat(std::uint64_t update_id);
-  std::uint64_t
-  SubmitPrefetch(const std::vector<shard_routing::ShardChunk>& chunks,
-                 std::size_t key_count,
-                 std::int64_t embedding_dim,
-                 int value_size,
-                 std::size_t max_in_flight);
+  std::uint64_t SubmitPrefetch(
+      const std::vector<shard_routing::ShardChunk>& chunks,
+      std::size_t key_count,
+      std::int64_t embedding_dim,
+      int value_size,
+      std::size_t max_in_flight);
   bool IsPrefetchDone(std::uint64_t prefetch_id);
   void WaitForPrefetch(std::uint64_t prefetch_id);
   std::int64_t PrefetchEmbeddingDim(std::uint64_t prefetch_id) const;
