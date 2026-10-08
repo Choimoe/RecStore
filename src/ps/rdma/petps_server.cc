@@ -30,6 +30,7 @@
 #include "ps/rdma/rdma_common.h"
 #include "ps/rdma/rdma_deployment.h"
 #include "ps/base/cache_ps_impl.h"
+#include "ps/base/config.h"
 #include "ps/rdma/control_plane.h"
 #include "ps/rdma/rc_options.h"
 #include "ps/rdma/rc_transport.h"
@@ -1296,6 +1297,12 @@ int main(int argc, char* argv[]) {
   folly::init(&argc, &argv, init_options);
   std::signal(SIGTERM, HandleStopSignal);
   std::signal(SIGINT, HandleStopSignal);
+
+  // petps_cluster_runner forwards the request sizing flags to both the server
+  // and the client. The server derives these sizes from the JSON config and
+  // per-request metadata, so accept the flags for compatibility only.
+  VLOG(1) << "petps_server compatibility flags: value_size=" << FLAGS_value_size
+          << ", max_kv_num_per_request=" << FLAGS_max_kv_num_per_request;
 
   if (ShouldTraceRdmaGet()) {
     std::cerr << "component=rdma_get_trace side=server event=enabled interval="
