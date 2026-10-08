@@ -42,6 +42,8 @@ if(TARGET recstore_torch_ops)
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/test/framework/pytorch
     )
 
+    set_tests_properties(pytorch_client_test PROPERTIES LABELS "python")
+
     add_test(
         NAME pytorch_client_test_rdma_basic
         COMMAND ${CMAKE_COMMAND} -E env
@@ -107,6 +109,7 @@ if(TARGET recstore_torch_ops)
 
     set_tests_properties(dist_emb_unittest PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/pytorch
+        LABELS "python"
     )
 else()
     message(STATUS "Skipping dist_emb_unittest because recstore_torch_ops is unavailable")
@@ -119,6 +122,7 @@ add_test(
 
 set_tests_properties(ebc_precision_test PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/pytorch
+    LABELS "python"
 )
 
 add_test(
@@ -128,4 +132,5 @@ add_test(
 
 set_tests_properties(ebc_multiprocess_precision_test PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/src/python/pytorch
+    LABELS "python"
 )

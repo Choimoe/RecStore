@@ -43,7 +43,10 @@ add_python_unittest(
     test_ps_server_helpers_py
     src/test/scripts/test_ps_server_helpers.py
 )
+set_tests_properties(test_ps_server_helpers_py PROPERTIES LABELS "python")
+
 add_python_unittest(
     test_ps_server_runner_py
     src/test/scripts/test_ps_server_runner.py
 )
+set_tests_properties(test_ps_server_runner_py PROPERTIES LABELS "python")

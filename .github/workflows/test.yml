@@ -229,19 +229,41 @@ jobs:
             fi
           '
 
-      - name: Run ctest
+      - name: Resolve ctest exclusions
+        run: |
+          set -euo pipefail
+          # Docker default seccomp in GitHub Actions blocks io_uring syscalls,
+          # so io_uring-dependent tests are always excluded. RDMA integration
+          # tests additionally need memcached; without it they are excluded too
+          # (the ones with SKIP_RETURN_CODE would self-skip regardless).
+          CTEST_EXCLUDE_REGEX=$(docker exec "${TEST_CONTAINER}" bash -lc '
+            if command -v memcached >/dev/null 2>&1; then
+              echo "test_io_backend"
+            else
+              echo "memcached not found; skipping RDMA integration tests." >&2
+              echo "test_io_backend|pytorch_client_test_rdma_basic|pytorch_client_test_rdma|pytorch_client_test_rdma_auto"
+            fi
+          ')
+          echo "ctest exclude regex: ${CTEST_EXCLUDE_REGEX}"
+          echo "CTEST_EXCLUDE_REGEX=${CTEST_EXCLUDE_REGEX}" >> "${GITHUB_ENV}"
+
+      # ctest runs in three lanes (steps, not jobs) so a failure is visible
+      # from the step name alone: which layer broke. All lanes share the
+      # container build above and append to the same log, so the overall set
+      # of executed tests is identical to the previous single ctest run.
+      # Lanes use continue-on-error so every lane runs even when one fails;
+      # the final "Check ctest results" step fails the job.
+
+      - name: Run ctest (unit)
+        id: ctest_unit
+        continue-on-error: true
         run: |
           set -euo pipefail
           docker exec \
             -e PUBLISH_COVERAGE="${PUBLISH_COVERAGE}" \
+            -e CTEST_EXCLUDE_REGEX="${CTEST_EXCLUDE_REGEX}" \
             "${TEST_CONTAINER}" bash -lc '
             set -euo pipefail
-
-            CTEST_EXCLUDE_REGEX="test_io_backend"
-            if ! command -v memcached >/dev/null 2>&1; then
-              echo "memcached not found; skipping RDMA integration tests."
-              CTEST_EXCLUDE_REGEX="${CTEST_EXCLUDE_REGEX}|pytorch_client_test_rdma_basic|pytorch_client_test_rdma|pytorch_client_test_rdma_auto"
-            fi
 
             BUILD_DIR=build
             if [ "${PUBLISH_COVERAGE}" = "true" ]; then
@@ -250,14 +272,107 @@ jobs:
             fi
 
             cd "/workspace/${BUILD_DIR}"
-            # Docker default seccomp in GitHub Actions blocks io_uring syscalls.
-            # Skip io_uring-dependent tests in this containerized lane.
+            : > /workspace/runner/logs/ctest.log
+            # Banner lets the annotation script attribute each failed
+            # test to its lane (same format as tools/ci/reproduce.sh).
+            echo "===== ctest lane: unit =====" | tee -a /workspace/runner/logs/ctest.log
             ctest --output-on-failure --progress \
               --timeout 300 \
               -E "${CTEST_EXCLUDE_REGEX}" \
-              2>&1 | tee /workspace/runner/logs/ctest.log
+              -LE "python|rdma_integration" \
+              2>&1 | tee -a /workspace/runner/logs/ctest.log
             exit ${PIPESTATUS[0]}
           '
+
+      - name: Run ctest (python)
+        id: ctest_python
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          docker exec \
+            -e PUBLISH_COVERAGE="${PUBLISH_COVERAGE}" \
+            -e CTEST_EXCLUDE_REGEX="${CTEST_EXCLUDE_REGEX}" \
+            "${TEST_CONTAINER}" bash -lc '
+            set -euo pipefail
+
+            BUILD_DIR=build
+            if [ "${PUBLISH_COVERAGE}" = "true" ]; then
+              BUILD_DIR=build_coverage
+              export PS_SERVER_PATH="/workspace/${BUILD_DIR}/bin/ps_server"
+            fi
+
+            cd "/workspace/${BUILD_DIR}"
+            # Banner lets the annotation script attribute each failed
+            # test to its lane (same format as tools/ci/reproduce.sh).
+            echo "===== ctest lane: python =====" | tee -a /workspace/runner/logs/ctest.log
+            ctest --output-on-failure --progress \
+              --timeout 300 \
+              -E "${CTEST_EXCLUDE_REGEX}" \
+              -L "python" \
+              2>&1 | tee -a /workspace/runner/logs/ctest.log
+            exit ${PIPESTATUS[0]}
+          '
+
+      - name: Run ctest (rdma integration)
+        id: ctest_rdma
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          docker exec \
+            -e PUBLISH_COVERAGE="${PUBLISH_COVERAGE}" \
+            -e CTEST_EXCLUDE_REGEX="${CTEST_EXCLUDE_REGEX}" \
+            "${TEST_CONTAINER}" bash -lc '
+            set -euo pipefail
+
+            BUILD_DIR=build
+            if [ "${PUBLISH_COVERAGE}" = "true" ]; then
+              BUILD_DIR=build_coverage
+              export PS_SERVER_PATH="/workspace/${BUILD_DIR}/bin/ps_server"
+            fi
+
+            cd "/workspace/${BUILD_DIR}"
+            # These tests self-skip (exit 77) when RDMA hardware is absent.
+            # Banner lets the annotation script attribute each failed
+            # test to its lane (same format as tools/ci/reproduce.sh).
+            echo "===== ctest lane: rdma_integration =====" | tee -a /workspace/runner/logs/ctest.log
+            ctest --output-on-failure --progress \
+              --timeout 300 \
+              -E "${CTEST_EXCLUDE_REGEX}" \
+              -L "rdma_integration" \
+              2>&1 | tee -a /workspace/runner/logs/ctest.log
+            exit ${PIPESTATUS[0]}
+          '
+
+      - name: Emit failed-test annotations
+        if: always()
+        run: |
+          set -euo pipefail
+          # ::error commands printed by docker exec are picked up by the
+          # runner and surface on the run/PR page without downloading logs.
+          docker exec "${TEST_CONTAINER}" bash -lc '
+            python3 /workspace/tools/ci/ctest_annotations.py /workspace/runner/logs/ctest.log
+          '
+
+      - name: Check ctest results
+        if: always()
+        run: |
+          set -euo pipefail
+          failed=0
+          if [ "${{ steps.ctest_unit.outcome }}" = "failure" ]; then
+            echo "::error::ctest unit lane failed"
+            failed=1
+          fi
+          if [ "${{ steps.ctest_python.outcome }}" = "failure" ]; then
+            echo "::error::ctest python lane failed"
+            failed=1
+          fi
+          if [ "${{ steps.ctest_rdma.outcome }}" = "failure" ]; then
+            echo "::error::ctest rdma integration lane failed"
+            failed=1
+          fi
+          if [ "${failed}" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Generate and publish coverage
         if: env.PUBLISH_COVERAGE == 'true'
