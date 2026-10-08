@@ -156,6 +156,7 @@ def initialize_backend_from_standard_ebc(
         config.name,
         int(config.num_embeddings),
         int(config.embedding_dim),
+        0,
     )
     if tag is False or (not isinstance(tag, bool) and int(tag) < 0):
         print(f"Warning: init_embedding_table failed for '{config.name}'")

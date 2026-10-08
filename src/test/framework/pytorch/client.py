@@ -73,11 +73,14 @@ class RecstoreClient:
         if not isinstance(table_id, int) or table_id < 0:
             raise ValueError("table_id must be a non-negative integer")
 
-        return bool(
+        # The op returns the non-negative table tag on success (0 is a valid
+        # tag), so use the sign instead of truthiness to detect failure.
+        tag = int(
             self.ops.init_embedding_table(
                 table_name, num_embeddings, embedding_dim, table_id
             )
         )
+        return tag >= 0
 
     def emb_write(self, keys: torch.Tensor, values: torch.Tensor) -> None:
         if keys.dtype != torch.int64:
