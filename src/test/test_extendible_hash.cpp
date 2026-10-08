@@ -234,3 +234,9 @@ TEST_F(ExtendibleHashTest, HashCollisions) {
     EXPECT_EQ(retrieved, i * 3) << "Failed for key " << i;
   }
 }
+// Demo-only intentional failure to showcase the CI annotations from #245.
+// This branch exists to demonstrate how failed tests appear in annotations;
+// never merge this test.
+TEST_F(ExtendibleHashTest, DemoAnnotationShowcase) {
+  EXPECT_EQ(1, 2) << "intentional demo failure for annotation showcase";
+}

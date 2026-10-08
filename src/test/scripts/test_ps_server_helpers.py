@@ -31,6 +31,12 @@ class TestPSServerHelpers(unittest.TestCase):
             ), mock.patch.object(ps_server_helpers.os, "getcwd", return_value=str(nested)):
                 self.assertEqual(ps_server_helpers.find_config_file(), str(default_config))
 
+    # Demo-only intentional failure to showcase the CI annotations from #245.
+    # This branch exists to demonstrate how failed tests appear in annotations;
+    # never merge this test.
+    def test_demo_annotation_showcase(self):
+        self.assertEqual(1, 2, "intentional demo failure for annotation showcase")
+
     def test_get_rdma_skip_reason_when_infiniband_dir_missing(self):
         with mock.patch.object(ps_server_helpers.os.path, "isdir", return_value=False):
             reason = ps_server_helpers.get_rdma_skip_reason()
