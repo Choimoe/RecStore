@@ -176,7 +176,7 @@
         <td class="linebranch">
         </td>
         <td class="linecount"></td>
-        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;storage/external/hps/raw_rocksdb.h&quot;</span></td>
+        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">"storage/external/hps/raw_rocksdb.h"</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l2" href="#l2">2</a></td>
@@ -218,35 +218,35 @@
         <td class="linebranch">
         </td>
         <td class="linecount"></td>
-        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;rocksdb/db.h&quot;</span></td>
+        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">"rocksdb/db.h"</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l8" href="#l8">8</a></td>
         <td class="linebranch">
         </td>
         <td class="linecount"></td>
-        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;rocksdb/env.h&quot;</span></td>
+        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">"rocksdb/env.h"</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l9" href="#l9">9</a></td>
         <td class="linebranch">
         </td>
         <td class="linecount"></td>
-        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;rocksdb/options.h&quot;</span></td>
+        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">"rocksdb/options.h"</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l10" href="#l10">10</a></td>
         <td class="linebranch">
         </td>
         <td class="linecount"></td>
-        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;rocksdb/slice.h&quot;</span></td>
+        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">"rocksdb/slice.h"</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l11" href="#l11">11</a></td>
         <td class="linebranch">
         </td>
         <td class="linecount"></td>
-        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">&quot;rocksdb/write_batch.h&quot;</span></td>
+        <td class="src "><span class="cp">#include</span><span class="w"> </span><span class="cpf">"rocksdb/write_batch.h"</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l12" href="#l12">12</a></td>
@@ -309,7 +309,7 @@
           </details>
         </td>
         <td class="linecount partialCoveredLine show_partialCoveredLine">16</td>
-        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">out</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">encoded</span><span class="p">),</span><span class="w"> </span><span class="sc">&#39;\0&#39;</span><span class="p">);</span></td>
+        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">out</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">encoded</span><span class="p">),</span><span class="w"> </span><span class="sc">'\0'</span><span class="p">);</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l20" href="#l20">20</a></td>
@@ -372,7 +372,7 @@
         <td class="linebranch">
         </td>
         <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
-        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="n">operation</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s">&quot; failed: &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">status</span><span class="p">.</span><span class="n">ToString</span><span class="p">());</span></td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">(</span><span class="n">operation</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s">" failed: "</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">status</span><span class="p">.</span><span class="n">ToString</span><span class="p">());</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l28" href="#l28">28</a></td>
@@ -456,7 +456,7 @@
         <td class="linebranch">
         </td>
         <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
-        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">invalid_argument</span><span class="p">(</span><span class="s">&quot;RawRocksDBBackend value_size must be &gt; 0&quot;</span><span class="p">);</span></td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">invalid_argument</span><span class="p">(</span><span class="s">"RawRocksDBBackend value_size must be &gt; 0"</span><span class="p">);</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l39" href="#l39">39</a></td>
@@ -542,7 +542,7 @@
         <td class="linebranch">
         </td>
         <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
-        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">runtime_error</span><span class="p">(</span><span class="s">&quot;RocksDB NewMemEnv returned null&quot;</span><span class="p">);</span></td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">runtime_error</span><span class="p">(</span><span class="s">"RocksDB NewMemEnv returned null"</span><span class="p">);</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l47" href="#l47">47</a></td>
@@ -621,7 +621,7 @@
           </details>
         </td>
         <td class="linecount partialCoveredLine show_partialCoveredLine">4</td>
-        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">    </span><span class="n">CheckStatus</span><span class="p">(</span><span class="n">rocksdb</span><span class="o">::</span><span class="n">DB</span><span class="o">::</span><span class="n">Open</span><span class="p">(</span><span class="n">options</span><span class="p">,</span><span class="w"> </span><span class="n">path</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">db</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;RocksDB::Open&quot;</span><span class="p">);</span></td>
+        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">    </span><span class="n">CheckStatus</span><span class="p">(</span><span class="n">rocksdb</span><span class="o">::</span><span class="n">DB</span><span class="o">::</span><span class="n">Open</span><span class="p">(</span><span class="n">options</span><span class="p">,</span><span class="w"> </span><span class="n">path</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">db</span><span class="p">),</span><span class="w"> </span><span class="s">"RocksDB::Open"</span><span class="p">);</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l55" href="#l55">55</a></td>
@@ -758,7 +758,7 @@
           </details>
         </td>
         <td class="linecount partialCoveredLine show_partialCoveredLine">4</td>
-        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">    </span><span class="n">CheckStatus</span><span class="p">(</span><span class="n">db_</span><span class="o">-&gt;</span><span class="n">Write</span><span class="p">(</span><span class="n">write_options_</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">batch</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;RocksDB::WriteBatch&quot;</span><span class="p">);</span></td>
+        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">    </span><span class="n">CheckStatus</span><span class="p">(</span><span class="n">db_</span><span class="o">-&gt;</span><span class="n">Write</span><span class="p">(</span><span class="n">write_options_</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">batch</span><span class="p">),</span><span class="w"> </span><span class="s">"RocksDB::WriteBatch"</span><span class="p">);</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l68" href="#l68">68</a></td>
@@ -1028,7 +1028,7 @@
           </details>
         </td>
         <td class="linecount partialCoveredLine show_partialCoveredLine">6</td>
-        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">      </span><span class="n">CheckStatus</span><span class="p">(</span><span class="n">statuses</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="s">&quot;RocksDB::MultiGet&quot;</span><span class="p">);</span></td>
+        <td class="src  partialCoveredLine show_partialCoveredLine"><span class="w">      </span><span class="n">CheckStatus</span><span class="p">(</span><span class="n">statuses</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="s">"RocksDB::MultiGet"</span><span class="p">);</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l94" href="#l94">94</a></td>
@@ -1049,7 +1049,7 @@
         <td class="linebranch">
         </td>
         <td class="linecount uncoveredLine show_uncoveredLine">&cross;</td>
-        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">runtime_error</span><span class="p">(</span><span class="s">&quot;RocksDB value size mismatch&quot;</span><span class="p">);</span></td>
+        <td class="src  uncoveredLine show_uncoveredLine"><span class="w">        </span><span class="k">throw</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">runtime_error</span><span class="p">(</span><span class="s">"RocksDB value size mismatch"</span><span class="p">);</span></td>
       </tr>
       <tr class="source-line">
         <td class="lineno"><a id="l96" href="#l96">96</a></td>
@@ -1331,7 +1331,7 @@
         <hr class="block-separator"/>
         <footer class="text-center">
           Created using <a href="http://gcovr.com/en/8.6">GCOVR (Version 8.6)</a>
-          at 2026-08-03 10:38:48
+          at 2026-10-08 15:41:53
         </footer>
       </div>
     </div>
