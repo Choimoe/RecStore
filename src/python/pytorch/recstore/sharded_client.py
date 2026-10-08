@@ -338,16 +338,18 @@ class ShardedRecstoreClient:
         return grouped
 
     def init_embedding_table(self, table_name: str, num_embeddings: int, embedding_dim: int) -> bool:
+        # KVClient.init_embedding_table returns the non-negative backend tag on
+        # success (0 is a valid tag), so test the sign instead of truthiness.
         if self._uses_native_distributed_backend():
-            return bool(
-                self._client.init_embedding_table(
-                    table_name, num_embeddings, embedding_dim
-                )
+            tag = self._client.init_embedding_table(
+                table_name, num_embeddings, embedding_dim
             )
+            return int(tag) >= 0
         ok = True
         for server in self._servers:
             self._activate_shard(server.shard)
-            ok = self._client.init_embedding_table(table_name, num_embeddings, embedding_dim) and ok
+            tag = self._client.init_embedding_table(table_name, num_embeddings, embedding_dim)
+            ok = (int(tag) >= 0) and ok
         return ok
 
     def emb_write(self, keys: torch.Tensor, values: torch.Tensor) -> None:
