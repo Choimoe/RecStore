@@ -39,25 +39,26 @@ using ParameterPack           = Pack<ParameterCompressItem>;
 using ParameterCompressor     = FlatItemCompressor<ParameterCompressItem>;
 using ParameterCompressReader = FlatItemCompressReader<ParameterCompressItem>;
 
-inline void CopyCompressItemsToFlat(const ParameterCompressReader* reader,
-                                    float* dst,
-                                    int64_t embedding_dim,
-                                    size_t dst_row_offset = 0) {
+inline void CopyCompressItemsToFlat(
+    const ParameterCompressReader* reader,
+    float* dst,
+    int64_t embedding_dim,
+    size_t dst_row_offset = 0) {
   if (reader == nullptr || dst == nullptr || embedding_dim <= 0) {
     return;
   }
   for (int index = 0; index < reader->item_size(); ++index) {
-    auto item = reader->item(index);
-    float* row =
-        dst + (dst_row_offset + static_cast<size_t>(index)) *
-                  static_cast<size_t>(embedding_dim);
+    auto item  = reader->item(index);
+    float* row = dst + (dst_row_offset + static_cast<size_t>(index)) *
+                           static_cast<size_t>(embedding_dim);
     if (item->dim == 0) {
       std::memset(row, 0, static_cast<size_t>(embedding_dim) * sizeof(float));
       continue;
     }
     const int64_t copy_d =
         std::min<int64_t>(embedding_dim, static_cast<int64_t>(item->dim));
-    std::memcpy(row, item->embedding, static_cast<size_t>(copy_d) * sizeof(float));
+    std::memcpy(
+        row, item->embedding, static_cast<size_t>(copy_d) * sizeof(float));
     if (copy_d < embedding_dim) {
       std::memset(row + copy_d,
                   0,
@@ -66,12 +67,13 @@ inline void CopyCompressItemsToFlat(const ParameterCompressReader* reader,
   }
 }
 
-inline void CompressEmbeddingRows(ParameterCompressor* compressor,
-                                  const uint64_t* keys,
-                                  const float* values,
-                                  size_t n,
-                                  int64_t embedding_dim,
-                                  std::vector<std::string>* blocks = nullptr) {
+inline void CompressEmbeddingRows(
+    ParameterCompressor* compressor,
+    const uint64_t* keys,
+    const float* values,
+    size_t n,
+    int64_t embedding_dim,
+    std::vector<std::string>* blocks = nullptr) {
   for (size_t i = 0; i < n; ++i) {
     ParameterPack pack;
     pack.key      = keys[i];

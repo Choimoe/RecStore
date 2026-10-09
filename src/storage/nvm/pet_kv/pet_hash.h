@@ -537,10 +537,10 @@ public:
     }
 
   RETRY:
-    uint64_t hash_value = Hash(key);
-    auto sign           = Sign(hash_value);
-    size_t step         = ProbeDelta(sign);
-    size_t pos          = hash_value & (chunk_num_ - 1);
+    uint64_t hash_value        = Hash(key);
+    auto sign                  = Sign(hash_value);
+    size_t step                = ProbeDelta(sign);
+    size_t pos                 = hash_value & (chunk_num_ - 1);
     bool touch_migrating_chunk = false;
 
     for (size_t i = 0; i < chunk_num_; ++i) {
@@ -558,12 +558,13 @@ public:
             while (LIKELY(key == val->first)) {
               ValueT expected = val->second;
               ValueT desired  = value;
-              if (__atomic_compare_exchange_n(&val->second,
-                                              &expected,
-                                              desired,
-                                              false,
-                                              __ATOMIC_ACQ_REL,
-                                              __ATOMIC_ACQUIRE)) {
+              if (__atomic_compare_exchange_n(
+                      &val->second,
+                      &expected,
+                      desired,
+                      false,
+                      __ATOMIC_ACQ_REL,
+                      __ATOMIC_ACQUIRE)) {
                 if (old_value_out != nullptr) {
                   *old_value_out = expected;
                 }

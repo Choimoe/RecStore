@@ -104,10 +104,10 @@ void bind_core_by_index(int raw_core_idx) {
   LOG(WARNING) << "bind to core " << cores[core_idx] << " socket="
                << global_socket_id << " requested_core_index=" << raw_core_idx
                << " core_index=" << core_idx;
-  std::cerr << "component=bind_core event=bind"
-            << " socket=" << global_socket_id << " requested_core_index="
-            << raw_core_idx << " core_index=" << core_idx
-            << " cpu=" << cores[core_idx] << std::endl;
+  std::cerr << "component=bind_core event=bind" << " socket="
+            << global_socket_id << " requested_core_index=" << raw_core_idx
+            << " core_index=" << core_idx << " cpu=" << cores[core_idx]
+            << std::endl;
   bind_core(cores[core_idx]);
 }
 

@@ -33,8 +33,8 @@ enum class PSCommand {
   LOAD_CHECKPOINT,
 };
 
-inline bool IsFloatEmbeddingValues(const base::RecTensor& values,
-                                   int64_t num_keys) {
+inline bool
+IsFloatEmbeddingValues(const base::RecTensor& values, int64_t num_keys) {
   if (values.dtype() != base::DataType::FLOAT32) {
     return false;
   }
@@ -48,8 +48,8 @@ inline bool IsFloatEmbeddingValues(const base::RecTensor& values,
 inline bool EnsureEmbeddingOutput(base::RecTensor& values, int64_t num_keys) {
   if (values.dim() == 2 && values.shape(0) == 0 && values.shape(1) > 0 &&
       num_keys >= 0) {
-    values = base::RecTensor({num_keys, values.shape(1)},
-                             base::DataType::FLOAT32);
+    values =
+        base::RecTensor({num_keys, values.shape(1)}, base::DataType::FLOAT32);
     return num_keys == 0 || values.data() != nullptr;
   }
   return IsFloatEmbeddingValues(values, num_keys);
@@ -92,7 +92,7 @@ public:
                            base::RecTensor& values) = 0;
 
   virtual int PutParameter(const base::ConstArray<uint64_t>& keys,
-                           const base::RecTensor& values) = 0;
+                           const base::RecTensor& values)   = 0;
   virtual int UpdateParameter(const std::string& table_name,
                               const base::ConstArray<uint64_t>& keys,
                               const base::RecTensor& grads) = 0;
@@ -121,8 +121,8 @@ public:
   PrefetchParameter(const base::ConstArray<uint64_t>& keys) = 0;
   virtual bool IsPrefetchDone(uint64_t prefetch_id)         = 0;
   virtual void WaitForPrefetch(uint64_t prefetch_id)        = 0;
-  virtual bool GetPrefetchResult(uint64_t prefetch_id,
-                                 base::RecTensor& values)   = 0;
+  virtual bool
+  GetPrefetchResult(uint64_t prefetch_id, base::RecTensor& values) = 0;
 
   // Asynchronous update. Backends without a native async path fail at
   // submit time so callers never treat handle 0 as in-flight work.

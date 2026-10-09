@@ -38,7 +38,7 @@ TEST(RecTensor, CopyIsShallowView) {
 
 TEST(RecTensor, MoveTransfersOwnership) {
   base::RecTensor owned({2, 2}, base::DataType::FLOAT32);
-  void* ptr = owned.data();
+  void* ptr                 = owned.data();
   owned.data_as<float>()[1] = 4.0f;
 
   base::RecTensor moved(std::move(owned));

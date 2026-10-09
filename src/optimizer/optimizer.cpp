@@ -31,7 +31,8 @@ void ValidateFlatUpdateArgs(const base::ConstArray<uint64_t>& keys,
   }
 }
 
-void CheckUpdateKeyTag(uint64_t key, TAG_TYPE expected, const std::string& table) {
+void CheckUpdateKeyTag(
+    uint64_t key, TAG_TYPE expected, const std::string& table) {
   const TAG_TYPE got = ExtractKeyTag(key);
   if (got != expected) {
     throw std::runtime_error(
@@ -57,7 +58,7 @@ int InitOrReuseTensor(
     }
     return static_cast<int>(tag);
   }
-  auto* tensor           = new SparseTensor();
+  auto* tensor             = new SparseTensor();
   std::string mutable_name = name;
   tensor->init(mutable_name, type, tag, shape, base_kv);
   (*tensor_map)[name] = tensor;
@@ -70,12 +71,13 @@ std::unique_ptr<Optimizer> CreateOptimizer(const json& config) {
   if (!config.is_object()) {
     throw std::invalid_argument("cache_ps.optimizer must be an object");
   }
-  const std::string type = config.value("type", "SGD");
+  const std::string type    = config.value("type", "SGD");
   const float learning_rate = config.value("learning_rate", 0.01f);
   if (!std::isfinite(learning_rate) || learning_rate < 0.0f) {
     throw std::invalid_argument("cache_ps.optimizer.learning_rate is invalid");
   }
-  if (type == "SGD") return std::make_unique<SGD>(learning_rate);
+  if (type == "SGD")
+    return std::make_unique<SGD>(learning_rate);
   if (type == "RowWiseAdagrad") {
     const float epsilon = config.value("epsilon", 1e-10f);
     if (!std::isfinite(epsilon) || epsilon < 0.0f) {
@@ -84,15 +86,16 @@ std::unique_ptr<Optimizer> CreateOptimizer(const json& config) {
     return std::make_unique<RowWiseAdaGrad>(learning_rate, epsilon);
   }
   if (type == "AdamW") {
-    const float beta1 = config.value("beta1", 0.9f);
-    const float beta2 = config.value("beta2", 0.98f);
-    const float epsilon = config.value("epsilon", 1e-8f);
+    const float beta1        = config.value("beta1", 0.9f);
+    const float beta2        = config.value("beta2", 0.98f);
+    const float epsilon      = config.value("epsilon", 1e-8f);
     const float weight_decay = config.value("weight_decay", 0.0f);
     if (!std::isfinite(beta1) || beta1 < 0.0f || beta1 >= 1.0f ||
         !std::isfinite(beta2) || beta2 < 0.0f || beta2 >= 1.0f ||
         !std::isfinite(epsilon) || epsilon < 0.0f ||
         !std::isfinite(weight_decay) || weight_decay < 0.0f) {
-      throw std::invalid_argument("cache_ps.optimizer AdamW parameters are invalid");
+      throw std::invalid_argument(
+          "cache_ps.optimizer AdamW parameters are invalid");
     }
     return std::make_unique<AdamW>(
         learning_rate, beta1, beta2, epsilon, weight_decay);
@@ -368,7 +371,7 @@ int RowWiseAdaGrad::Init(const std::vector<std::string> table_name,
   int param_tag = -1;
   const int k   = TensorsPerTable();
   for (const auto& name : table_name) {
-    std::vector<uint64_t> shape     = {config.num_embeddings, config.embedding_dim};
+    std::vector<uint64_t> shape = {config.num_embeddings, config.embedding_dim};
     std::vector<uint64_t> acc_shape = {config.num_embeddings, 1};
     param_tag                       = InitOrReuseTensor(
         &tensor_map_,

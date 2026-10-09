@@ -64,12 +64,13 @@ int Get(void* handle,
         size_t error_size) {
   return Guard(error, error_size, [&] {
     auto& store = *static_cast<TestStore*>(handle);
-    if (value == nullptr || found == nullptr || value_size != store.value_size) {
+    if (value == nullptr || found == nullptr ||
+        value_size != store.value_size) {
       throw std::invalid_argument("invalid get arguments");
     }
     std::lock_guard<std::mutex> lock(store.mutex);
     const auto it = store.rows.find(key);
-    *found = it != store.rows.end();
+    *found        = it != store.rows.end();
     if (*found) {
       std::memcpy(value, it->second.data(), value_size);
     }
@@ -117,7 +118,8 @@ int BatchGet(void* handle,
              size_t error_size) {
   return Guard(error, error_size, [&] {
     auto& store = *static_cast<TestStore*>(handle);
-    if ((count != 0 && (keys == nullptr || values == nullptr || found == nullptr)) ||
+    if ((count != 0 &&
+         (keys == nullptr || values == nullptr || found == nullptr)) ||
         value_size != store.value_size) {
       throw std::invalid_argument("invalid batch_get arguments");
     }
@@ -125,7 +127,7 @@ int BatchGet(void* handle,
     auto* output = static_cast<char*>(values);
     for (size_t i = 0; i < count; ++i) {
       const auto it = store.rows.find(keys[i]);
-      found[i] = it != store.rows.end();
+      found[i]      = it != store.rows.end();
       if (found[i]) {
         std::memcpy(output + i * value_size, it->second.data(), value_size);
       }
@@ -176,7 +178,7 @@ const DynamicKVPluginApiV1 kApi = {
 
 } // namespace
 
-extern "C" __attribute__((visibility("default")))
-const DynamicKVPluginApiV1* dynamic_kv_plugin_api_v1() {
+extern "C" __attribute__((visibility("default"))) const DynamicKVPluginApiV1*
+dynamic_kv_plugin_api_v1() {
   return &kApi;
 }

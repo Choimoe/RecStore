@@ -44,12 +44,12 @@ void ValidateFloatAligned(size_t value_size, const char* operation) {
   }
 }
 
-std::runtime_error PluginError(const char* operation,
-                               const std::array<char, kErrorBufferSize>& error) {
-  const std::string detail = error[0] == '\0' ? "unknown provider error"
-                                               : std::string(error.data());
-  return std::runtime_error(std::string("KVEngineDETable ") + operation +
-                            " failed: " + detail);
+std::runtime_error PluginError(
+    const char* operation, const std::array<char, kErrorBufferSize>& error) {
+  const std::string detail =
+      error[0] == '\0' ? "unknown provider error" : std::string(error.data());
+  return std::runtime_error(
+      std::string("KVEngineDETable ") + operation + " failed: " + detail);
 }
 
 bool HasRequiredFunctions(const DynamicKVPluginApiV1& api) {
@@ -79,27 +79,27 @@ public:
 
     library_ = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (library_ == nullptr) {
-      throw std::runtime_error("KVEngineDETable failed to load provider: " +
-                               std::string(dlerror()));
+      throw std::runtime_error(
+          "KVEngineDETable failed to load provider: " + std::string(dlerror()));
     }
 
     dlerror();
-    auto entry = reinterpret_cast<
-        recstore::storage::plugin::GetDynamicKVPluginApiV1>(
-        dlsym(library_,
-              recstore::storage::plugin::kDynamicKVPluginEntryPoint));
+    auto entry =
+        reinterpret_cast< recstore::storage::plugin::GetDynamicKVPluginApiV1>(
+            dlsym(library_,
+                  recstore::storage::plugin::kDynamicKVPluginEntryPoint));
     const char* symbol_error = dlerror();
     if (symbol_error != nullptr || entry == nullptr) {
       CloseLibrary();
       throw std::runtime_error(
           "KVEngineDETable provider entry point is unavailable: " +
-          std::string(symbol_error == nullptr ? "unknown error" : symbol_error));
+          std::string(
+              symbol_error == nullptr ? "unknown error" : symbol_error));
     }
 
     api_ = entry();
     if (api_ == nullptr ||
-        api_->abi_version !=
-            recstore::storage::plugin::kDynamicKVPluginAbiV1 ||
+        api_->abi_version != recstore::storage::plugin::kDynamicKVPluginAbiV1 ||
         api_->struct_size < sizeof(DynamicKVPluginApiV1) ||
         !HasRequiredFunctions(*api_)) {
       CloseLibrary();
@@ -113,7 +113,8 @@ public:
         value_size_,
         plugin.value("block_size", uint64_t{10240})};
     std::array<char, kErrorBufferSize> error{};
-    if (api_->create(&plugin_config, &handle_, error.data(), error.size()) != 0 ||
+    if (api_->create(&plugin_config, &handle_, error.data(), error.size()) !=
+            0 ||
         handle_ == nullptr) {
       const auto exception = PluginError("create", error);
       if (handle_ != nullptr) {
@@ -155,16 +156,13 @@ public:
     (void)tid;
     uint8_t found = 0;
     std::array<char, kErrorBufferSize> error{};
-    if (api_->exists(
-            handle_, key, &found, error.data(), error.size()) != 0) {
+    if (api_->exists(handle_, key, &found, error.data(), error.size()) != 0) {
       throw PluginError("exists", error);
     }
     return found != 0;
   }
 
-  void Put(uint64_t key,
-           const std::string_view& value,
-           unsigned tid) override {
+  void Put(uint64_t key, const std::string_view& value, unsigned tid) override {
     (void)tid;
     if (value.size() != value_size_) {
       throw std::invalid_argument("KVEngineDETable requires fixed-size Put");
@@ -192,7 +190,8 @@ public:
     const int floats_per_row = static_cast<int>(value_size_ / sizeof(float));
     for (int i = 0; i < keys.Size(); ++i) {
       if ((*values)[i].Size() != floats_per_row) {
-        throw std::invalid_argument("KVEngineDETable::BatchPut row size mismatch");
+        throw std::invalid_argument(
+            "KVEngineDETable::BatchPut row size mismatch");
       }
       std::memcpy(flat.data() + static_cast<size_t>(i) * value_size_,
                   (*values)[i].Data(),
@@ -240,16 +239,16 @@ public:
     if (values == nullptr || num_rows != keys.Size() || num_rows < 0 ||
         embedding_dim <= 0 ||
         static_cast<size_t>(embedding_dim) * sizeof(float) != value_size_) {
-      throw std::invalid_argument("KVEngineDETable::BatchGetFlat shape mismatch");
+      throw std::invalid_argument(
+          "KVEngineDETable::BatchGetFlat shape mismatch");
     }
     std::vector<uint8_t> found(keys.Size(), 0);
     BatchGetRaw(keys, values, found.data());
     uint64_t missing = 0;
     for (int i = 0; i < keys.Size(); ++i) {
       if (!found[i]) {
-        std::memset(values + static_cast<size_t>(i) * embedding_dim,
-                    0,
-                    value_size_);
+        std::memset(
+            values + static_cast<size_t>(i) * embedding_dim, 0, value_size_);
         ++missing;
       }
     }
@@ -274,31 +273,32 @@ public:
   }
 
 private:
-  void BatchGetRaw(base::ConstArray<uint64_t> keys,
-                   void* values,
-                   uint8_t* found) {
+  void
+  BatchGetRaw(base::ConstArray<uint64_t> keys, void* values, uint8_t* found) {
     std::array<char, kErrorBufferSize> error{};
-    if (api_->batch_get(handle_,
-                        keys.Data(),
-                        keys.Size(),
-                        values,
-                        value_size_,
-                        found,
-                        error.data(),
-                        error.size()) != 0) {
+    if (api_->batch_get(
+            handle_,
+            keys.Data(),
+            keys.Size(),
+            values,
+            value_size_,
+            found,
+            error.data(),
+            error.size()) != 0) {
       throw PluginError("batch_get", error);
     }
   }
 
   void BatchPutRaw(base::ConstArray<uint64_t> keys, const void* values) {
     std::array<char, kErrorBufferSize> error{};
-    if (api_->batch_put(handle_,
-                        keys.Data(),
-                        keys.Size(),
-                        values,
-                        value_size_,
-                        error.data(),
-                        error.size()) != 0) {
+    if (api_->batch_put(
+            handle_,
+            keys.Data(),
+            keys.Size(),
+            values,
+            value_size_,
+            error.data(),
+            error.size()) != 0) {
       throw PluginError("batch_put", error);
     }
   }
@@ -310,10 +310,10 @@ private:
     }
   }
 
-  size_t value_size_ = 0;
-  void* library_ = nullptr;
+  size_t value_size_               = 0;
+  void* library_                   = nullptr;
   const DynamicKVPluginApiV1* api_ = nullptr;
-  void* handle_ = nullptr;
+  void* handle_                    = nullptr;
 };
 
 extern "C" void RecStoreForceLinkDETableEngine() {}

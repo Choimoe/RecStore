@@ -56,9 +56,9 @@ public:
     CHECK_LE(args_.thread_count_, kMaxThread);
     const int num_servers = XPostoffice::GetInstance()->NumServers();
     for (int _ = 0; _ < args_.thread_count_; _++) {
-      nlohmann::json config      = nlohmann::json::object();
+      nlohmann::json config = nlohmann::json::object();
       config["client"] = {{"host", "127.0.0.1"}, {"port", 1234}, {"shard", 0}};
-      nlohmann::json servers     = nlohmann::json::array();
+      nlohmann::json servers = nlohmann::json::array();
       for (int shard = 0; shard < num_servers; ++shard) {
         servers.push_back(
             {{"host", "127.0.0.1"}, {"port", 1234}, {"shard", shard}});
@@ -68,7 +68,8 @@ public:
           {"hash_method", "city_hash"},
           {"servers", servers},
       };
-      clients.emplace_back(std::make_unique<recstore::RDMAPSClientAdapter>(config));
+      clients.emplace_back(
+          std::make_unique<recstore::RDMAPSClientAdapter>(config));
     }
     PetDatasetReader* dataset_reader = nullptr;
     if (args_.dataset_ == "dataset") {
@@ -185,8 +186,8 @@ public:
   }
 
 private:
-  void
-  clientThreadLoop(int tid, SampleReader* sample, recstore::RDMAPSClientAdapter* client) {
+  void clientThreadLoop(
+      int tid, SampleReader* sample, recstore::RDMAPSClientAdapter* client) {
     base::bind_core(1);
     recstore::RdmaRawAccess raw(client);
     const int emb_dim = args_.value_size_ / sizeof(float);
@@ -195,7 +196,8 @@ private:
     std::vector<std::vector<float>> recv_buffers;
     for (int i = 0; i < args_.async_req_num_; i++) {
       recv_buffers.emplace_back(
-          args_.batch_read_count_ * static_cast<std::size_t>(emb_dim) + 1, 0.0f);
+          args_.batch_read_count_ * static_cast<std::size_t>(emb_dim) + 1,
+          0.0f);
     }
 
     std::vector<int> running_rpc_ids(args_.async_req_num_, -1);
@@ -223,9 +225,9 @@ private:
           if (base::Random::rand32(100) <
               static_cast<uint32_t>(args_.read_ratio_)) {
             // read request
-            isPullRequest[req_i] = true;
-            running_rpc_ids[req_i] =
-                raw.SubmitGetParameter(keys.ToConstArray(), values, true, req_i, emb_dim);
+            isPullRequest[req_i]   = true;
+            running_rpc_ids[req_i] = raw.SubmitGetParameter(
+                keys.ToConstArray(), values, true, req_i, emb_dim);
             if (req_i == 0)
               client_get_timer.start();
           } else {
@@ -254,7 +256,7 @@ private:
             base::ConstArray<uint64_t> keys(
                 &client_keys[req_i * args_.batch_read_count_],
                 args_.batch_read_count_);
-            int emb_dim2  = args_.value_size_ / sizeof(float);
+            int emb_dim2   = args_.value_size_ / sizeof(float);
             float* values2 = recv_buffers[req_i].data();
             CheckEmbDebug(emb_dim2, keys, values2);
             RECSTORE_LOG_EVERY_MS(ERROR, 2000)

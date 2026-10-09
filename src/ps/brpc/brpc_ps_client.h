@@ -98,8 +98,8 @@ public:
   uint64_t PrefetchParameter(const base::ConstArray<uint64_t>& keys) override;
   bool IsPrefetchDone(uint64_t prefetch_id) override;
   void WaitForPrefetch(uint64_t prefetch_id) override;
-  bool GetPrefetchResult(uint64_t prefetch_id,
-                         base::RecTensor& values) override;
+  bool
+  GetPrefetchResult(uint64_t prefetch_id, base::RecTensor& values) override;
 
 protected:
   bool Initialize();

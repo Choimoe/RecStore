@@ -104,7 +104,7 @@ public:
 
   struct Config {
     Backend backend = Backend::kAnonymousDram;
-    int numa_id    = 0;
+    int numa_id     = 0;
   };
 
   static Config& GetConfig() {
@@ -249,7 +249,7 @@ public:
       const std::string& medium, const std::string& filename, int64 size);
 
   virtual bool Initialize(const json& config) = 0;
-  virtual void Clear()                       = 0;
+  virtual void Clear()                        = 0;
   char* Data() const { return data_; }
   int64 Size() const { return size_; }
   const std::string& filename() const { return filename_; }

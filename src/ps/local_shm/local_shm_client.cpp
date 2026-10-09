@@ -140,21 +140,19 @@ int LocalShmPSClient::GetParameter(const base::ConstArray<uint64_t>& keys,
     return 0;
   }
   const int64_t D = values.shape(1);
-  float* out = values.data_as<float>();
+  float* out      = values.data_as<float>();
   const std::size_t per_key =
       sizeof(uint64_t) + sizeof(float) * static_cast<std::size_t>(D);
   const std::size_t max_keys = region_.slot_buffer_bytes() / per_key;
   if (max_keys == 0) {
     return -1;
   }
-  for (int64_t start = 0; start < n;
-       start += static_cast<int64_t>(max_keys)) {
+  for (int64_t start = 0; start < n; start += static_cast<int64_t>(max_keys)) {
     const int64_t chunk =
         std::min<int64_t>(static_cast<int64_t>(max_keys), n - start);
-    base::ConstArray<uint64_t> chunk_keys(keys.Data() + start,
-                                          static_cast<int>(chunk));
-    if (this->GetParameterFlat(
-            chunk_keys, out + start * D, chunk, D) != 0) {
+    base::ConstArray<uint64_t> chunk_keys(
+        keys.Data() + start, static_cast<int>(chunk));
+    if (this->GetParameterFlat(chunk_keys, out + start * D, chunk, D) != 0) {
       return -1;
     }
   }
@@ -186,10 +184,9 @@ int LocalShmPSClient::GetParameterFlat(
   if (values == nullptr) {
     LOG(ERROR) << "LocalShmPSClient::GetParameter invalid_state"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " key_count=" << num_rows
-               << " embedding_dim=" << embedding_dim;
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " key_count="
+               << num_rows << " embedding_dim=" << embedding_dim;
     return -1;
   }
   LocalShmFlatGetHandle handle;
@@ -216,35 +213,31 @@ int LocalShmPSClient::SubmitGetParameterFlat(
   if (handle == nullptr) {
     LOG(ERROR) << "LocalShmPSClient::SubmitGetParameterFlat null_handle"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_
+               << " backend=local_shm" << " region_name=" << region_name_
                << " ready_queue_id=" << ready_queue_id_;
     return -1;
   }
   if (!IsFlatGetHandleClear(*handle)) {
     LOG(ERROR) << "LocalShmPSClient::SubmitGetParameterFlat handle_not_clear"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " slot_id=" << handle->slot_id
-               << " request_id=" << handle->request_id
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " slot_id="
+               << handle->slot_id << " request_id=" << handle->request_id
                << " output_bytes=" << handle->output_bytes;
     return -1;
   }
   if (!region_.IsOpen()) {
     LOG(ERROR) << "LocalShmPSClient::SubmitGetParameterFlat invalid_state"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " key_count=" << num_rows
-               << " embedding_dim=" << embedding_dim;
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " key_count="
+               << num_rows << " embedding_dim=" << embedding_dim;
     return -1;
   }
   if (num_rows < 0 || keys.Size() != static_cast<size_t>(num_rows)) {
     LOG(ERROR) << "LocalShmPSClient::SubmitGetParameterFlat invalid_row_count"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_
+               << " backend=local_shm" << " region_name=" << region_name_
                << " ready_queue_id=" << ready_queue_id_
                << " key_count=" << keys.Size() << " num_rows=" << num_rows
                << " embedding_dim=" << embedding_dim;
@@ -264,10 +257,9 @@ int LocalShmPSClient::SubmitGetParameterFlat(
   if (slot < 0) {
     LOG(ERROR) << "LocalShmPSClient::SubmitGetParameterFlat acquire_slot_failed"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " key_count=" << num_rows
-               << " embedding_dim=" << embedding_dim;
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " key_count="
+               << num_rows << " embedding_dim=" << embedding_dim;
     return -1;
   }
 
@@ -340,8 +332,7 @@ int LocalShmPSClient::WaitGetParameterFlat(LocalShmFlatGetHandle* handle) {
   if (handle == nullptr) {
     LOG(ERROR) << "LocalShmPSClient::WaitGetParameterFlat null_handle"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_
+               << " backend=local_shm" << " region_name=" << region_name_
                << " ready_queue_id=" << ready_queue_id_;
     return -1;
   }
@@ -349,19 +340,17 @@ int LocalShmPSClient::WaitGetParameterFlat(LocalShmFlatGetHandle* handle) {
       handle->request_id == 0) {
     LOG(ERROR) << "LocalShmPSClient::WaitGetParameterFlat invalid_handle"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " slot_id=" << handle->slot_id
-               << " request_id=" << handle->request_id;
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " slot_id="
+               << handle->slot_id << " request_id=" << handle->request_id;
     return -1;
   }
   if (handle->values != nullptr) {
     LOG(ERROR) << "LocalShmPSClient::WaitGetParameterFlat already_waited"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " slot_id=" << handle->slot_id
-               << " request_id=" << handle->request_id;
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " slot_id="
+               << handle->slot_id << " request_id=" << handle->request_id;
     return -1;
   }
 
@@ -377,19 +366,17 @@ int LocalShmPSClient::WaitGetParameterFlat(LocalShmFlatGetHandle* handle) {
   if (!ok) {
     LOG(ERROR) << "LocalShmPSClient::WaitGetParameterFlat wait_failed"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " slot_id=" << handle->slot_id
-               << " request_id=" << handle->request_id;
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " slot_id="
+               << handle->slot_id << " request_id=" << handle->request_id;
     return -1;
   }
   if (header->status_code != static_cast<uint32_t>(LocalStatusCode::kOk)) {
     LOG(ERROR) << "LocalShmPSClient::WaitGetParameterFlat request_failed"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " slot_id=" << handle->slot_id
-               << " request_id=" << handle->request_id
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_ << " slot_id="
+               << handle->slot_id << " request_id=" << handle->request_id
                << " status_code=" << header->status_code;
     return -1;
   }
@@ -427,17 +414,16 @@ void LocalShmPSClient::ReleaseGetParameterFlat(LocalShmFlatGetHandle* handle) {
   if (handle == nullptr) {
     LOG(ERROR) << "LocalShmPSClient::ReleaseGetParameterFlat null_handle"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_
+               << " backend=local_shm" << " region_name=" << region_name_
                << " ready_queue_id=" << ready_queue_id_;
     return;
   }
   if (handle->slot_id == LocalShmFlatGetHandle::kInvalidSlotId) {
     LOG(ERROR) << "LocalShmPSClient::ReleaseGetParameterFlat invalid_handle"
                << " pid=" << static_cast<int>(::getpid())
-               << " backend=local_shm"
-               << " region_name=" << region_name_ << " ready_queue_id="
-               << ready_queue_id_ << " request_id=" << handle->request_id;
+               << " backend=local_shm" << " region_name=" << region_name_
+               << " ready_queue_id=" << ready_queue_id_
+               << " request_id=" << handle->request_id;
     ResetFlatGetHandle(handle);
     return;
   }
@@ -445,8 +431,8 @@ void LocalShmPSClient::ReleaseGetParameterFlat(LocalShmFlatGetHandle* handle) {
   ResetFlatGetHandle(handle);
 }
 
-int LocalShmPSClient::PutParameter(
-    const base::ConstArray<uint64_t>& keys, const base::RecTensor& values) {
+int LocalShmPSClient::PutParameter(const base::ConstArray<uint64_t>& keys,
+                                   const base::RecTensor& values) {
   if (!region_.IsOpen()) {
     return -1;
   }
@@ -457,7 +443,7 @@ int LocalShmPSClient::PutParameter(
   if (n == 0) {
     return 0;
   }
-  const int64_t D = values.shape(1);
+  const int64_t D   = values.shape(1);
   const float* vals = values.data_as<float>();
   const std::size_t per_key =
       sizeof(uint64_t) + sizeof(float) * static_cast<std::size_t>(D);
@@ -465,12 +451,11 @@ int LocalShmPSClient::PutParameter(
   if (max_keys == 0) {
     return -1;
   }
-  for (int64_t start = 0; start < n;
-       start += static_cast<int64_t>(max_keys)) {
+  for (int64_t start = 0; start < n; start += static_cast<int64_t>(max_keys)) {
     const int64_t chunk =
         std::min<int64_t>(static_cast<int64_t>(max_keys), n - start);
-    base::ConstArray<uint64_t> chunk_keys(keys.Data() + start,
-                                          static_cast<int>(chunk));
+    base::ConstArray<uint64_t> chunk_keys(
+        keys.Data() + start, static_cast<int>(chunk));
     if (PutParameterFlat(chunk_keys, vals + start * D, chunk, D) != 0) {
       return -1;
     }
@@ -526,7 +511,8 @@ int LocalShmPSClient::PutParameterFlat(
 
   uint8_t* cursor = payload;
   if (num_rows > 0) {
-    std::memcpy(cursor, keys.Data(),
+    std::memcpy(cursor,
+                keys.Data(),
                 sizeof(uint64_t) * static_cast<std::size_t>(num_rows));
     cursor += sizeof(uint64_t) * static_cast<std::size_t>(num_rows);
     std::memcpy(cursor,
@@ -561,10 +547,9 @@ int LocalShmPSClient::PutParameterFlat(
   return ok ? 0 : -1;
 }
 
-int LocalShmPSClient::UpdateParameter(
-    const std::string& table_name,
-    const base::ConstArray<uint64_t>& keys,
-    const base::RecTensor& grads) {
+int LocalShmPSClient::UpdateParameter(const std::string& table_name,
+                                      const base::ConstArray<uint64_t>& keys,
+                                      const base::RecTensor& grads) {
   if (!IsFloatEmbeddingValues(grads, static_cast<int64_t>(keys.Size()))) {
     return -1;
   }
@@ -573,7 +558,7 @@ int LocalShmPSClient::UpdateParameter(
     return 0;
   }
   const int64_t D = grads.shape(1);
-  const float* g = grads.data_as<float>();
+  const float* g  = grads.data_as<float>();
   const std::size_t per_key =
       sizeof(uint64_t) + sizeof(float) * static_cast<std::size_t>(D);
   const std::size_t max_keys =
@@ -583,14 +568,13 @@ int LocalShmPSClient::UpdateParameter(
   if (max_keys == 0) {
     return -1;
   }
-  for (int64_t start = 0; start < n;
-       start += static_cast<int64_t>(max_keys)) {
+  for (int64_t start = 0; start < n; start += static_cast<int64_t>(max_keys)) {
     const int64_t chunk =
         std::min<int64_t>(static_cast<int64_t>(max_keys), n - start);
-    base::ConstArray<uint64_t> chunk_keys(keys.Data() + start,
-                                          static_cast<int>(chunk));
-    if (UpdateParameterFlat(
-            table_name, chunk_keys, g + start * D, chunk, D) != 0) {
+    base::ConstArray<uint64_t> chunk_keys(
+        keys.Data() + start, static_cast<int>(chunk));
+    if (UpdateParameterFlat(table_name, chunk_keys, g + start * D, chunk, D) !=
+        0) {
       return -1;
     }
   }

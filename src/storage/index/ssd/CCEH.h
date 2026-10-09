@@ -102,11 +102,9 @@ class CCEH : public Index {
 public:
   CCEH(const BaseKVConfig& config);
 
-  Value_t Put(coroutine<void>::push_type& sink,
-              int index,
-              Key_t,
-              Value_t,
-              unsigned tid) override;
+  Value_t
+  Put(coroutine<void>::push_type& sink, int index, Key_t, Value_t, unsigned tid)
+      override;
   Value_t Put(Key_t, Value_t, unsigned tid) override;
   bool Delete(Key_t&) override;
   void Get(coroutine<void>::push_type& sink,

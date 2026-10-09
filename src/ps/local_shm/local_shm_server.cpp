@@ -124,8 +124,8 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
         std::memcpy(&table_id, cursor, sizeof(table_id));
       }
       const auto backend_start = std::chrono::steady_clock::now();
-      const int tag =
-          cache_ps_->InitTable(table_name, num_embeddings, embedding_dim, table_id);
+      const int tag            = cache_ps_->InitTable(
+          table_name, num_embeddings, embedding_dim, table_id);
       header->user_tag = tag >= 0 ? static_cast<uint64_t>(tag) : 0;
       header->server_backend_duration_us =
           static_cast<uint64_t>(LocalShmElapsedUs(backend_start));
@@ -134,7 +134,8 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       ReportLocalShmStageMetric(
           "server_process_total_us", LocalShmElapsedUs(process_start));
       FinishWithStatus(
-          header, tag >= 0 ? LocalStatusCode::kOk : LocalStatusCode::kUnknownError);
+          header,
+          tag >= 0 ? LocalStatusCode::kOk : LocalStatusCode::kUnknownError);
       return;
     }
     case LocalOpcode::kGet: {
@@ -150,8 +151,7 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
           LOG(ERROR) << "LocalShmStoreRuntime::ProcessSlot get_failed"
                      << " slot_id=" << slot_id << " request_id="
                      << header->request_id << " key_count=" << header->key_count
-                     << " computed_embedding_dim=0"
-                     << " output_bytes=0"
+                     << " computed_embedding_dim=0" << " output_bytes=0"
                      << " reason=GetParameterRun2Completion";
           ReportLocalShmStageMetric(
               "get_backend_us", LocalShmElapsedUs(backend_start));

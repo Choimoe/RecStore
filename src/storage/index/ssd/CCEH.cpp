@@ -384,7 +384,7 @@ Value_t CCEH::Put(coroutine<void>::push_type& sink,
       auto loc       = (f_idx + i) % Segment::kNumSlot;
       auto storedKey = target_ptr->bucket[loc].key;
       if (storedKey == key) {
-        Value_t old_value = target_ptr->bucket[loc].value;
+        Value_t old_value             = target_ptr->bucket[loc].value;
         target_ptr->bucket[loc].value = value;
         mfence();
         io_backend->Unpin(sink, index, target_page_id, target_ptr, true);
@@ -409,7 +409,7 @@ Value_t CCEH::Put(coroutine<void>::push_type& sink,
       auto loc       = (s_idx + i) % Segment::kNumSlot;
       auto storedKey = target_ptr->bucket[loc].key;
       if (storedKey == key) {
-        Value_t old_value = target_ptr->bucket[loc].value;
+        Value_t old_value             = target_ptr->bucket[loc].value;
         target_ptr->bucket[loc].value = value;
         mfence();
         io_backend->Unpin(sink, index, target_page_id, target_ptr, true);
@@ -643,7 +643,7 @@ Value_t CCEH::Put(Key_t key, Value_t value, unsigned tid) {
       auto loc       = (f_idx + i) % Segment::kNumSlot;
       auto storedKey = target_ptr->bucket[loc].key;
       if (storedKey == key) {
-        Value_t old_value = target_ptr->bucket[loc].value;
+        Value_t old_value             = target_ptr->bucket[loc].value;
         target_ptr->bucket[loc].value = value;
         mfence();
         io_backend->Unpin(target_page_id, target_ptr, true);
@@ -668,7 +668,7 @@ Value_t CCEH::Put(Key_t key, Value_t value, unsigned tid) {
       auto loc       = (s_idx + i) % Segment::kNumSlot;
       auto storedKey = target_ptr->bucket[loc].key;
       if (storedKey == key) {
-        Value_t old_value = target_ptr->bucket[loc].value;
+        Value_t old_value             = target_ptr->bucket[loc].value;
         target_ptr->bucket[loc].value = value;
         mfence();
         io_backend->Unpin(target_page_id, target_ptr, true);

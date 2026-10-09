@@ -14,18 +14,16 @@
 
 namespace {
 
-constexpr int kNumThreads   = 32;
-constexpr int kAllocsPerThread      = 200;
+constexpr int kNumThreads               = 32;
+constexpr int kAllocsPerThread          = 200;
 constexpr int kMultiSlabAllocsPerThread = 40;
-constexpr int64_t kPoolBytes          = 256 * 1024 * 1024;
+constexpr int64_t kPoolBytes            = 256 * 1024 * 1024;
 
 std::string TempPoolPath(const std::string& name) {
   return "/tmp/recstore_concurrent_slab_pool_" + name;
 }
 
-std::vector<int> FactoryPayloadSizes() {
-  return {32, 64, 128, 512, 1024};
-}
+std::vector<int> FactoryPayloadSizes() { return {32, 64, 128, 512, 1024}; }
 
 } // namespace
 
@@ -48,9 +46,12 @@ protected:
 };
 
 TEST_F(ConcurrentSlabMemoryPoolTest, FactoryCreatesInstance) {
-  auto* from_factory = base::Factory<base::MallocApi, const std::string&, int64,
-                                     const std::string&>::NewInstance(
-      "CONCURRENT_SLAB_MEMORY_POOL", path_ + "_factory", 8 * 1024 * 1024, "DRAM");
+  auto* from_factory = base::
+      Factory<base::MallocApi, const std::string&, int64, const std::string&>::
+          NewInstance("CONCURRENT_SLAB_MEMORY_POOL",
+                      path_ + "_factory",
+                      8 * 1024 * 1024,
+                      "DRAM");
   ASSERT_NE(from_factory, nullptr);
   char* p = from_factory->New(32);
   ASSERT_NE(p, nullptr);

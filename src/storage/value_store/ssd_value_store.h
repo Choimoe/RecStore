@@ -16,16 +16,17 @@ public:
   explicit SsdValueStore(const BaseKVConfig& config) {
     const auto& v = config.json_config_.at("value");
     if (!v.contains("path") || v.at("path").get<std::string>().empty()) {
-      throw std::invalid_argument("SsdValueStore requires non-empty value.path");
+      throw std::invalid_argument(
+          "SsdValueStore requires non-empty value.path");
     }
     const auto& ssd = v.at("ssd_allocator");
-    const auto& io = ssd.at("io");
+    const auto& io  = ssd.at("io");
 
-    BaseKVConfig io_cfg = config;
-    auto& j = io_cfg.json_config_;
+    BaseKVConfig io_cfg  = config;
+    auto& j              = io_cfg.json_config_;
     j["io_backend_type"] = io.value("type", "IOURING");
-    j["file_path"] = v.at("path").get<std::string>();
-    j["queue_cnt"] = io.value("queue_depth", 512);
+    j["file_path"]       = v.at("path").get<std::string>();
+    j["queue_cnt"]       = io.value("queue_depth", 512);
     j["page_id_offset"] =
         io.value("base_offset_bytes", static_cast<uint64_t>(0)) / PAGE_SIZE;
 
@@ -34,7 +35,7 @@ public:
     io_backend_->init();
 
     const std::string allocator_type = ssd.value("type", "SSD_SLAB");
-    const uint64_t capacity_bytes = ssd.at("capacity_bytes").get<uint64_t>();
+    const uint64_t capacity_bytes    = ssd.at("capacity_bytes").get<uint64_t>();
     const uint64_t base_offset =
         ssd.value("base_offset_bytes", static_cast<uint64_t>(0));
     if (allocator_type == "SSD_SLAB") {
@@ -47,7 +48,7 @@ public:
     } else if (allocator_type == "SSD_BUDDY") {
       const int min_block = ssd.value("min_block_size", 128);
       const int max_block = ssd.value("max_block_size", 4096);
-      int levels = 1;
+      int levels          = 1;
       for (int size = min_block; size < max_block; size <<= 1) {
         ++levels;
       }
@@ -60,8 +61,9 @@ public:
 
   uint64_t Alloc(size_t size) override {
     const uint64_t handle = allocator_->Alloc(size);
-    return handle == SsdBlockAllocator::kInvalidHandle ? kValueHandleNone
-                                                       : handle;
+    return handle == SsdBlockAllocator::kInvalidHandle
+             ? kValueHandleNone
+             : handle;
   }
 
   void Write(uint64_t handle, const void* data, size_t size) override {
@@ -72,8 +74,9 @@ public:
 
   uint64_t AllocAndWrite(const void* data, size_t size) override {
     const uint64_t handle = allocator_->AllocAndWrite(data, size);
-    return handle == SsdBlockAllocator::kInvalidHandle ? kValueHandleNone
-                                                       : handle;
+    return handle == SsdBlockAllocator::kInvalidHandle
+             ? kValueHandleNone
+             : handle;
   }
 
   size_t Read(uint64_t handle, void* out_buf, size_t buf_size) override {
@@ -118,7 +121,8 @@ public:
       std::vector<size_t> sizes;
       allocator_->BatchRead(entries, sizes);
       if (sizes.size() != indices.size()) {
-        throw std::runtime_error("SsdValueStore::BatchRead result size mismatch");
+        throw std::runtime_error(
+            "SsdValueStore::BatchRead result size mismatch");
       }
       for (size_t i = 0; i < indices.size(); ++i) {
         out_results[indices[i]].data.resize(sizes[i]);
@@ -171,7 +175,5 @@ private:
   std::unique_ptr<SsdBlockAllocator> allocator_;
 };
 
-FACTORY_REGISTER(ValueStore,
-                 SSD_VALUE_STORE,
-                 SsdValueStore,
-                 const BaseKVConfig&);
+FACTORY_REGISTER(
+    ValueStore, SSD_VALUE_STORE, SsdValueStore, const BaseKVConfig&);

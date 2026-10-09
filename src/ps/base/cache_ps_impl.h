@@ -181,8 +181,8 @@ public:
   }
 
   void PutSingleParameter(const ParameterCompressItem* item, int tid) {
-    auto key          = item->key;
-    auto dim          = item->dim;
+    auto key = item->key;
+    auto dim = item->dim;
     base_kv_->Put(
         key, std::string_view((char*)item->data(), dim * sizeof(float)), tid);
     MarkCheckpointDirty();
@@ -494,8 +494,8 @@ public:
     const auto existing = table_configs_.find(table_name);
     if (existing != table_configs_.end()) {
       const auto& old = existing->second;
-      if (old.num_embeddings == num_embeddings && old.embedding_dim == embedding_dim &&
-          old.table_id == table_id) {
+      if (old.num_embeddings == num_embeddings &&
+          old.embedding_dim == embedding_dim && old.table_id == table_id) {
         return optimizer_->Init({table_name}, config, base_kv_.get());
       }
       LOG(ERROR) << "Embedding table config mismatch for '" << table_name

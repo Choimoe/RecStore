@@ -5,9 +5,8 @@
 
 namespace recstore::storage::plugin {
 
-constexpr uint32_t kDynamicKVPluginAbiV1 = 1;
-constexpr const char* kDynamicKVPluginEntryPoint =
-    "dynamic_kv_plugin_api_v1";
+constexpr uint32_t kDynamicKVPluginAbiV1         = 1;
+constexpr const char* kDynamicKVPluginEntryPoint = "dynamic_kv_plugin_api_v1";
 
 struct DynamicKVPluginConfigV1 {
   uint32_t abi_version;
@@ -44,14 +43,15 @@ struct DynamicKVPluginApiV1 {
              size_t value_size,
              char* error,
              size_t error_size);
-  int (*batch_get)(void* handle,
-                   const uint64_t* keys,
-                   size_t count,
-                   void* values,
-                   size_t value_size,
-                   uint8_t* found,
-                   char* error,
-                   size_t error_size);
+  int (*batch_get)(
+      void* handle,
+      const uint64_t* keys,
+      size_t count,
+      void* values,
+      size_t value_size,
+      uint8_t* found,
+      char* error,
+      size_t error_size);
   int (*batch_put)(void* handle,
                    const uint64_t* keys,
                    size_t count,

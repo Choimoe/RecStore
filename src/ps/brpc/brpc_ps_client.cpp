@@ -74,8 +74,9 @@ namespace {
 // gflags::ParseCommandLineFlags, so RDMA options are configured from env vars
 // (consistent with the RECSTORE_RDMA_* convention used by the raw-verbs path).
 //   RECSTORE_BRPC_USE_RDMA=1        -> enable RDMA transport
-//   RECSTORE_BRPC_RDMA_DEVICE=mlx5_0 -> select the HCA (maps to brpc -rdma_device)
-//   RECSTORE_BRPC_TIMEOUT_MS=60000   -> request timeout (maps to -brpc_timeout_ms)
+//   RECSTORE_BRPC_RDMA_DEVICE=mlx5_0 -> select the HCA (maps to brpc
+//   -rdma_device) RECSTORE_BRPC_TIMEOUT_MS=60000   -> request timeout (maps to
+//   -brpc_timeout_ms)
 bool ResolveBrpcUseRdmaFromEnv(bool fallback) {
   const char* value = std::getenv("RECSTORE_BRPC_USE_RDMA");
   if (value == nullptr || *value == '\0') {
@@ -107,19 +108,20 @@ int BrpcTimeoutMsFromEnv(int fallback) {
 
 // New constructor that takes JSON config
 BRPCParameterClient::BRPCParameterClient(json config) {
-  host_       = config.value("host", "localhost");
-  port_       = config.value("port", 15000);
-  shard_      = config.value("shard", 0);
-  timeout_ms_ = BrpcTimeoutMsFromEnv(config.value("timeout_ms", FLAGS_brpc_timeout_ms));
-  max_retry_  = config.value("max_retry", FLAGS_brpc_max_retry);
+  host_  = config.value("host", "localhost");
+  port_  = config.value("port", 15000);
+  shard_ = config.value("shard", 0);
+  timeout_ms_ =
+      BrpcTimeoutMsFromEnv(config.value("timeout_ms", FLAGS_brpc_timeout_ms));
+  max_retry_ = config.value("max_retry", FLAGS_brpc_max_retry);
 
   Initialize();
 
   // Initialize bRPC channel
   channel_ = std::make_shared<brpc::Channel>();
   brpc::ChannelOptions options;
-  options.timeout_ms = timeout_ms_;
-  options.max_retry  = max_retry_;
+  options.timeout_ms    = timeout_ms_;
+  options.max_retry     = max_retry_;
   bool use_rdma_enabled = ResolveBrpcUseRdmaFromEnv(
       config.value("use_rdma", FLAGS_brpc_ps_use_rdma));
   if (use_rdma_enabled) {
@@ -150,8 +152,8 @@ BRPCParameterClient::BRPCParameterClient(
 
   channel_ = std::make_shared<brpc::Channel>();
   brpc::ChannelOptions options;
-  options.timeout_ms = timeout_ms_;
-  options.max_retry  = max_retry_;
+  options.timeout_ms    = timeout_ms_;
+  options.max_retry     = max_retry_;
   bool use_rdma_enabled = ResolveBrpcUseRdmaFromEnv(FLAGS_brpc_ps_use_rdma);
   if (use_rdma_enabled) {
     ApplyBrpcRdmaDeviceFromEnv();
@@ -171,14 +173,14 @@ BRPCParameterClient::BRPCParameterClient(
 
 bool BRPCParameterClient::Initialize() { return true; }
 
-
 int BRPCParameterClient::GetParameter(const base::ConstArray<uint64_t>& keys,
                                       base::RecTensor& values) {
 #ifdef ENABLE_PERF_REPORT
   auto start_time = std::chrono::high_resolution_clock::now();
 #endif
 
-  if (!recstore::IsFloatEmbeddingValues(values, static_cast<int64_t>(keys.Size()))) {
+  if (!recstore::IsFloatEmbeddingValues(
+          values, static_cast<int64_t>(keys.Size()))) {
     return -1;
   }
   if (keys.Size() == 0) {
@@ -186,9 +188,7 @@ int BRPCParameterClient::GetParameter(const base::ConstArray<uint64_t>& keys,
   }
   const int64_t D = values.shape(1);
   float* dst      = values.data_as<float>();
-  std::memset(dst,
-              0,
-              keys.Size() * static_cast<size_t>(D) * sizeof(float));
+  std::memset(dst, 0, keys.Size() * static_cast<size_t>(D) * sizeof(float));
 
   if (FLAGS_parameter_client_random_init_brpc) {
     std::fill(dst, dst + keys.Size() * static_cast<size_t>(D), 0.1f);
@@ -202,7 +202,8 @@ int BRPCParameterClient::GetParameter(const base::ConstArray<uint64_t>& keys,
   std::vector<GetParameterResponse*> responses(request_num);
   for (int i = 0; i < request_num; ++i) {
     requests[i] = google::protobuf::Arena::Create<GetParameterRequest>(&arena);
-    responses[i] = google::protobuf::Arena::Create<GetParameterResponse>(&arena);
+    responses[i] =
+        google::protobuf::Arena::Create<GetParameterResponse>(&arena);
   }
   std::vector<brpc::Controller> controllers(request_num);
   std::vector<int> key_sizes;
@@ -452,8 +453,8 @@ void BRPCParameterClient::WaitForPrefetch(uint64_t prefetch_id) {
   pb.completed_count_ = pb.batch_size_;
 }
 
-bool BRPCParameterClient::GetPrefetchResult(
-    uint64_t prefetch_id, base::RecTensor& values) {
+bool BRPCParameterClient::GetPrefetchResult(uint64_t prefetch_id,
+                                            base::RecTensor& values) {
   auto it = prefetch_batches_.find(prefetch_id);
   if (it == prefetch_batches_.end()) {
     LOG(ERROR) << "Invalid prefetch_id: " << prefetch_id;
@@ -467,11 +468,9 @@ bool BRPCParameterClient::GetPrefetchResult(
   for (const auto& size : pb.key_sizes_) {
     keys_size += size;
   }
-  const bool discard =
-      values.data() == nullptr && values.dim() == 0;
-  if (!discard &&
-      !recstore::EnsureEmbeddingOutput(values,
-                                       static_cast<int64_t>(keys_size))) {
+  const bool discard = values.data() == nullptr && values.dim() == 0;
+  if (!discard && !recstore::EnsureEmbeddingOutput(
+                      values, static_cast<int64_t>(keys_size))) {
     return false;
   }
   const int64_t D = discard ? 0 : values.shape(1);
@@ -527,7 +526,6 @@ bool BRPCParameterClient::GetPrefetchResult(
 
   return true;
 }
-
 
 bool BRPCParameterClient::ClearPS() {
   CommandRequest request;
@@ -613,16 +611,17 @@ bool BRPCParameterClient::LoadCkpt(
   return true;
 }
 
-bool BRPCParameterClient::PutParameter(
-    const std::vector<uint64_t>& keys, const base::RecTensor& values) {
+bool BRPCParameterClient::PutParameter(const std::vector<uint64_t>& keys,
+                                       const base::RecTensor& values) {
 #ifdef ENABLE_PERF_REPORT
   auto start_time = std::chrono::high_resolution_clock::now();
 #endif
-  if (!recstore::IsFloatEmbeddingValues(values, static_cast<int64_t>(keys.size()))) {
+  if (!recstore::IsFloatEmbeddingValues(
+          values, static_cast<int64_t>(keys.size()))) {
     return false;
   }
-  const int64_t D     = keys.empty() ? 0 : values.shape(1);
-  const float* src    = keys.empty() ? nullptr : values.data_as<float>();
+  const int64_t D  = keys.empty() ? 0 : values.shape(1);
+  const float* src = keys.empty() ? nullptr : values.data_as<float>();
 
   recstoreps_brpc::ParameterService_Stub stub(channel_.get());
 
@@ -662,9 +661,8 @@ bool BRPCParameterClient::PutParameter(
   return true;
 }
 
-
-int BRPCParameterClient::PutParameter(
-    const base::ConstArray<uint64_t>& keys, const base::RecTensor& values) {
+int BRPCParameterClient::PutParameter(const base::ConstArray<uint64_t>& keys,
+                                      const base::RecTensor& values) {
   std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
   bool success = PutParameter(key_vec, values);
   return success ? 0 : -1;
@@ -691,26 +689,27 @@ void BRPCParameterClient::Command(recstore::PSCommand command) {
   }
 }
 
-int BRPCParameterClient::UpdateParameter(
-    const std::string& table_name,
-    const base::ConstArray<uint64_t>& keys,
-    const base::RecTensor& grads) {
+int BRPCParameterClient::UpdateParameter(const std::string& table_name,
+                                         const base::ConstArray<uint64_t>& keys,
+                                         const base::RecTensor& grads) {
 #ifdef ENABLE_PERF_REPORT
   auto start_time         = std::chrono::high_resolution_clock::now();
   const uint64_t trace_id = recstore::g_trace_id;
 #endif
-  if (!recstore::IsFloatEmbeddingValues(grads, static_cast<int64_t>(keys.Size()))) {
+  if (!recstore::IsFloatEmbeddingValues(
+          grads, static_cast<int64_t>(keys.Size()))) {
     LOG(ERROR) << "UpdateParameter keys/grads size mismatch: " << keys.Size();
     return -1;
   }
 
   ParameterCompressor compressor;
   if (keys.Size() > 0) {
-    CompressEmbeddingRows(&compressor,
-                          keys.Data(),
-                          grads.data_as<float>(),
-                          keys.Size(),
-                          grads.shape(1));
+    CompressEmbeddingRows(
+        &compressor,
+        keys.Data(),
+        grads.data_as<float>(),
+        keys.Size(),
+        grads.shape(1));
   }
 #ifdef ENABLE_PERF_REPORT
   auto serialize_done_time = std::chrono::high_resolution_clock::now();
@@ -788,7 +787,6 @@ int BRPCParameterClient::UpdateParameter(
 
   return response.success() ? 0 : -1;
 }
-
 
 int BRPCParameterClient::InitEmbeddingTable(
     const std::string& table_name,

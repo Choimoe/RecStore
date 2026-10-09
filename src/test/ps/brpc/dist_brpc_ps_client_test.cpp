@@ -27,13 +27,15 @@ namespace {
 constexpr int kDistBrpcPort0 = 16133;
 constexpr int kDistBrpcPort1 = 16134;
 
-base::RecTensor OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
+base::RecTensor
+OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
   base::RecTensor t({n, d}, base::DataType::FLOAT32);
   if (t.data() != nullptr && !flat.empty()) {
-    std::memcpy(t.data(),
-                flat.data(),
-                sizeof(float) * std::min(flat.size(),
-                                         static_cast<size_t>(t.num_elements())));
+    std::memcpy(
+        t.data(),
+        flat.data(),
+        sizeof(float) *
+            std::min(flat.size(), static_cast<size_t>(t.num_elements())));
   }
   return t;
 }

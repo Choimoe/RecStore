@@ -765,8 +765,8 @@ private:
 
   std::vector<uint64_t>& CheckpointKeysForThread(unsigned tid) {
     if (tid >= checkpoint_keys_by_thread_.size()) {
-      LOG(FATAL) << "KVEngine checkpoint tid out of range: " << tid << " >= "
-                 << checkpoint_keys_by_thread_.size();
+      LOG(FATAL) << "KVEngine checkpoint tid out of range: " << tid
+                 << " >= " << checkpoint_keys_by_thread_.size();
     }
     return checkpoint_keys_by_thread_[tid];
   }

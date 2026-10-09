@@ -204,8 +204,8 @@ void HierKVLocalRuntime::WaitForPrefetch(uint64_t prefetch_id) {
   }
 }
 
-void HierKVLocalRuntime::ConsumePrefetch(
-    uint64_t prefetch_id, base::RecTensor& values) {
+void HierKVLocalRuntime::ConsumePrefetch(uint64_t prefetch_id,
+                                         base::RecTensor& values) {
   auto& state = impl();
   std::lock_guard<std::mutex> lock(state.mu);
   auto it = state.prefetch_results.find(prefetch_id);

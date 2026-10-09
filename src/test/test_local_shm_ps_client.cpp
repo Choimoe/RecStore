@@ -194,7 +194,7 @@ TEST_F(LocalShmPSClientTest, LastRequestProfileCapturesTransportStages) {
   LocalShmPSClient client(config["local_shm"]);
   ASSERT_EQ(client.InitEmbeddingTable("table_profile", {128, 4}), 0);
 
-  std::vector<uint64_t> keys = {1, 3};
+  std::vector<uint64_t> keys    = {1, 3};
   std::vector<float> value_flat = {
       1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   base::RecTensor values(value_flat.data(), {2, 4});
@@ -233,7 +233,7 @@ TEST_F(LocalShmPSClientTest, LastRequestProfileCapturesOpcodePerRequestType) {
   EXPECT_EQ(client.GetLastRequestProfile().opcode,
             static_cast<uint32_t>(LocalOpcode::kInitTable));
 
-  std::vector<uint64_t> keys = {7, 9};
+  std::vector<uint64_t> keys    = {7, 9};
   std::vector<float> value_flat = {
       1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   base::RecTensor values(value_flat.data(), {2, 4});
@@ -291,7 +291,7 @@ TEST_F(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
   LocalShmPSClient client(config["local_shm"]);
   ASSERT_EQ(client.InitEmbeddingTable("table_b", {128, 4}), 0);
 
-  std::vector<uint64_t> keys = {1, 5};
+  std::vector<uint64_t> keys    = {1, 5};
   std::vector<float> value_flat = {
       1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   base::RecTensor values(value_flat.data(), {2, 4});
@@ -361,7 +361,7 @@ TEST_F(LocalShmPSClientTest, GetParameterFlatRoundTripUsesFixedEmbeddingDim) {
   LocalShmPSClient client(config["local_shm"]);
   ASSERT_EQ(client.InitEmbeddingTable("table_flat", {128, 4}), 0);
 
-  std::vector<uint64_t> keys = {2, 6};
+  std::vector<uint64_t> keys    = {2, 6};
   std::vector<float> value_flat = {
       2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
   base::RecTensor values(value_flat.data(), {2, 4});
@@ -428,7 +428,7 @@ TEST_F(LocalShmPSClientTest,
   LocalShmPSClient client(config["local_shm"]);
   ASSERT_EQ(client.InitEmbeddingTable("table_slot", {128, 4}), 0);
 
-  std::vector<uint64_t> keys = {9, 13};
+  std::vector<uint64_t> keys    = {9, 13};
   std::vector<float> value_flat = {
       9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f, 16.0f};
   base::RecTensor values(value_flat.data(), {2, 4});
@@ -482,7 +482,7 @@ TEST_F(LocalShmPSClientTest, GetParameterFlatRejectsMismatchedEmbeddingDim) {
   LocalShmPSClient client(config["local_shm"]);
   ASSERT_EQ(client.InitEmbeddingTable("table_mismatch", {128, 4}), 0);
 
-  std::vector<uint64_t> keys = {7};
+  std::vector<uint64_t> keys    = {7};
   std::vector<float> value_flat = {7.0f, 8.0f, 9.0f, 10.0f};
   base::RecTensor values(value_flat.data(), {1, 4});
   base::ConstArray<uint64_t> key_array(keys);
@@ -507,7 +507,7 @@ TEST_F(LocalShmPSClientTest, UpdateParameterFlatRejectsMismatchedEmbeddingDim) {
   LocalShmPSClient client(config["local_shm"]);
   ASSERT_EQ(client.InitEmbeddingTable("table_update_mismatch", {128, 4}), 0);
 
-  std::vector<uint64_t> keys = {11};
+  std::vector<uint64_t> keys    = {11};
   std::vector<float> value_flat = {1.0f, 2.0f, 3.0f, 4.0f};
   base::RecTensor values(value_flat.data(), {1, 4});
   base::ConstArray<uint64_t> key_array(keys);
@@ -541,7 +541,7 @@ TEST_F(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
   ASSERT_EQ(client0.InitEmbeddingTable("table_c", {128, 4}), 0);
 
   std::thread worker0([&]() {
-    std::vector<uint64_t> keys = {1, 3};
+    std::vector<uint64_t> keys    = {1, 3};
     std::vector<float> value_flat = {
         1.0f, 1.0f, 1.0f, 1.0f, 3.0f, 3.0f, 3.0f, 3.0f};
     base::RecTensor values(value_flat.data(), {2, 4});
@@ -555,7 +555,7 @@ TEST_F(LocalShmPSClientTest, MultiClientUsesIndependentReadyQueues) {
   });
 
   std::thread worker1([&]() {
-    std::vector<uint64_t> keys = {2, 4};
+    std::vector<uint64_t> keys    = {2, 4};
     std::vector<float> value_flat = {
         2.0f, 2.0f, 2.0f, 2.0f, 4.0f, 4.0f, 4.0f, 4.0f};
     base::RecTensor values(value_flat.data(), {2, 4});

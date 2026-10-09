@@ -104,10 +104,10 @@ TEST_F(KVEngineCheckpointTest, RoundTripsParameterAndRowWiseAccumulator) {
 
 TEST_F(KVEngineCheckpointTest, RoundTripsConcurrentWriterKeys) {
   constexpr uint64_t keys_per_thread = 100;
-  const std::string metadata = R"({"run_id":"concurrent-writers"})";
-  const std::string value = FloatBytes(std::array<float, 1>{3.5f});
+  const std::string metadata         = R"({"run_id":"concurrent-writers"})";
+  const std::string value            = FloatBytes(std::array<float, 1>{3.5f});
   const std::filesystem::path checkpoint = root_ / "concurrent.ckpt";
-  auto source = MakeEngine("concurrent-source");
+  auto source                            = MakeEngine("concurrent-source");
 
   std::vector<std::thread> writers;
   for (unsigned tid = 0; tid < 2; ++tid) {

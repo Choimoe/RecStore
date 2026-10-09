@@ -676,8 +676,7 @@ void BRPCParameterServiceImpl::InitEmbeddingTable(
       RECSTORE_LOG_EVERY_MS(INFO, 2000)
           << "InitEmbeddingTable: table=" << request->table_name()
           << ", num_embeddings=" << num_embeddings
-          << ", embedding_dim=" << embedding_dim
-          << ", table_id=" << table_id;
+          << ", embedding_dim=" << embedding_dim << ", table_id=" << table_id;
 
       const int tag = cache_ps_->InitTable(
           request->table_name(), num_embeddings, embedding_dim, table_id);
@@ -798,8 +797,8 @@ public:
           brpc::ServerOptions options;
           options.num_threads = FLAGS_brpc_server_num_threads;
 #if BRPC_WITH_RDMA
-          options.use_rdma    = ResolveBrpcServerUseRdmaFromEnv(
-              FLAGS_brpc_ps_use_rdma);
+          options.use_rdma =
+              ResolveBrpcServerUseRdmaFromEnv(FLAGS_brpc_ps_use_rdma);
           if (options.use_rdma) {
             ApplyBrpcServerRdmaDeviceFromEnv();
           }
@@ -847,7 +846,8 @@ public:
       brpc::ServerOptions options;
       options.num_threads = FLAGS_brpc_server_num_threads;
 #if BRPC_WITH_RDMA
-      options.use_rdma    = ResolveBrpcServerUseRdmaFromEnv(FLAGS_brpc_ps_use_rdma);
+      options.use_rdma =
+          ResolveBrpcServerUseRdmaFromEnv(FLAGS_brpc_ps_use_rdma);
       if (options.use_rdma) {
         ApplyBrpcServerRdmaDeviceFromEnv();
       }

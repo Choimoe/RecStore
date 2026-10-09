@@ -26,7 +26,7 @@ public:
 
   virtual int Init(const std::vector<std::string> table_name,
                    const EmbeddingTableConfig& config,
-                   BaseKV* base_kv) = 0;
+                   BaseKV* base_kv)   = 0;
   virtual int TensorsPerTable() const = 0;
 
   virtual void Update(std::string table,

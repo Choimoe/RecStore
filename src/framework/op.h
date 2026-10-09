@@ -89,8 +89,7 @@ public:
   virtual void WaitForPrefetch(
       uint64_t prefetch_id) = 0; // blocks until the prefetch identified by
                                  // prefetch_id is complete.
-  virtual void GetPretchResult(uint64_t prefetch_id,
-                               RecTensor& values) = 0;
+  virtual void GetPretchResult(uint64_t prefetch_id, RecTensor& values) = 0;
 
   virtual uint64_t
   EmbWriteAsync(const RecTensor& keys,

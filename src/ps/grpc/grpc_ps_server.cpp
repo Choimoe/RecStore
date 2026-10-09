@@ -522,8 +522,7 @@ private:
         RECSTORE_LOG_EVERY_MS(INFO, 2000)
             << "InitEmbeddingTable: table=" << request->table_name()
             << ", num_embeddings=" << num_embeddings
-            << ", embedding_dim=" << embedding_dim
-            << ", table_id=" << table_id;
+            << ", embedding_dim=" << embedding_dim << ", table_id=" << table_id;
 
         const int tag = cache_ps_->InitTable(
             request->table_name(), num_embeddings, embedding_dim, table_id);

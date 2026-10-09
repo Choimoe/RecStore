@@ -239,11 +239,11 @@ private:
     }
   }
 
-  void* data_ptr_         = nullptr;
+  void* data_ptr_ = nullptr;
   std::vector<int64_t> shape_;
-  DataType dtype_         = DataType::UNKNOWN;
-  size_t num_elements_    = 0;
-  bool owns_data_         = false;
+  DataType dtype_      = DataType::UNKNOWN;
+  size_t num_elements_ = 0;
+  bool owns_data_      = false;
 };
 
 } // namespace base

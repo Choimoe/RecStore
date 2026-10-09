@@ -68,8 +68,8 @@ public:
   uint64_t PrefetchParameter(const base::ConstArray<uint64_t>& keys) override;
   bool IsPrefetchDone(uint64_t prefetch_id) override;
   void WaitForPrefetch(uint64_t prefetch_id) override;
-  bool GetPrefetchResult(uint64_t prefetch_id,
-                         base::RecTensor& values) override;
+  bool
+  GetPrefetchResult(uint64_t prefetch_id, base::RecTensor& values) override;
   int SubmitUpdateParameterFlat(const std::string& table_name,
                                 base::ConstArray<uint64_t> keys,
                                 const float* grads,
@@ -138,12 +138,13 @@ private:
   bool RequestPayloadFitsSlot(std::size_t payload_bytes) const;
   float* AllocateStatusReceiveBufferLocked();
   void MaybeReportProfile();
-  void FillGetDescriptor(RequestDescriptor* descriptor,
-                         std::uint64_t seq,
-                         std::size_t key_count,
-                         std::size_t response_bytes,
-                         std::size_t value_size,
-                         const RcClientQpView& view) const;
+  void FillGetDescriptor(
+      RequestDescriptor* descriptor,
+      std::uint64_t seq,
+      std::size_t key_count,
+      std::size_t response_bytes,
+      std::size_t value_size,
+      const RcClientQpView& view) const;
   void FillPutDescriptor(RequestDescriptor* descriptor,
                          std::uint64_t seq,
                          std::size_t key_count,
@@ -179,14 +180,14 @@ private:
       bool is_async);
 
   struct PrefetchState {
-    int rpc_id             = -1; // In-flight async GET handle.
-    float* recv_buffer     = nullptr; // Response buffer for the async GET.
-    std::size_t key_count  = 0;
-    int64_t embedding_dim  = 0;
+    int rpc_id            = -1;      // In-flight async GET handle.
+    float* recv_buffer    = nullptr; // Response buffer for the async GET.
+    std::size_t key_count = 0;
+    int64_t embedding_dim = 0;
   };
 
   std::string namespace_token_; // Shared-memory namespace token.
-  int shard_ = 0;
+  int shard_              = 0;
   int explicit_client_id_ = -1; // Optional logical client id override.
   int client_id_          = -1; // Logical client id derived from global id.
   RcTransportConfig config_;    // Transport slot sizing and shard config.
@@ -194,8 +195,8 @@ private:
   std::vector<QpContext> qps_; // One context per client-side QP lane.
   std::vector<std::vector<char>>
       receive_buffers_; // All heap-backed response buffers ever allocated.
-                       // Element data() pointers stay stable for the buffer
-                       // lifetime, so they can be pooled by index.
+                        // Element data() pointers stay stable for the buffer
+                        // lifetime, so they can be pooled by index.
   std::vector<std::size_t>
       receive_buffer_free_; // Indices into receive_buffers_ idle for reuse
                             // (LIFO). Avoids a fresh mmap + zero-fill +
@@ -206,7 +207,7 @@ private:
   std::unordered_map<int, PendingRpc> pending_rpcs_; // In-flight RPC table.
   std::mutex mu_; // Guards transport setup and pending RPC state.
   std::atomic<int> next_rpc_id_{1}; // Monotonic RPC handle generator.
-  std::mutex prefetch_mu_; // Guards the prefetch handle table.
+  std::mutex prefetch_mu_;          // Guards the prefetch handle table.
   std::unordered_map<uint64_t, PrefetchState> prefetches_;
   uint64_t next_prefetch_id_ = 1;
   ProfileCounters profile_;

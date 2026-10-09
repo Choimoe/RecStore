@@ -19,13 +19,15 @@ namespace {
 constexpr int kBrpcTestPort0 = 16123;
 constexpr int kBrpcTestPort1 = 16124;
 
-base::RecTensor OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
+base::RecTensor
+OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
   base::RecTensor t({n, d}, base::DataType::FLOAT32);
   if (t.data() != nullptr && !flat.empty()) {
-    std::memcpy(t.data(),
-                flat.data(),
-                sizeof(float) * std::min(flat.size(),
-                                         static_cast<size_t>(t.num_elements())));
+    std::memcpy(
+        t.data(),
+        flat.data(),
+        sizeof(float) *
+            std::min(flat.size(), static_cast<size_t>(t.num_elements())));
   }
   return t;
 }
@@ -54,8 +56,8 @@ void TestFactoryClient() {
 
   BRPCParameterClient client(config);
   std::vector<uint64_t> keys = {1, 2, 3};
-  auto rightvalues           = OwnedEmbedding(3, 3, {1, 0, 0, 2, 2, 0, 3, 3, 3});
-  auto values                = OwnedEmbedding(3, 3, std::vector<float>(9, -1.0f));
+  auto rightvalues = OwnedEmbedding(3, 3, {1, 0, 0, 2, 2, 0, 3, 3, 3});
+  auto values      = OwnedEmbedding(3, 3, std::vector<float>(9, -1.0f));
   base::ConstArray<uint64_t> keys_array(keys);
 
   CHECK(client.PutParameter(keys, rightvalues));
@@ -83,8 +85,8 @@ void TestDirectClient() {
 
   client.ClearPS();
   std::vector<uint64_t> keys = {1, 2, 3};
-  auto rightvalues           = OwnedEmbedding(3, 3, {1, 0, 0, 2, 2, 0, 3, 3, 3});
-  auto values                = OwnedEmbedding(3, 3, std::vector<float>(9, -1.0f));
+  auto rightvalues = OwnedEmbedding(3, 3, {1, 0, 0, 2, 2, 0, 3, 3, 3});
+  auto values      = OwnedEmbedding(3, 3, std::vector<float>(9, -1.0f));
   base::ConstArray<uint64_t> keys_array(keys);
 
   CHECK(client.GetParameter(keys_array, values) == 0);
@@ -106,8 +108,8 @@ void TestPrefetch() {
   client.ClearPS();
 
   std::vector<uint64_t> keys = {100, 101, 102, 103, 104};
-  auto values =
-      OwnedEmbedding(5, 2, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f});
+  auto values                = OwnedEmbedding(
+      5, 2, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f});
 
   CHECK(client.PutParameter(keys, values));
   base::ConstArray<uint64_t> keys_array(keys);
@@ -117,7 +119,9 @@ void TestPrefetch() {
     client.WaitForPrefetch(prefetch_id);
     base::RecTensor fetched({0, 2}, base::DataType::FLOAT32);
     if (client.GetPrefetchResult(prefetch_id, fetched)) {
-      CHECK(TensorEq(fetched, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}));
+      CHECK(TensorEq(
+          fetched,
+          {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f}));
       std::cout << "Prefetch test passed!" << std::endl;
     } else {
       std::cout << "Failed to get prefetch result" << std::endl;
@@ -181,10 +185,10 @@ void TestAsyncReadWriteConcurrency() {
     CHECK(client.GetPrefetchResult(prefetch_ids[i], fetched));
     CHECK(fetched.shape(0) == kRowsPerCase);
     CHECK(fetched.shape(1) == kDim);
-    CHECK(TensorEq(fetched,
-                   {cases[i].values.data_as<float>(),
-                    cases[i].values.data_as<float>() +
-                        cases[i].values.num_elements()}));
+    CHECK(TensorEq(
+        fetched,
+        {cases[i].values.data_as<float>(),
+         cases[i].values.data_as<float>() + cases[i].values.num_elements()}));
   }
 
   CHECK(client.ClearPS());

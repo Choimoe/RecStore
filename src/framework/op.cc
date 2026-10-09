@@ -628,8 +628,7 @@ void KVClientOp::EmbInit(const base::RecTensor& keys,
 uint64_t
 KVClientOp::EmbPrefetch(const base::RecTensor& keys, const RecTensor& values) {
   if (IsHierKVBackendName(ps_backend_name_)) {
-    const int64_t embedding_dim =
-        values.dim() == 2 ? values.shape(1) : 0;
+    const int64_t embedding_dim = values.dim() == 2 ? values.shape(1) : 0;
     return GetHierKVLocalRuntime().Prefetch(keys, embedding_dim);
   }
   const uint64_t* keys_data = keys.data_as<uint64_t>();

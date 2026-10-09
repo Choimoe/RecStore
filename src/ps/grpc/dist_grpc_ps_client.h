@@ -19,8 +19,8 @@ class DistributedGRPCParameterClient
     : public DistributedShardedClient<GRPCParameterClient> {
 public:
   explicit DistributedGRPCParameterClient(json config)
-      : DistributedShardedClient<GRPCParameterClient>(std::move(config),
-                                                      "GRPC") {}
+      : DistributedShardedClient<GRPCParameterClient>(
+            std::move(config), "GRPC") {}
 };
 
 } // namespace recstore

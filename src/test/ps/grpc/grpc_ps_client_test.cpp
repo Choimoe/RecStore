@@ -18,13 +18,15 @@ namespace {
 constexpr int kGrpcTestPort0 = 15123;
 constexpr int kGrpcTestPort1 = 15124;
 
-base::RecTensor OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
+base::RecTensor
+OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
   base::RecTensor t({n, d}, base::DataType::FLOAT32);
   if (t.data() != nullptr && !flat.empty()) {
-    std::memcpy(t.data(),
-                flat.data(),
-                sizeof(float) * std::min(flat.size(),
-                                         static_cast<size_t>(t.num_elements())));
+    std::memcpy(
+        t.data(),
+        flat.data(),
+        sizeof(float) *
+            std::min(flat.size(), static_cast<size_t>(t.num_elements())));
   }
   return t;
 }
@@ -53,8 +55,8 @@ void TestFactoryClient(int grpc_port) {
 
   GRPCParameterClient client(config);
   std::vector<uint64_t> keys = {1, 2, 3};
-  auto rightvalues           = OwnedEmbedding(3, 3, {1, 0, 0, 2, 2, 0, 3, 3, 3});
-  auto values                = OwnedEmbedding(3, 3, std::vector<float>(9, -1.0f));
+  auto rightvalues = OwnedEmbedding(3, 3, {1, 0, 0, 2, 2, 0, 3, 3, 3});
+  auto values      = OwnedEmbedding(3, 3, std::vector<float>(9, -1.0f));
   base::ConstArray<uint64_t> keys_array(keys);
 
   CHECK(client.PutParameter(keys, rightvalues));
@@ -124,10 +126,10 @@ void TestAsyncReadWriteConcurrency(int grpc_port) {
     CHECK(client.GetPrefetchResult(prefetch_ids[i], fetched));
     CHECK(fetched.shape(0) == kRowsPerCase);
     CHECK(fetched.shape(1) == kDim);
-    CHECK(TensorEq(fetched,
-                   {cases[i].values.data_as<float>(),
-                    cases[i].values.data_as<float>() +
-                        cases[i].values.num_elements()}));
+    CHECK(TensorEq(
+        fetched,
+        {cases[i].values.data_as<float>(),
+         cases[i].values.data_as<float>() + cases[i].values.num_elements()}));
   }
 
   CHECK(client.ClearPS());

@@ -34,9 +34,8 @@ public:
       if (it == rows.end()) {
         std::fill(out, out + D, 0.0f);
       } else {
-        std::copy_n(it->second.begin(),
-                    std::min<int64_t>(D, it->second.size()),
-                    out);
+        std::copy_n(
+            it->second.begin(), std::min<int64_t>(D, it->second.size()), out);
       }
     }
     return read_return;
@@ -49,9 +48,9 @@ public:
     if (!recstore::IsFloatEmbeddingValues(values, keys.size)) {
       return -1;
     }
-    const int64_t D = values.shape(1);
-    embedding_dim   = D;
-    last_put_dim    = D;
+    const int64_t D  = values.shape(1);
+    embedding_dim    = D;
+    last_put_dim     = D;
     const float* src = values.data_as<float>();
     last_put_values.assign(src, src + values.num_elements());
     for (int i = 0; i < keys.size; ++i) {
@@ -69,9 +68,8 @@ public:
     last_update_dim   = grads.dim() == 2 ? grads.shape(1) : 0;
     last_update_keys.assign(keys.Data(), keys.Data() + keys.size);
     if (grads.data() != nullptr) {
-      last_update_grads.assign(
-          grads.data_as<float>(),
-          grads.data_as<float>() + grads.num_elements());
+      last_update_grads.assign(grads.data_as<float>(),
+                               grads.data_as<float>() + grads.num_elements());
     }
     return update_return;
   }
@@ -102,8 +100,8 @@ public:
     last_wait_prefetch_id = prefetch_id;
   }
 
-  bool GetPrefetchResult(uint64_t prefetch_id,
-                         base::RecTensor& values) override {
+  bool
+  GetPrefetchResult(uint64_t prefetch_id, base::RecTensor& values) override {
     last_result_prefetch_id = prefetch_id;
     if (!recstore::EnsureEmbeddingOutput(
             values, static_cast<int64_t>(prefetch_result.size()))) {
@@ -120,25 +118,25 @@ public:
     return true;
   }
 
-  int64_t embedding_dim                 = 3;
-  int read_return                       = 0;
-  int write_return                      = 0;
-  int update_return                     = 0;
-  int init_table_return                 = 0;
-  bool prefetch_done_return             = true;
-  uint64_t next_prefetch_id             = 700;
-  int get_calls                         = 0;
-  int put_calls                         = 0;
-  int update_calls                      = 0;
-  int init_table_calls                  = 0;
-  int prefetch_calls                    = 0;
-  int64_t last_get_rows                 = 0;
-  int64_t last_put_rows                 = 0;
-  int64_t last_update_rows              = 0;
-  int64_t last_update_dim               = 0;
-  uint64_t last_prefetch_done_id        = 0;
-  uint64_t last_wait_prefetch_id        = 0;
-  uint64_t last_result_prefetch_id      = 0;
+  int64_t embedding_dim            = 3;
+  int read_return                  = 0;
+  int write_return                 = 0;
+  int update_return                = 0;
+  int init_table_return            = 0;
+  bool prefetch_done_return        = true;
+  uint64_t next_prefetch_id        = 700;
+  int get_calls                    = 0;
+  int put_calls                    = 0;
+  int update_calls                 = 0;
+  int init_table_calls             = 0;
+  int prefetch_calls               = 0;
+  int64_t last_get_rows            = 0;
+  int64_t last_put_rows            = 0;
+  int64_t last_update_rows         = 0;
+  int64_t last_update_dim          = 0;
+  uint64_t last_prefetch_done_id   = 0;
+  uint64_t last_wait_prefetch_id   = 0;
+  uint64_t last_result_prefetch_id = 0;
   std::string last_update_table;
   std::string last_init_table;
   recstore::EmbeddingTableConfig last_init_config{0, 0};
@@ -356,8 +354,8 @@ TEST_F(OpTest, PrefetchResultsConsumeCachedRows) {
   base::RecTensor missing({0, 3}, base::DataType::FLOAT32);
   op_.GetPretchResult(missing_id, missing);
   EXPECT_EQ(missing.shape(0), 2);
-  EXPECT_EQ(std::vector<float>(missing.data_as<float>(),
-                               missing.data_as<float>() + 6),
+  EXPECT_EQ(std::vector<float>(
+                missing.data_as<float>(), missing.data_as<float>() + 6),
             (std::vector<float>(6, 0.0f)));
 }
 
@@ -494,8 +492,9 @@ TEST_F(InjectedClientOpTest, NonHierKVPrefetchDelegatesStatusAndResults) {
   EXPECT_EQ(client_->last_result_prefetch_id, prefetch_id);
   ASSERT_EQ(rows.shape(0), 1);
   ASSERT_EQ(rows.shape(1), 3);
-  EXPECT_EQ(std::vector<float>(rows.data_as<float>(), rows.data_as<float>() + 3),
-            (std::vector<float>{1.0f, 2.0f, 3.0f}));
+  EXPECT_EQ(
+      std::vector<float>(rows.data_as<float>(), rows.data_as<float>() + 3),
+      (std::vector<float>{1.0f, 2.0f, 3.0f}));
 
   std::vector<float> invalid_storage(6);
   auto invalid_rows = FloatTensor(&invalid_storage, 2, 3);

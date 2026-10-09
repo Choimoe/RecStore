@@ -17,13 +17,13 @@ PersistLoopShmMalloc::PersistLoopShmMalloc(
   }
   healthy_used_    = block_num_ * FLAGS_shm_malloc_healthy_rate;
   bool file_exists = base::file_util::PathExists(filename);
-  shm_file_        = ShmFile::New(ShmFile::ConfigForMedium(
-      medium, filename, memory_size));
+  shm_file_ =
+      ShmFile::New(ShmFile::ConfigForMedium(medium, filename, memory_size));
   if (!shm_file_) {
     file_exists = false;
     CHECK(base::file_util::Delete(filename, false));
-    shm_file_ = ShmFile::New(ShmFile::ConfigForMedium(
-        medium, filename, memory_size));
+    shm_file_ =
+        ShmFile::New(ShmFile::ConfigForMedium(medium, filename, memory_size));
     CHECK(shm_file_) << filename << " " << memory_size;
   }
 

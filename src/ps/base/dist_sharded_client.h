@@ -123,8 +123,9 @@ public:
   bool ClearPS() {
     std::vector<std::future<bool>> futures;
     for (auto& client : clients_) {
-      futures.push_back(std::async(std::launch::async,
-                                   [&client]() { return client->ClearPS(); }));
+      futures.push_back(std::async(std::launch::async, [&client]() {
+        return client->ClearPS();
+      }));
     }
     bool all_success = true;
     for (auto& future : futures) {
@@ -139,8 +140,9 @@ public:
     std::vector<std::future<bool>> futures;
     for (auto& client : clients_) {
       ClientT* raw = client.get();
-      futures.push_back(std::async(std::launch::async,
-                                   [raw, n]() { return raw->LoadFakeData(n); }));
+      futures.push_back(std::async(std::launch::async, [raw, n]() {
+        return raw->LoadFakeData(n);
+      }));
     }
     bool all_success = true;
     for (auto& future : futures) {
@@ -155,8 +157,9 @@ public:
     std::vector<std::future<bool>> futures;
     for (auto& client : clients_) {
       ClientT* raw = client.get();
-      futures.push_back(std::async(std::launch::async,
-                                   [raw, n]() { return raw->DumpFakeData(n); }));
+      futures.push_back(std::async(std::launch::async, [raw, n]() {
+        return raw->DumpFakeData(n);
+      }));
     }
     bool all_success = true;
     for (auto& future : futures) {
@@ -241,8 +244,7 @@ public:
       auto* client     = clients_[client_index].get();
 
       futures.push_back(std::async(
-          std::launch::async,
-          [=, &partitioned_keys, &partitioned_results]() {
+          std::launch::async, [=, &partitioned_keys, &partitioned_results]() {
             const auto& shard_keys_vec = partitioned_keys[shard_id];
             float* shard_dst = partitioned_results[shard_id].data_as<float>();
             for (size_t start = 0; start < shard_keys_vec.size();
@@ -252,9 +254,8 @@ public:
                            shard_keys_vec.size());
               base::ConstArray<uint64_t> shard_chunk(
                   shard_keys_vec.data() + start, static_cast<int>(end - start));
-              base::RecTensor chunk(
-                  shard_dst + start * static_cast<size_t>(D),
-                  {static_cast<int64_t>(end - start), D});
+              base::RecTensor chunk(shard_dst + start * static_cast<size_t>(D),
+                                    {static_cast<int64_t>(end - start), D});
               if (client->GetParameter(shard_chunk, chunk) != 0) {
                 return 0;
               }
@@ -277,12 +278,14 @@ public:
 
 #ifdef ENABLE_PERF_REPORT
     auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                        end_time - start_time)
-                        .count();
-    double start_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                          start_time.time_since_epoch())
-                          .count();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            end_time - start_time)
+            .count();
+    double start_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            start_time.time_since_epoch())
+            .count();
     FlameGraphData fg_data = {
         "dist_client::GetParameter",
         start_us,
@@ -338,8 +341,7 @@ public:
       auto* client     = clients_[client_index].get();
 
       futures.push_back(std::async(
-          std::launch::async,
-          [=, &partitioned_keys, &partitioned_values]() {
+          std::launch::async, [=, &partitioned_keys, &partitioned_values]() {
             const auto& shard_keys_vec = partitioned_keys[shard_id];
             float* shard_src = partitioned_values[shard_id].data_as<float>();
             for (size_t start = 0; start < shard_keys_vec.size();
@@ -423,8 +425,7 @@ public:
       auto* client     = clients_[client_index].get();
 
       futures.push_back(std::async(
-          std::launch::async,
-          [=, &partitioned_keys, &partitioned_grads]() {
+          std::launch::async, [=, &partitioned_keys, &partitioned_grads]() {
             const auto& shard_keys_vec = partitioned_keys[shard_id];
             float* shard_src = partitioned_grads[shard_id].data_as<float>();
             for (size_t start = 0; start < shard_keys_vec.size();
@@ -456,8 +457,9 @@ public:
     return 0;
   }
 
-  int InitEmbeddingTable(const std::string& table_name,
-                         const recstore::EmbeddingTableConfig& config) override {
+  int InitEmbeddingTable(
+      const std::string& table_name,
+      const recstore::EmbeddingTableConfig& config) override {
     std::vector<std::future<int>> futures;
     for (auto& client : clients_) {
       futures.push_back(
@@ -483,8 +485,7 @@ public:
     return tag;
   }
 
-  uint64_t
-  PrefetchParameter(const base::ConstArray<uint64_t>& keys) override {
+  uint64_t PrefetchParameter(const base::ConstArray<uint64_t>& keys) override {
     auto cleanup_state = [this](const DistPrefetchState& state) {
       for (const auto& shard_state : state.shard_states) {
         if (shard_state.client_index < 0 ||
@@ -606,8 +607,8 @@ public:
     }
   }
 
-  bool GetPrefetchResult(uint64_t prefetch_id,
-                         base::RecTensor& values) override {
+  bool
+  GetPrefetchResult(uint64_t prefetch_id, base::RecTensor& values) override {
     std::shared_ptr<DistPrefetchState> state;
     {
       std::lock_guard<std::mutex> lk(prefetch_mu_);
@@ -621,11 +622,9 @@ public:
 
     WaitForPrefetch(prefetch_id);
 
-    const bool discard =
-        values.data() == nullptr && values.dim() == 0;
-    if (!discard &&
-        !EnsureEmbeddingOutput(values,
-                               static_cast<int64_t>(state->total_keys))) {
+    const bool discard = values.data() == nullptr && values.dim() == 0;
+    if (!discard && !EnsureEmbeddingOutput(
+                        values, static_cast<int64_t>(state->total_keys))) {
       return false;
     }
     const int64_t D = discard ? 0 : values.shape(1);
@@ -636,15 +635,16 @@ public:
       size_t shard_offset = 0;
       for (size_t i = 0; i < shard_state.child_prefetch_ids.size(); ++i) {
         const int expected =
-            (i < shard_state.chunk_sizes.size() ? shard_state.chunk_sizes[i]
-                                                : -1);
+            (i < shard_state.chunk_sizes.size()
+                 ? shard_state.chunk_sizes[i]
+                 : -1);
         base::RecTensor chunk_values;
         if (!discard && expected > 0) {
           chunk_values = base::RecTensor(
               {static_cast<int64_t>(expected), D}, base::DataType::FLOAT32);
         }
-        if (!client->GetPrefetchResult(shard_state.child_prefetch_ids[i],
-                                       chunk_values)) {
+        if (!client->GetPrefetchResult(
+                shard_state.child_prefetch_ids[i], chunk_values)) {
           ok_all = false;
           break;
         }
@@ -771,9 +771,9 @@ private:
     }
   }
 
-  void PartitionKeys(
-      const base::ConstArray<uint64_t>& keys,
-      std::vector<std::vector<uint64_t>>& partitioned_keys) const {
+  void
+  PartitionKeys(const base::ConstArray<uint64_t>& keys,
+                std::vector<std::vector<uint64_t>>& partitioned_keys) const {
     for (auto& partition : partitioned_key_buffer_) {
       partition.clear();
     }

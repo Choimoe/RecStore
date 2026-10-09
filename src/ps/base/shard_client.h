@@ -19,34 +19,35 @@ public:
   virtual ~ShardClient() = default;
 
   virtual int GetParameter(const base::ConstArray<uint64_t>& keys,
-                           base::RecTensor& values) = 0;
+                           base::RecTensor& values)                  = 0;
   virtual int PutParameter(const base::ConstArray<uint64_t>& keys,
-                           const base::RecTensor& values) = 0;
+                           const base::RecTensor& values)            = 0;
   virtual int UpdateParameter(const std::string& table_name,
                               const base::ConstArray<uint64_t>& keys,
-                              const base::RecTensor& grads) = 0;
+                              const base::RecTensor& grads)          = 0;
   virtual int InitEmbeddingTable(const std::string& table_name,
                                  const EmbeddingTableConfig& config) = 0;
-  virtual void Command(PSCommand command) = 0;
+  virtual void Command(PSCommand command)                            = 0;
 
-  virtual bool SaveCheckpoint(const std::string& path,
-                              const std::string& metadata) {
+  virtual bool
+  SaveCheckpoint(const std::string& path, const std::string& metadata) {
     (void)path;
     (void)metadata;
     return false;
   }
-  virtual bool LoadCheckpoint(const std::string& path,
-                              const std::string& metadata) {
+  virtual bool
+  LoadCheckpoint(const std::string& path, const std::string& metadata) {
     (void)path;
     (void)metadata;
     return false;
   }
 
-  virtual uint64_t PrefetchParameter(const base::ConstArray<uint64_t>& keys) = 0;
-  virtual bool IsPrefetchDone(uint64_t prefetch_id) = 0;
-  virtual void WaitForPrefetch(uint64_t prefetch_id) = 0;
-  virtual bool GetPrefetchResult(uint64_t prefetch_id,
-                                 base::RecTensor& values) = 0;
+  virtual uint64_t
+  PrefetchParameter(const base::ConstArray<uint64_t>& keys) = 0;
+  virtual bool IsPrefetchDone(uint64_t prefetch_id)         = 0;
+  virtual void WaitForPrefetch(uint64_t prefetch_id)        = 0;
+  virtual bool
+  GetPrefetchResult(uint64_t prefetch_id, base::RecTensor& values) = 0;
 };
 
 } // namespace recstore

@@ -159,9 +159,8 @@ MakeBatchKeys(int64_t num_embeddings, int batch_keys, int64_t batch_offset) {
 
 base::RecTensor
 MakeValues(const std::vector<uint64_t>& keys, int embedding_dim) {
-  base::RecTensor values(
-      {static_cast<int64_t>(keys.size()), embedding_dim},
-      base::DataType::FLOAT32);
+  base::RecTensor values({static_cast<int64_t>(keys.size()), embedding_dim},
+                         base::DataType::FLOAT32);
   float* dst = values.data_as<float>();
   for (size_t row = 0; row < keys.size(); ++row) {
     for (int col = 0; col < embedding_dim; ++col) {

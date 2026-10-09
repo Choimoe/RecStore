@@ -23,7 +23,9 @@ DEFINE_string(
     "CONCURRENT_SLAB_MEMORY_POOL,R2_SLAB,PERSIST_LOOP_SLAB,PERSIST_MEMORY_POOL",
     "Comma-separated MallocApi factory names to benchmark");
 DEFINE_int32(thread_num, 16, "Number of concurrent worker threads");
-DEFINE_int32(alloc_size, 128, "Allocation size in bytes for each New/Free pair");
+DEFINE_int32(alloc_size,
+             128,
+             "Allocation size in bytes for each New/Free pair");
 DEFINE_int32(warmup_seconds, 1, "Warmup duration in seconds");
 DEFINE_int32(running_seconds, 5, "Measured benchmark duration in seconds");
 DEFINE_int64(pool_bytes,
@@ -33,8 +35,8 @@ DEFINE_string(medium, "DRAM", "Shm medium passed to MallocApi factory");
 
 namespace {
 
-using MallocFactory =
-    base::Factory<base::MallocApi, const std::string&, int64, const std::string&>;
+using MallocFactory = base::
+    Factory<base::MallocApi, const std::string&, int64, const std::string&>;
 
 struct BenchResult {
   std::string allocator;
@@ -88,25 +90,30 @@ void RunTimedWorkers(base::MallocApi* allocator,
   std::vector<std::thread> threads;
   threads.reserve(static_cast<size_t>(thread_num));
   for (int tid = 0; tid < thread_num; ++tid) {
-    threads.emplace_back([allocator, alloc_size, &stop, tid, per_thread_ops,
-                          per_thread_failures]() {
-      base::auto_bind_core();
-      uint64_t ops      = 0;
-      uint64_t failures = 0;
-      while (!stop.load(std::memory_order_acquire)) {
-        char* ptr = allocator->New(alloc_size);
-        if (ptr == nullptr) {
-          ++failures;
-          continue;
-        }
-        if (!allocator->Free(ptr)) {
-          ++failures;
-        }
-        ++ops;
-      }
-      (*per_thread_ops)[static_cast<size_t>(tid)]      = ops;
-      (*per_thread_failures)[static_cast<size_t>(tid)] = failures;
-    });
+    threads.emplace_back(
+        [allocator,
+         alloc_size,
+         &stop,
+         tid,
+         per_thread_ops,
+         per_thread_failures]() {
+          base::auto_bind_core();
+          uint64_t ops      = 0;
+          uint64_t failures = 0;
+          while (!stop.load(std::memory_order_acquire)) {
+            char* ptr = allocator->New(alloc_size);
+            if (ptr == nullptr) {
+              ++failures;
+              continue;
+            }
+            if (!allocator->Free(ptr)) {
+              ++failures;
+            }
+            ++ops;
+          }
+          (*per_thread_ops)[static_cast<size_t>(tid)]      = ops;
+          (*per_thread_failures)[static_cast<size_t>(tid)] = failures;
+        });
   }
 
   std::this_thread::sleep_for(std::chrono::seconds(duration_seconds));
@@ -132,25 +139,27 @@ BenchResult BenchmarkAllocator(const std::string& allocator_name) {
     return result;
   }
 
-  std::vector<uint64_t> per_thread_ops(static_cast<size_t>(FLAGS_thread_num),
-                                       0);
+  std::vector<uint64_t> per_thread_ops(
+      static_cast<size_t>(FLAGS_thread_num), 0);
   std::vector<uint64_t> per_thread_failures(
       static_cast<size_t>(FLAGS_thread_num), 0);
 
   if (FLAGS_warmup_seconds > 0) {
-    RunTimedWorkers(allocator.get(),
-                    FLAGS_alloc_size,
-                    FLAGS_warmup_seconds,
-                    &per_thread_ops,
-                    &per_thread_failures);
+    RunTimedWorkers(
+        allocator.get(),
+        FLAGS_alloc_size,
+        FLAGS_warmup_seconds,
+        &per_thread_ops,
+        &per_thread_failures);
   }
 
   const auto start = std::chrono::steady_clock::now();
-  RunTimedWorkers(allocator.get(),
-                  FLAGS_alloc_size,
-                  FLAGS_running_seconds,
-                  &per_thread_ops,
-                  &per_thread_failures);
+  RunTimedWorkers(
+      allocator.get(),
+      FLAGS_alloc_size,
+      FLAGS_running_seconds,
+      &per_thread_ops,
+      &per_thread_failures);
   const auto end = std::chrono::steady_clock::now();
 
   result.elapsed_sec = std::chrono::duration<double>(end - start).count();
@@ -160,7 +169,8 @@ BenchResult BenchmarkAllocator(const std::string& allocator_name) {
   }
 
   if (result.elapsed_sec > 0.0) {
-    result.ops_per_sec = static_cast<double>(result.total_ops) / result.elapsed_sec;
+    result.ops_per_sec =
+        static_cast<double>(result.total_ops) / result.elapsed_sec;
     result.alloc_mb_per_sec =
         (static_cast<double>(result.total_ops) * FLAGS_alloc_size) /
         result.elapsed_sec / (1024.0 * 1024.0);

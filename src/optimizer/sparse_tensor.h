@@ -18,9 +18,8 @@ inline TAG_TYPE ExtractKeyTag(uint64_t key) {
   return static_cast<TAG_TYPE>(key >> KeyTagShift());
 }
 
-inline TAG_TYPE MakeTensorTag(uint64_t table_id,
-                              int role,
-                              int tensors_per_table) {
+inline TAG_TYPE
+MakeTensorTag(uint64_t table_id, int role, int tensors_per_table) {
   if (tensors_per_table <= 0 || role < 0 || role >= tensors_per_table) {
     throw std::runtime_error("invalid embedding tensor tag role");
   }

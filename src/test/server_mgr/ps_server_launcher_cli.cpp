@@ -32,7 +32,7 @@ LauncherOptions OptionsFromArgs(int argc, char** argv, int start_index) {
 
   for (int i = start_index; i < argc; ++i) {
     const std::string arg = argv[i];
-    auto require_value = [&](const char* flag) -> std::string {
+    auto require_value    = [&](const char* flag) -> std::string {
       if (i + 1 >= argc) {
         throw std::runtime_error(std::string("Missing value for ") + flag);
       }

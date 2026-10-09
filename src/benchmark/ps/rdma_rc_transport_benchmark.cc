@@ -338,7 +338,7 @@ void RunAsyncStreamOperation(recstore::RdmaRawAccess* raw,
     int submitted     = 0;
     const int initial = std::min(FLAGS_async_depth, requests_per_round);
     for (; submitted < initial; ++submitted) {
-      const int slot = submitted % FLAGS_async_depth;
+      const int slot                          = submitted % FLAGS_async_depth;
       rpc_ids[static_cast<std::size_t>(slot)] = raw->SubmitGetParameter(
           input.key_array,
           outputs[static_cast<std::size_t>(slot)].data(),
@@ -453,7 +453,7 @@ int main(int argc, char** argv) {
     BenchmarkInput input = MakeInput();
     BenchmarkClient benchmark_client(FLAGS_num_shards);
     recstore::RDMAPSClientAdapter* adapter = benchmark_client.get();
-    recstore::RdmaRawAccess* raw = benchmark_client.raw();
+    recstore::RdmaRawAccess* raw           = benchmark_client.raw();
     CHECK_NE(adapter, nullptr);
     CHECK_NE(raw, nullptr);
 

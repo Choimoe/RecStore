@@ -25,13 +25,15 @@ void DisableGrpcTracingEnv() {
   unsetenv("GRPC_VERBOSITY");
 }
 
-base::RecTensor OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
+base::RecTensor
+OwnedEmbedding(int64_t n, int64_t d, const std::vector<float>& flat) {
   base::RecTensor t({n, d}, base::DataType::FLOAT32);
   if (t.data() != nullptr && !flat.empty()) {
-    std::memcpy(t.data(),
-                flat.data(),
-                sizeof(float) * std::min(flat.size(),
-                                         static_cast<size_t>(t.num_elements())));
+    std::memcpy(
+        t.data(),
+        flat.data(),
+        sizeof(float) *
+            std::min(flat.size(), static_cast<size_t>(t.num_elements())));
   }
   return t;
 }
@@ -169,7 +171,7 @@ void TestPrefetch(const std::vector<int>& ports) {
   DistributedGRPCParameterClient client(config);
   client.ClearPS();
 
-  std::vector<uint64_t> keys = {100, 101, 102, 103, 104, 105, 106, 107};
+  std::vector<uint64_t> keys    = {100, 101, 102, 103, 104, 105, 106, 107};
   const std::vector<float> flat = {
       1.0f, 1.1f, 1.2f, 2.0f, 2.1f, 2.2f, 3.0f, 3.1f, 3.2f, 4.0f, 4.1f, 4.2f,
       5.0f, 5.1f, 5.2f, 6.0f, 6.1f, 6.2f, 7.0f, 7.1f, 7.2f, 8.0f, 8.1f, 8.2f};

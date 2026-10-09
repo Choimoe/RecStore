@@ -298,9 +298,9 @@ BaseKVConfig BuildConfig() {
   if (ssd_index) {
     config.json_config_["index"]["path"] = FLAGS_ssd_path + "/index.db";
     config.json_config_["index"]["io"]   = {
-          {"type", FLAGS_ssd_io_backend},
-          {"queue_depth", FLAGS_ssd_queue_depth},
-          {"base_offset_bytes", 0}};
+        {"type", FLAGS_ssd_io_backend},
+        {"queue_depth", FLAGS_ssd_queue_depth},
+        {"base_offset_bytes", 0}};
   }
 
   uint64_t dram_capacity =

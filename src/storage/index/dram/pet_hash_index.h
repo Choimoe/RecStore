@@ -52,7 +52,7 @@ public:
         impl_->HintPrefetch(keys[i + 1]);
       }
       auto [value, exists] = impl_->Get(keys[i]);
-      pointers[i] = exists ? value : NONE;
+      pointers[i]          = exists ? value : NONE;
     }
   }
 

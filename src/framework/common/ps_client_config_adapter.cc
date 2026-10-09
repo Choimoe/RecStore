@@ -102,14 +102,15 @@ json ResolveFrameworkPSClientTransportConfig(const json& config) {
 
 PSClientCreateOptions
 ResolvePSClientOptionsFromFrameworkConfig(const json& config) {
-  json raw_config = config;
-  const PSClientType type = ResolveFrameworkPSClientType(config);
+  json raw_config             = config;
+  const PSClientType type     = ResolveFrameworkPSClientType(config);
   const json transport_config = ResolveFrameworkPSClientTransportConfig(config);
 
   json distributed_client = ResolveFrameworkDistributedClientConfig(config);
-  const bool has_servers = distributed_client.contains("servers") &&
-                           distributed_client["servers"].is_array() &&
-                           !distributed_client["servers"].empty();
+  const bool has_servers =
+      distributed_client.contains("servers") &&
+      distributed_client["servers"].is_array() &&
+      !distributed_client["servers"].empty();
   if (!has_servers &&
       (type == PSClientType::kGrpc || type == PSClientType::kBrpc)) {
     // Single-server deployment: synthesize a one-shard distributed_client so
@@ -126,9 +127,10 @@ ResolvePSClientOptionsFromFrameworkConfig(const json& config) {
     raw_config["distributed_client"] = distributed_client;
   }
 
-  return PSClientCreateOptions{.type             = type,
-                               .transport_config = transport_config,
-                               .raw_config       = raw_config};
+  return PSClientCreateOptions{
+      .type             = type,
+      .transport_config = transport_config,
+      .raw_config       = raw_config};
 }
 
 } // namespace recstore

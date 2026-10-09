@@ -22,7 +22,7 @@ public:
     std::unique_lock<std::shared_mutex> lock(mu_);
     auto it            = map_.find(key);
     Value_t old_handle = (it == map_.end()) ? kValueHandleNone : it->second;
-    map_[key] = pointer;
+    map_[key]          = pointer;
     return old_handle;
   }
 

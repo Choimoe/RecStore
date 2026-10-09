@@ -19,8 +19,8 @@ class DistributedBRPCParameterClient
     : public DistributedShardedClient<BRPCParameterClient> {
 public:
   explicit DistributedBRPCParameterClient(json config)
-      : DistributedShardedClient<BRPCParameterClient>(std::move(config),
-                                                      "BRPC") {}
+      : DistributedShardedClient<BRPCParameterClient>(
+            std::move(config), "BRPC") {}
 };
 
 } // namespace recstore

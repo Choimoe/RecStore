@@ -114,15 +114,14 @@ GRPCParameterClient::GRPCParameterClient(
   }
 }
 
-
 int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t>& keys,
                                       base::RecTensor& values) {
 #ifdef ENABLE_PERF_REPORT
   auto start_time = std::chrono::high_resolution_clock::now();
 #endif
 
-  if (!recstore::IsFloatEmbeddingValues(values,
-                                        static_cast<int64_t>(keys.Size()))) {
+  if (!recstore::IsFloatEmbeddingValues(
+          values, static_cast<int64_t>(keys.Size()))) {
     return -1;
   }
   if (keys.Size() == 0) {
@@ -130,9 +129,7 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t>& keys,
   }
   const int64_t D = values.shape(1);
   float* dst      = values.data_as<float>();
-  std::memset(dst,
-              0,
-              keys.Size() * static_cast<size_t>(D) * sizeof(float));
+  std::memset(dst, 0, keys.Size() * static_cast<size_t>(D) * sizeof(float));
 
   if (FLAGS_parameter_client_random_init) {
     std::fill(dst, dst + keys.Size() * static_cast<size_t>(D), 0.1f);
@@ -206,8 +203,8 @@ int GRPCParameterClient::GetParameter(const base::ConstArray<uint64_t>& keys,
 
   size_t row_offset = 0;
   for (int i = 0; i < get_param_responses_.size(); ++i) {
-    auto& response  = get_param_responses_[i];
-    int key_size    = get_param_key_sizes_[i];
+    auto& response = get_param_responses_[i];
+    int key_size   = get_param_key_sizes_[i];
     if (response.parameter_value().empty()) {
       row_offset += static_cast<size_t>(key_size);
       continue;
@@ -393,8 +390,8 @@ void GRPCParameterClient::WaitForPrefetch(uint64_t prefetch_id) {
   }
 }
 
-bool GRPCParameterClient::GetPrefetchResult(
-    uint64_t prefetch_id, base::RecTensor& values) {
+bool GRPCParameterClient::GetPrefetchResult(uint64_t prefetch_id,
+                                            base::RecTensor& values) {
   std::lock_guard<std::mutex> lk(prefetch_mu_);
   auto it = prefetch_batches_.find(prefetch_id);
   if (it == prefetch_batches_.end()) {
@@ -408,11 +405,9 @@ bool GRPCParameterClient::GetPrefetchResult(
   for (const auto& size : pb.key_sizes_) {
     keys_size += size;
   }
-  const bool discard =
-      values.data() == nullptr && values.dim() == 0;
-  if (!discard &&
-      !recstore::EnsureEmbeddingOutput(values,
-                                       static_cast<int64_t>(keys_size))) {
+  const bool discard = values.data() == nullptr && values.dim() == 0;
+  if (!discard && !recstore::EnsureEmbeddingOutput(
+                      values, static_cast<int64_t>(keys_size))) {
     return false;
   }
   const int64_t D = discard ? 0 : values.shape(1);
@@ -426,8 +421,8 @@ bool GRPCParameterClient::GetPrefetchResult(
   size_t row_offset = 0;
 
   for (int i = 0; i < request_num; ++i) {
-    auto& response  = pb.responses_[i];
-    int key_size    = pb.key_sizes_[i];
+    auto& response = pb.responses_[i];
+    int key_size   = pb.key_sizes_[i];
     if (response.parameter_value().empty()) {
       row_offset += static_cast<size_t>(key_size);
       continue;
@@ -453,7 +448,6 @@ bool GRPCParameterClient::GetPrefetchResult(
 
   return true;
 }
-
 
 bool GRPCParameterClient::ClearPS() {
   CommandRequest request;
@@ -566,10 +560,10 @@ bool GRPCParameterClient::LoadCheckpoint(const std::string& path,
   return status.ok();
 }
 
-bool GRPCParameterClient::PutParameter(
-    const std::vector<uint64_t>& keys, const base::RecTensor& values) {
-  if (!recstore::IsFloatEmbeddingValues(values,
-                                        static_cast<int64_t>(keys.size()))) {
+bool GRPCParameterClient::PutParameter(const std::vector<uint64_t>& keys,
+                                       const base::RecTensor& values) {
+  if (!recstore::IsFloatEmbeddingValues(
+          values, static_cast<int64_t>(keys.size()))) {
     LOG(ERROR) << "PutParameter keys/values size mismatch: " << keys.size();
     return false;
   }
@@ -582,12 +576,13 @@ bool GRPCParameterClient::PutParameter(
     PutParameterResponse response;
     ParameterCompressor compressor;
     std::vector<std::string> blocks;
-    CompressEmbeddingRows(&compressor,
-                          keys.data() + start,
-                          src + start * D,
-                          key_size,
-                          D,
-                          &blocks);
+    CompressEmbeddingRows(
+        &compressor,
+        keys.data() + start,
+        src + start * D,
+        key_size,
+        D,
+        &blocks);
     compressor.ToBlock(&blocks);
     CHECK_EQ(blocks.size(), 1);
     request.mutable_parameter_value()->swap(blocks[0]);
@@ -605,27 +600,27 @@ bool GRPCParameterClient::PutParameter(
   return true;
 }
 
-int GRPCParameterClient::UpdateParameter(
-    const std::string& table_name,
-    const base::ConstArray<uint64_t>& keys,
-    const base::RecTensor& grads) {
+int GRPCParameterClient::UpdateParameter(const std::string& table_name,
+                                         const base::ConstArray<uint64_t>& keys,
+                                         const base::RecTensor& grads) {
 #ifdef ENABLE_PERF_REPORT
   auto start_time         = std::chrono::high_resolution_clock::now();
   const uint64_t trace_id = recstore::g_trace_id;
 #endif
-  if (!recstore::IsFloatEmbeddingValues(grads,
-                                        static_cast<int64_t>(keys.Size()))) {
+  if (!recstore::IsFloatEmbeddingValues(
+          grads, static_cast<int64_t>(keys.Size()))) {
     LOG(ERROR) << "UpdateParameter keys/grads size mismatch: " << keys.Size();
     return -1;
   }
 
   ParameterCompressor compressor;
   if (keys.Size() > 0) {
-    CompressEmbeddingRows(&compressor,
-                          keys.Data(),
-                          grads.data_as<float>(),
-                          keys.Size(),
-                          grads.shape(1));
+    CompressEmbeddingRows(
+        &compressor,
+        keys.Data(),
+        grads.data_as<float>(),
+        keys.Size(),
+        grads.shape(1));
   }
 #ifdef ENABLE_PERF_REPORT
   auto serialize_done_time = std::chrono::high_resolution_clock::now();
@@ -701,7 +696,6 @@ int GRPCParameterClient::UpdateParameter(
   return response.success() ? 0 : -1;
 }
 
-
 int GRPCParameterClient::InitEmbeddingTable(
     const std::string& table_name,
     const recstore::EmbeddingTableConfig& config) {
@@ -727,9 +721,8 @@ int GRPCParameterClient::InitEmbeddingTable(
 //   ? 0 : -1;
 // }
 
-
-int GRPCParameterClient::PutParameter(
-    const base::ConstArray<uint64_t>& keys, const base::RecTensor& values) {
+int GRPCParameterClient::PutParameter(const base::ConstArray<uint64_t>& keys,
+                                      const base::RecTensor& values) {
   std::vector<uint64_t> key_vec(keys.Data(), keys.Data() + keys.Size());
   bool success = PutParameter(key_vec, values);
   if (!success) {
@@ -763,4 +756,3 @@ void GRPCParameterClient::Command(recstore::PSCommand command) {
     break;
   }
 }
-

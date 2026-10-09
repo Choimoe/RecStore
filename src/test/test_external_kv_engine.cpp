@@ -221,8 +221,8 @@ TEST(ExternalKVEngineFactoryTest, DETableEngineCanBeSelectedByConfigFile) {
 }
 
 TEST(ExternalKVEngineFactoryTest, DETableEngineSupportsFlatBatchAndClear) {
-  auto kv = CreateEngine("KVEngineDETable");
-  constexpr int kDim = static_cast<int>(kValueSize / sizeof(float));
+  auto kv                    = CreateEngine("KVEngineDETable");
+  constexpr int kDim         = static_cast<int>(kValueSize / sizeof(float));
   std::vector<uint64_t> keys = {1, 2};
   std::vector<float> first(kDim, 1.0F);
   std::vector<float> second(kDim, 2.0F);
@@ -234,12 +234,13 @@ TEST(ExternalKVEngineFactoryTest, DETableEngineSupportsFlatBatchAndClear) {
   std::vector<uint64_t> lookup = {2, 3};
   std::vector<float> output(lookup.size() * kDim, -1.0F);
   BaseKV::BatchGetFlatStats stats;
-  ASSERT_TRUE(kv->BatchGetFlat(base::ConstArray<uint64_t>(lookup),
-                               output.data(),
-                               lookup.size(),
-                               kDim,
-                               0,
-                               &stats));
+  ASSERT_TRUE(kv->BatchGetFlat(
+      base::ConstArray<uint64_t>(lookup),
+      output.data(),
+      lookup.size(),
+      kDim,
+      0,
+      &stats));
   EXPECT_EQ(stats.missing_rows, 1);
   EXPECT_FLOAT_EQ(output[0], 2.0F);
   EXPECT_FLOAT_EQ(output[kDim], 0.0F);
@@ -251,7 +252,7 @@ TEST(ExternalKVEngineFactoryTest, DETableEngineSupportsFlatBatchAndClear) {
 TEST(ExternalKVEngineFactoryTest, DETableEngineRequiresLibraryPath) {
   BaseKVConfig config = MakeExternalEngineConfig("KVEngineDETable", "/tmp/x");
   config.json_config_["detable"] = {{"library_path", ""}};
-  auto resolved = base::ResolveEngine(config);
+  auto resolved                  = base::ResolveEngine(config);
   EXPECT_THROW(std::unique_ptr<BaseKV>(
                    base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
                        resolved.engine, resolved.cfg)),

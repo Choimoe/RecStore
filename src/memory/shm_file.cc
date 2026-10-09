@@ -35,7 +35,7 @@ json ShmFile::ConfigForMedium(
     const std::string& medium, const std::string& filename, int64 size) {
   if (medium == "DRAM")
     return BuildShmFileConfig(kAnonyDramType, filename, size);
-    // return BuildShmFileConfig(kDevDaxType, filename, size);
+  // return BuildShmFileConfig(kDevDaxType, filename, size);
   if (medium == "SSD")
     return BuildShmFileConfig(kFsDaxType, filename, size);
   LOG(FATAL) << "Unsupported ShmFile medium: " << medium;

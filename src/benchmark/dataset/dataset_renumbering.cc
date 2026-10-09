@@ -148,7 +148,7 @@ int main(int argc, char** argv) {
   for (uint64_t i = 0; i < key_num; i++) {
     ids.push_back(data[2 * i]);
   }
-  delete[]((char*)data);
+  delete[] ((char*)data);
 
   LOG(INFO) << "push_back ids done";
 
