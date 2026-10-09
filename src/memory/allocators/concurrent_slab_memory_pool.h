@@ -73,6 +73,21 @@ inline bool TryFreeBitmapBit(uint64_t* words, int bit) {
   }
 }
 
+// Size classes for the legacy (header + payload) pool layout. `8 + dim * 4`
+// widths cover embedding rows; 8+80 and 8+272 serve dim 20 and dim 68.
+inline const std::vector<int>& DefaultSlabSizeClasses() {
+  static const std::vector<int> kClasses = {
+      8 + 32, 8 + 64, 8 + 80, 8 + 128, 8 + 272, 8 + 512, 8 + 1024};
+  return kClasses;
+}
+
+// Size classes for the perfect-fit layout, where a class is the exact
+// allocation size. Keep them aligned with the payload widths above.
+inline const std::vector<int>& DefaultPerfectFitSlabSizes() {
+  static const std::vector<int> kSizes = {32, 64, 80, 128, 272, 512, 1024};
+  return kSizes;
+}
+
 } // namespace concurrent_slab_detail
 
 template <bool PERFECT_FIT_MOD = true>
@@ -533,7 +548,53 @@ public:
       : ConcurrentSlabMemoryPool<false>(
             filename,
             memory_size,
-            {8 + 32, 8 + 64, 8 + 128, 8 + 512, 8 + 1024}) {}
+            concurrent_slab_detail::DefaultSlabSizeClasses()) {}
+};
+
+// Same pool as ConcurrentSlabMemoryPoolMalloc, but the caller supplies the
+// size-class list (value.dram_allocator.size_classes).
+class ConcurrentSlabMemoryPoolSized : public ConcurrentSlabMemoryPool<false> {
+public:
+  ConcurrentSlabMemoryPoolSized(const std::string& filename,
+                                int64 memory_size,
+                                const std::string& /*medium*/,
+                                const std::vector<int>& size_classes)
+      : ConcurrentSlabMemoryPool<false>(
+            filename,
+            memory_size,
+            size_classes.empty()
+                ? concurrent_slab_detail::DefaultSlabSizeClasses()
+                : size_classes) {}
+};
+
+// Perfect-fit layout: no per-allocation header, the requested size must match
+// a configured class exactly.
+class ConcurrentSlabMemoryPoolPerfectFit
+    : public ConcurrentSlabMemoryPool<true> {
+public:
+  ConcurrentSlabMemoryPoolPerfectFit(const std::string& filename,
+                                     int64 memory_size,
+                                     const std::string& /*medium*/)
+      : ConcurrentSlabMemoryPool<true>(
+            filename,
+            memory_size,
+            concurrent_slab_detail::DefaultPerfectFitSlabSizes()) {}
+};
+
+class ConcurrentSlabMemoryPoolPerfectFitSized
+    : public ConcurrentSlabMemoryPool<true> {
+public:
+  ConcurrentSlabMemoryPoolPerfectFitSized(
+      const std::string& filename,
+      int64 memory_size,
+      const std::string& /*medium*/,
+      const std::vector<int>& size_classes)
+      : ConcurrentSlabMemoryPool<true>(
+            filename,
+            memory_size,
+            size_classes.empty()
+                ? concurrent_slab_detail::DefaultPerfectFitSlabSizes()
+                : size_classes) {}
 };
 
 FACTORY_REGISTER(MallocApi,
@@ -542,5 +603,36 @@ FACTORY_REGISTER(MallocApi,
                  const std::string&,
                  int64,
                  const std::string&);
+
+FACTORY_REGISTER(MallocApi,
+                 CONCURRENT_SLAB_MEMORY_POOL_PERFECT_FIT,
+                 ConcurrentSlabMemoryPoolPerfectFit,
+                 const std::string&,
+                 int64,
+                 const std::string&);
+
+// The sized variants answer the same factory keys as their fixed counterparts
+// but take an explicit size-class list; DramValueStore picks them when
+// value.dram_allocator.size_classes is set. The registrations live in their
+// own namespace only because FACTORY_REGISTER names its static by key.
+namespace {
+
+FACTORY_REGISTER(MallocApi,
+                 CONCURRENT_SLAB_MEMORY_POOL,
+                 ConcurrentSlabMemoryPoolSized,
+                 const std::string&,
+                 int64,
+                 const std::string&,
+                 const std::vector<int>&);
+
+FACTORY_REGISTER(MallocApi,
+                 CONCURRENT_SLAB_MEMORY_POOL_PERFECT_FIT,
+                 ConcurrentSlabMemoryPoolPerfectFitSized,
+                 const std::string&,
+                 int64,
+                 const std::string&,
+                 const std::vector<int>&);
+
+} // namespace
 
 } // namespace base

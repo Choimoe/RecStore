@@ -80,6 +80,30 @@ public:
     return false;
   }
 
+  // Fused resolve-and-copy: derives every row pointer from the store's backing
+  // base and copies the requested slice into `out_buf` in a single pass, so
+  // callers do not need the resolve-then-copy two-step flow
+  // (GetDirectFixedRows followed by a caller-side copy).
+  // `stored_row_bytes` is the row width the store was written with; it is
+  // trusted, so callers must only pass a width that matches the store config.
+  virtual bool ReadFlatFixedRowSlices(
+      const uint64_t* handles,
+      size_t num_rows,
+      void* out_buf,
+      size_t stored_row_bytes,
+      size_t source_offset_bytes,
+      size_t output_row_bytes,
+      uint64_t* missing_rows) const {
+    (void)handles;
+    (void)num_rows;
+    (void)out_buf;
+    (void)stored_row_bytes;
+    (void)source_offset_bytes;
+    (void)output_row_bytes;
+    (void)missing_rows;
+    return false;
+  }
+
   virtual bool GetDirectFixedRows(
       const uint64_t* handles,
       size_t num_rows,

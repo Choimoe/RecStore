@@ -1178,8 +1178,10 @@ INSTANTIATE_TEST_SUITE_P(
     AllCombos,
     KVEngineCartesianTest,
     ::testing::Combine(
-        ::testing::Values(
-            "DRAM_EXTENDIBLE_HASH", "DRAM_UNORDERED_MAP", "DRAM_PET_HASH"),
+        ::testing::Values("DRAM_EXTENDIBLE_HASH",
+                          "DRAM_UNORDERED_MAP",
+                          "DRAM_PET_HASH",
+                          "DRAM_PET_HASH_LOCAL"),
         ::testing::Values(
             "DRAM_VALUE_STORE", "SSD_VALUE_STORE", "TIERED_VALUE_STORE"),
         ::testing::Values(
@@ -1291,4 +1293,94 @@ TEST(KVEngineCompositeConfigTest, DramValueStoreAcceptsDevShmPath) {
          {{"type", "PERSIST_LOOP_SLAB"}, {"capacity_bytes", 1024 * 128}}}}}};
 
   EXPECT_NO_THROW(CreateCompositeEngine(cfg));
+}
+
+TEST(KVEngineCompositeConfigTest, DramPetHashLocalIndexRunsWithOptions) {
+  const std::string test_dir =
+      "/dev/shm/test_kv_engine_pet_hash_local_" + std::to_string(getpid());
+  std::filesystem::remove_all(test_dir);
+  std::filesystem::create_directories(test_dir);
+
+  BaseKVConfig cfg;
+  cfg.num_threads_ = 2;
+  cfg.json_config_ = {
+      {"engine_type", "KVEngineComposite"},
+      {"capacity", 1024},
+      {"index",
+       {{"type", "DRAM_PET_HASH_LOCAL"},
+        {"max_load_factor", 0.25},
+        {"prefetch_depth", 2}}},
+      {"value",
+       {{"type", "DRAM_VALUE_STORE"},
+        {"path", test_dir + "/value"},
+        {"default_value_size_hint", 80},
+        {"dram_allocator",
+         {{"type", "CONCURRENT_SLAB_MEMORY_POOL"},
+          {"capacity_bytes", 8 * 1024 * 1024},
+          {"size_classes", {8 + 80}}}}}}};
+
+  std::unique_ptr<BaseKV> kv = CreateCompositeEngine(cfg);
+  ASSERT_NE(kv, nullptr);
+
+  std::vector<float> row(20, 2.5f);
+  const std::string value(
+      reinterpret_cast<const char*>(row.data()), row.size() * sizeof(float));
+  kv->Put(7, value, 0);
+
+  std::string out;
+  kv->Get(7, out, 0);
+  EXPECT_EQ(out, value);
+
+  const std::vector<uint64_t> keys = {7, 8};
+  std::vector<float> flat(keys.size() * row.size(), -1.0f);
+  ASSERT_TRUE(kv->BatchGetFlat(
+      base::ConstArray<uint64_t>(keys),
+      flat.data(),
+      static_cast<int64_t>(keys.size()),
+      static_cast<int64_t>(row.size()),
+      0));
+  for (size_t col = 0; col < row.size(); ++col) {
+    EXPECT_FLOAT_EQ(flat[col], 2.5f);
+    EXPECT_FLOAT_EQ(flat[row.size() + col], 0.0f);
+  }
+
+  kv.reset();
+  std::filesystem::remove_all(test_dir);
+}
+
+TEST(KVEngineCompositeConfigTest, DramPetHashLocalIndexRejectsBadOptions) {
+  BaseKVConfig cfg;
+  cfg.json_config_ = {
+      {"engine_type", "KVEngineComposite"},
+      {"capacity", 1024},
+      {"index", {{"type", "DRAM_PET_HASH_LOCAL"}, {"max_load_factor", 1.5}}},
+      {"value",
+       {{"type", "DRAM_VALUE_STORE"},
+        {"path", "/dev/shm/kv/value"},
+        {"default_value_size_hint", 128},
+        {"dram_allocator",
+         {{"type", "PERSIST_LOOP_SLAB"}, {"capacity_bytes", 1024 * 128}}}}}};
+  EXPECT_THROW(CreateCompositeEngine(cfg), std::invalid_argument);
+
+  cfg.json_config_["index"] = {
+      {"type", "DRAM_PET_HASH_LOCAL"}, {"prefetch_depth", -1}};
+  EXPECT_THROW(CreateCompositeEngine(cfg), std::invalid_argument);
+}
+
+TEST(KVEngineCompositeConfigTest,
+     DramValueStoreRejectsSizeClassesForUnsupportedAllocator) {
+  BaseKVConfig cfg;
+  cfg.json_config_ = {
+      {"engine_type", "KVEngineComposite"},
+      {"capacity", 1024},
+      {"index", {{"type", "DRAM_EXTENDIBLE_HASH"}}},
+      {"value",
+       {{"type", "DRAM_VALUE_STORE"},
+        {"path", "/dev/shm/kv/value"},
+        {"default_value_size_hint", 128},
+        {"dram_allocator",
+         {{"type", "PERSIST_LOOP_SLAB"},
+          {"capacity_bytes", 1024 * 128},
+          {"size_classes", {64, 128}}}}}}};
+  EXPECT_THROW(CreateCompositeEngine(cfg), std::invalid_argument);
 }

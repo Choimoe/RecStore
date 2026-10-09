@@ -58,7 +58,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 | `value.type` | string | 全部 | `DRAM_VALUE_STORE`、`SSD_VALUE_STORE` 或 `TIERED_VALUE_STORE` |
 | `value.default_value_size_hint` | integer | 全部 | 单条 value 的默认字节数提示，替代旧的顶层 `value_size` |
 | `value.path` | string | `DRAM_VALUE_STORE`、`SSD_VALUE_STORE` | DRAM 可为空或 `/dev/shm` 路径；SSD 必须是非空文件路径 |
-| `value.dram_allocator` | object | `DRAM_VALUE_STORE`、`TIERED_VALUE_STORE` | DRAM 分配器配置，常用字段为 `type`、`capacity_bytes`；`DRAM_VALUE_STORE` 不允许 `dram_allocator.path` |
+| `value.dram_allocator` | object | `DRAM_VALUE_STORE`、`TIERED_VALUE_STORE` | DRAM 分配器配置，常用字段为 `type`、`capacity_bytes`；`CONCURRENT_SLAB_MEMORY_POOL` 可加 `size_classes` 覆盖尺寸类；`DRAM_VALUE_STORE` 不允许 `dram_allocator.path` |
 | `value.ssd_allocator` | object | `SSD_VALUE_STORE`、`TIERED_VALUE_STORE` | SSD 分配器配置，常用字段为 `type`、`capacity_bytes`、`min_block_size`、`max_block_size`、`io`；`SSD_VALUE_STORE` 的文件路径放在 `value.path`，不放在 `ssd_allocator.path` |
 | `value.ssd_allocator.path` | string | `TIERED_VALUE_STORE` | TIERED 模式的 SSD 层文件路径 |
 
@@ -66,7 +66,7 @@ RecStore 配置采用 JSON 格式，位于根目录。当前仓库默认包含�
 
 `base::ResolveEngine` 读取 `engine_type`，缺省为 `KVEngineComposite`。`KVEngineComposite` 根据 `index.type` 和 `value.type` 组装组件：
 
-- `index.type` 取值：`DRAM_EXTENDIBLE_HASH` / `DRAM_UNORDERED_MAP` / `DRAM_PET_HASH` / `SSD` / `SSD_EXTENDIBLE_HASH`
+- `index.type` 取值：`DRAM_EXTENDIBLE_HASH` / `DRAM_UNORDERED_MAP` / `DRAM_PET_HASH` / `DRAM_PET_HASH_LOCAL` / `SSD` / `SSD_EXTENDIBLE_HASH`
 - `value.type` 取值：`DRAM_VALUE_STORE` / `SSD_VALUE_STORE` / `TIERED_VALUE_STORE`
 - 旧字段 `path`、`index.io.file_path`、`value.ssd_allocator.io.file_path` 会被拒绝
 

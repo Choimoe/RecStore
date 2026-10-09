@@ -129,10 +129,17 @@ public:
   typedef std::function<bool(
       const KeyT&, const ValueT&, const bool& force_delete)>
       CheckFuncT;
-  static constexpr size_t kChunkSize   = ChunkT::kMaxSize;
-  static const uint32_t kSignBit       = 8;
-  static const uint32_t kSignMask      = (1 << kSignBit) - 1;
-  static const uint32_t kMaxLoadFactor = 90;
+  static constexpr size_t kChunkSize              = ChunkT::kMaxSize;
+  static const uint32_t kSignBit                  = 8;
+  static const uint32_t kSignMask                 = (1 << kSignBit) - 1;
+  static constexpr uint32_t kDefaultMaxLoadFactor = 90;
+
+  // Runtime layout knobs. The defaults reproduce the historical table layout
+  // and probing, so existing callers (pet_kv, DRAM_PET_HASH) are unchanged.
+  struct Options {
+    uint32_t max_load_factor_pct = kDefaultMaxLoadFactor;
+    bool chunk_local_probe       = false;
+  };
 
   PetHash() = default;
 
@@ -141,12 +148,17 @@ public:
     // return 2 * (capacity + kChunkSize - 1) / kChunkSize;
   }
 
-  void Initialize(uint64_t capacity, bool ignore_load_factor = false) {
+  void Initialize(uint64_t capacity,
+                  bool ignore_load_factor = false,
+                  const Options& options  = Options()) {
+    CHECK_GT(options.max_load_factor_pct, 0u);
     if (!ignore_load_factor)
-      capacity /= kMaxLoadFactor / 100.0;
-    chunk_num_ = OverFallChunkNum(capacity);
-    capacity_  = chunk_num_ * kChunkSize;
-    size_      = 0;
+      capacity /= options.max_load_factor_pct / 100.0;
+    chunk_num_           = OverFallChunkNum(capacity);
+    capacity_            = chunk_num_ * kChunkSize;
+    max_load_factor_pct_ = options.max_load_factor_pct;
+    chunk_local_probe_   = options.chunk_local_probe;
+    size_                = 0;
     memset(chunk_table_, 0, chunk_num_ * sizeof(ChunkT));
     for (uint64_t i = 0; i < chunk_num_; i++) {
       chunk_table_[i].Initialize();
@@ -157,15 +169,19 @@ public:
   void Reload(uint64_t capacity,
               bool ignore_load_factor,
               std::function<void(KeyT, ValueT)> mallocSetValid,
-              const int kRecoveryThread = 4) {
+              const int kRecoveryThread = 4,
+              const Options& options    = Options()) {
     CHECK(Persistence) << "If not PMEM KV, dont use Reload";
+    CHECK_GT(options.max_load_factor_pct, 0u);
     if (!ignore_load_factor)
-      capacity /= kMaxLoadFactor / 100.0;
+      capacity /= options.max_load_factor_pct / 100.0;
     // chunk_num_ = Next2Power((capacity + kChunkSize - 1) / kChunkSize);
-    chunk_num_        = OverFallChunkNum(capacity);
-    capacity_         = chunk_num_ * kChunkSize;
-    uint64_t old_size = size_;
-    size_             = 0;
+    chunk_num_           = OverFallChunkNum(capacity);
+    capacity_            = chunk_num_ * kChunkSize;
+    max_load_factor_pct_ = options.max_load_factor_pct;
+    chunk_local_probe_   = options.chunk_local_probe;
+    uint64_t old_size    = size_;
+    size_                = 0;
     std::atomic<uint64_t> count_size(0);
     std::vector<std::thread> thread_pool;
     uint64_t block_num = chunk_num_ / kRecoveryThread + 1;
@@ -252,10 +268,12 @@ public:
       each.join();
   }
 
-  static uint64_t
-  MemorySize(uint64_t capacity, bool ignore_load_factor = false) {
+  static uint64_t MemorySize(uint64_t capacity,
+                             bool ignore_load_factor = false,
+                             const Options& options  = Options()) {
+    CHECK_GT(options.max_load_factor_pct, 0u);
     if (!ignore_load_factor)
-      capacity /= kMaxLoadFactor / 100.0;
+      capacity /= options.max_load_factor_pct / 100.0;
     // auto chunk_table_num = Next2Power((capacity + kChunkSize - 1) /
     // kChunkSize);
     auto chunk_table_num = OverFallChunkNum(capacity);
@@ -342,7 +360,12 @@ public:
     size_t pos          = hash_value & (chunk_num_ - 1);
     auto chunk          = chunk_table_ + pos;
     _mm_prefetch((const char*)(chunk), _MM_HINT_T0);
-    _mm_prefetch((const char*)(chunk->Get(0)), _MM_HINT_T0);
+    // The tag array shares the line already issued above, so resolving the
+    // target slot here is cheap and lets the caller prefetch the exact entry
+    // instead of only the chunk head.
+    auto slots        = chunk->MatchTag(sign);
+    const size_t slot = slots.HasNext() ? slots.Next() : 0;
+    _mm_prefetch((const char*)(chunk->Get(slot)), _MM_HINT_T0);
   }
 
   std::tuple<const ValueT, ValueT* const, bool>
@@ -704,10 +727,14 @@ public:
 
   uint32_t Capacity() { return capacity_; }
 
-  inline bool Full() { return size_ * 100 >= capacity_ * kMaxLoadFactor; }
+  inline bool Full() { return size_ * 100 >= capacity_ * max_load_factor_pct_; }
 
 private:
-  inline size_t ProbeDelta(size_t key) const { return key * 2 | 1; }
+  // Chunk-local probing walks the adjacent chunks (step 1) instead of jumping
+  // to an arbitrary chunk derived from the key tag.
+  inline size_t ProbeDelta(size_t key) const {
+    return chunk_local_probe_ ? 1 : (key * 2 | 1);
+  }
 
   static inline uint8_t Sign(const uint64_t& key) { // NOLINT
     uint64_t c = _mm_crc32_u64(0, key);             // NOLINT
@@ -722,7 +749,9 @@ private:
   uint64_t capacity_;
   uint64_t chunk_num_;
   std::atomic<uint64_t> size_;
-  uint8_t not_use_[64 - 3 * sizeof(uint64_t)];
+  uint32_t max_load_factor_pct_ = kDefaultMaxLoadFactor;
+  bool chunk_local_probe_       = false;
+  uint8_t not_use_[64 - 3 * sizeof(uint64_t) - sizeof(uint32_t) - sizeof(bool)];
   ChunkT chunk_table_[0];
 };
 

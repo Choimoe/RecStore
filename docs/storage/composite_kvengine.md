@@ -75,6 +75,7 @@ graph TD
 | `DRAM_EXTENDIBLE_HASH` | `DramExtendibleHashIndex` | — | 可扩展 hash；别名 `DRAM` |
 | `DRAM_UNORDERED_MAP` | `DramUnorderedMapIndex` | — | `unordered_map` + 读写锁 |
 | `DRAM_PET_HASH` | `DramPetHashIndex` | 依赖 `capacity` | PetHash，BatchGet 带 prefetch hint |
+| `DRAM_PET_HASH_LOCAL` | `DramPetHashLocalIndex` | `capacity`、可选 `index.max_load_factor`（默认 `0.5`）、`index.prefetch_depth`（默认 `1`） | PetHash 变体：可配负载因子、chunk-local 探测，BatchGet 向前预取 `prefetch_depth` 个 key |
 | `SSD_EXTENDIBLE_HASH` | `SsdExtendibleHashIndex` | `index.path`、`index.io` | CCEH；别名 `SSD` |
 | `SSD` | 同上 | 同上 | 与 `SSD_EXTENDIBLE_HASH` 相同 |
 
@@ -147,9 +148,16 @@ SSD 索引创建 `IOBackend` 前的配置映射：
 | `PERSIST_LOOP_SLAB` | `PersistLoopShmMalloc` | `PersistLoopShmMalloc` |
 | `R2_SLAB` | `R2alloc` | `R2ShmMalloc` |
 | `CONCURRENT_SLAB_MEMORY_POOL` | `ConcurrentSlabMemoryPoolMalloc` | — |
+| `CONCURRENT_SLAB_MEMORY_POOL_PERFECT_FIT` | `ConcurrentSlabMemoryPoolPerfectFit` | — |
 | `PERSIST_MEMORY_POOL` | `PersistMemoryPoolMalloc` | — |
 
 必填：`capacity_bytes`。遗留别名见 `memory/allocators/allocator_factory.h`（如 `PERSIST_LOOP_SHM_MALLOC`）。
+
+`CONCURRENT_SLAB_MEMORY_POOL` 与 `CONCURRENT_SLAB_MEMORY_POOL_PERFECT_FIT` 支持可选 `size_classes`（正整数数组）：
+
+- `CONCURRENT_SLAB_MEMORY_POOL`：尺寸类含 8 字节元数据头，默认 `[8+32, 8+64, 8+80, 8+128, 8+272, 8+512, 8+1024]`，可覆盖 `8 + dim*4` 宽度。
+- `CONCURRENT_SLAB_MEMORY_POOL_PERFECT_FIT`：无元数据头，分配尺寸必须精确命中某个尺寸类，默认 `[32, 64, 80, 128, 272, 512, 1024]`。
+- 其他分配器未注册带 `size_classes` 的工厂，配置该字段会抛 `std::invalid_argument`。
 
 ---
 

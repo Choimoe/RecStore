@@ -221,3 +221,88 @@ TEST_F(ConcurrentSlabMemoryPoolTest, AllocatedPointersDoNotOverlap) {
     th.join();
   }
 }
+
+TEST_F(ConcurrentSlabMemoryPoolTest, DefaultClassesIncludeEmbeddingWidths) {
+  auto* pool = base::
+      Factory<base::MallocApi, const std::string&, int64, const std::string&>::
+          NewInstance("CONCURRENT_SLAB_MEMORY_POOL",
+                      path_ + "_widths",
+                      8 * 1024 * 1024,
+                      "DRAM");
+  ASSERT_NE(pool, nullptr);
+
+  // 8 + dim * 4 classes keep dim 20 and dim 68 rows on an exact size class.
+  char* row80 = pool->New(80);
+  ASSERT_NE(row80, nullptr);
+  EXPECT_EQ(pool->GetMallocSize(row80), 80);
+
+  char* row272 = pool->New(272);
+  ASSERT_NE(row272, nullptr);
+  EXPECT_EQ(pool->GetMallocSize(row272), 272);
+
+  EXPECT_TRUE(pool->Free(row80));
+  EXPECT_TRUE(pool->Free(row272));
+  delete pool;
+  base::file_util::Delete(path_ + "_widths", false);
+}
+
+TEST_F(ConcurrentSlabMemoryPoolTest, SizedFactoryUsesConfiguredClasses) {
+  auto* pool = base::Factory<
+      base::MallocApi,
+      const std::string&,
+      int64,
+      const std::string&,
+      const std::vector<int>&>::NewInstance("CONCURRENT_SLAB_MEMORY_POOL",
+                                            path_ + "_sized",
+                                            8 * 1024 * 1024,
+                                            "DRAM",
+                                            std::vector<int>{8 + 96});
+  ASSERT_NE(pool, nullptr);
+
+  char* row96 = pool->New(96);
+  ASSERT_NE(row96, nullptr);
+  EXPECT_EQ(pool->GetMallocSize(row96), 96);
+  EXPECT_TRUE(pool->Free(row96));
+  delete pool;
+  base::file_util::Delete(path_ + "_sized", false);
+}
+
+TEST_F(ConcurrentSlabMemoryPoolTest, PerfectFitFactoryAllocatesExactSizes) {
+  auto* pool = base::
+      Factory<base::MallocApi, const std::string&, int64, const std::string&>::
+          NewInstance("CONCURRENT_SLAB_MEMORY_POOL_PERFECT_FIT",
+                      path_ + "_perfect",
+                      8 * 1024 * 1024,
+                      "DRAM");
+  ASSERT_NE(pool, nullptr);
+
+  char* row80 = pool->New(80);
+  ASSERT_NE(row80, nullptr);
+  EXPECT_EQ(pool->GetMallocSize(row80), 80);
+  EXPECT_TRUE(pool->Free(row80));
+  delete pool;
+  base::file_util::Delete(path_ + "_perfect", false);
+}
+
+TEST_F(ConcurrentSlabMemoryPoolTest,
+       PerfectFitSizedFactoryUsesConfiguredClasses) {
+  auto* pool =
+      base::Factory<base::MallocApi,
+                    const std::string&,
+                    int64,
+                    const std::string&,
+                    const std::vector<int>&>::
+          NewInstance("CONCURRENT_SLAB_MEMORY_POOL_PERFECT_FIT",
+                      path_ + "_perfect_sized",
+                      8 * 1024 * 1024,
+                      "DRAM",
+                      std::vector<int>{160});
+  ASSERT_NE(pool, nullptr);
+
+  char* row160 = pool->New(160);
+  ASSERT_NE(row160, nullptr);
+  EXPECT_EQ(pool->GetMallocSize(row160), 160);
+  EXPECT_TRUE(pool->Free(row160));
+  delete pool;
+  base::file_util::Delete(path_ + "_perfect_sized", false);
+}
