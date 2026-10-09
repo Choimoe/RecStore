@@ -19,7 +19,20 @@ on:
       - '.githooks/pre-commit'
       - 'tools/format/clang_format.sh'
       - '.github/workflows/format.yml'
+  schedule:
+    # Weekly sweep, 24h before the Weekly Pre-release (release.yml runs at
+    # '0 15 * * 0'). Formats the whole tree on the default branch so the commit
+    # the release is cut from matches the pinned clang-format.
+    - cron: "0 15 * * 6"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check: changed files only. sweep: format the whole tree and push.'
+        type: choice
+        default: check
+        options:
+          - check
+          - sweep
 
 permissions:
   contents: read
@@ -27,6 +40,7 @@ permissions:
 jobs:
   clang-format:
     name: Run clang-format
+    if: github.event_name != 'schedule' && github.event.inputs.mode != 'sweep'
     runs-on: ubuntu-latest
 
     steps:
@@ -52,3 +66,43 @@ jobs:
           CLANG_FORMAT: clang-format
           FORMAT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: tools/format/clang_format.sh --check --changed
+
+  clang-format-sweep:
+    name: Format whole tree
+    if: github.event_name == 'schedule' || github.event.inputs.mode == 'sweep'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Install clang-format
+        run: |
+          set -euo pipefail
+          # Keep in sync with the check job: the sweep must use the exact
+          # release the check enforces.
+          python3 -m venv "$RUNNER_TEMP/clang-format-venv"
+          "$RUNNER_TEMP/clang-format-venv/bin/pip" install --quiet "clang-format==18.1.3"
+          echo "$RUNNER_TEMP/clang-format-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Format whole tree
+        env:
+          CLANG_FORMAT: clang-format
+        run: tools/format/clang_format.sh --all
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Whole tree already matches clang-format."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: apply clang-format to the whole tree[skip changelog]"
+          git push
