@@ -1,7 +1,14 @@
 find_package(Torch REQUIRED)
 
+# recstore_ops is split by op family; op_torch.cc is the single TORCH_LIBRARY
+# registration unit and calls the Register*Ops helpers defined in each family.
 add_library(recstore_torch_ops SHARED
     op_torch.cc
+    op_base.cc
+    op_flat.cc
+    op_prefetch.cc
+    op_bagpipe.cc
+    op_profile.cc
     ../op.cc
     ../common/local_shm_kv_client_op.cc
     ../common/hierkv_local_runtime.cc
@@ -13,6 +20,16 @@ add_library(recstore_torch_ops SHARED
     ${PROJECT_SOURCE_DIR}/src/ps/rdma/rdma_ps_client_adapter.cc
     boost_regex_cxx11_inst.cc
 )
+
+# CUDA-runtime host helpers live in a .cu so the family .cc files stay free of
+# CUDA includes and __has_include guards. CPU-only builds use a stub instead.
+if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
+    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime.cu)
+    target_compile_options(recstore_torch_ops PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+else()
+    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime_cpu.cc)
+endif()
 
 target_compile_definitions(recstore_torch_ops PRIVATE _GLIBCXX_USE_CXX11_ABI=1)
 target_link_libraries(recstore_torch_ops PRIVATE boost_regex_cxx11)
