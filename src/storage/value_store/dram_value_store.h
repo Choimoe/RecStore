@@ -117,10 +117,12 @@ public:
     if (handles == nullptr || out_buf == nullptr || row_bytes == 0) {
       return false;
     }
+    if (!IsPowerOfTwo(row_bytes)) {
+      return ReadFlatFixedRowsGeneric(
+          handles, num_rows, out_buf, row_bytes, missing_rows);
+    }
     uint64_t local_missing = 0;
     char* dst              = static_cast<char*>(out_buf);
-    DCHECK(IsPowerOfTwo(row_bytes))
-        << "DramValueStore flat row size must be a power of two";
     const unsigned row_shift = Log2PowerOfTwo(row_bytes);
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + (row << row_shift);
@@ -134,6 +136,45 @@ public:
         return false;
       }
       std::memcpy(row_dst, src, row_bytes);
+    }
+    if (missing_rows != nullptr) {
+      *missing_rows = local_missing;
+    }
+    return true;
+  }
+
+  bool ReadFlatFixedRowSlices(const uint64_t* handles,
+                              size_t num_rows,
+                              void* out_buf,
+                              size_t stored_row_bytes,
+                              size_t source_offset_bytes,
+                              size_t output_row_bytes,
+                              uint64_t* missing_rows) const override {
+    if (handles == nullptr || out_buf == nullptr || output_row_bytes == 0 ||
+        source_offset_bytes > stored_row_bytes ||
+        output_row_bytes > stored_row_bytes - source_offset_bytes) {
+      return false;
+    }
+    if (!IsPowerOfTwo(output_row_bytes)) {
+      return ReadFlatFixedRowSlicesGeneric(
+          handles, num_rows, out_buf, source_offset_bytes, output_row_bytes,
+          missing_rows);
+    }
+    uint64_t local_missing = 0;
+    char* dst              = static_cast<char*>(out_buf);
+    const unsigned row_shift = Log2PowerOfTwo(output_row_bytes);
+    for (size_t row = 0; row < num_rows; ++row) {
+      char* row_dst = dst + (row << row_shift);
+      if (handles[row] == kValueHandleNone) {
+        std::memset(row_dst, 0, output_row_bytes);
+        ++local_missing;
+        continue;
+      }
+      const char* src = Ptr(handles[row]);
+      if (src == nullptr) {
+        return false;
+      }
+      std::memcpy(row_dst, src + source_offset_bytes, output_row_bytes);
     }
     if (missing_rows != nullptr) {
       *missing_rows = local_missing;
@@ -175,6 +216,61 @@ public:
   uint64_t TotalAllocCount() const { return allocator_->total_malloc(); }
 
 private:
+  [[gnu::noinline]] bool ReadFlatFixedRowsGeneric(
+      const uint64_t* handles,
+      size_t num_rows,
+      void* out_buf,
+      size_t row_bytes,
+      uint64_t* missing_rows) const {
+    uint64_t local_missing = 0;
+    char* dst              = static_cast<char*>(out_buf);
+    for (size_t row = 0; row < num_rows; ++row) {
+      char* row_dst = dst + row * row_bytes;
+      if (handles[row] == kValueHandleNone) {
+        std::memset(row_dst, 0, row_bytes);
+        ++local_missing;
+        continue;
+      }
+      const char* src = Ptr(handles[row]);
+      if (src == nullptr) {
+        return false;
+      }
+      std::memcpy(row_dst, src, row_bytes);
+    }
+    if (missing_rows != nullptr) {
+      *missing_rows = local_missing;
+    }
+    return true;
+  }
+
+  [[gnu::noinline]] bool ReadFlatFixedRowSlicesGeneric(
+      const uint64_t* handles,
+      size_t num_rows,
+      void* out_buf,
+      size_t source_offset_bytes,
+      size_t output_row_bytes,
+      uint64_t* missing_rows) const {
+    uint64_t local_missing = 0;
+    char* dst              = static_cast<char*>(out_buf);
+    for (size_t row = 0; row < num_rows; ++row) {
+      char* row_dst = dst + row * output_row_bytes;
+      if (handles[row] == kValueHandleNone) {
+        std::memset(row_dst, 0, output_row_bytes);
+        ++local_missing;
+        continue;
+      }
+      const char* src = Ptr(handles[row]);
+      if (src == nullptr) {
+        return false;
+      }
+      std::memcpy(row_dst, src + source_offset_bytes, output_row_bytes);
+    }
+    if (missing_rows != nullptr) {
+      *missing_rows = local_missing;
+    }
+    return true;
+  }
+
   static uint64_t EncodeOffset(int64 offset) {
     return static_cast<uint64_t>(offset) + 1;
   }
