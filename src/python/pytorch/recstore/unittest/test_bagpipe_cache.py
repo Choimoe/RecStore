@@ -89,6 +89,7 @@ class _GradHarness(BagPipeGradMixin):
         self._cached_dev = torch.zeros(64, dtype=torch.bool)
         self._dirty_dev = torch.zeros(64, dtype=torch.bool)
         self._cached_dev[torch.tensor([10, 20, 30])] = True
+        self._insert_failures = 0
         self._sync_later_stream = None
         self._pending_sync_now_work = None
         self._pending_sync_now_lr = None
@@ -448,6 +449,27 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
             harness.embedding_module._bagpipe_last_lookup_resident
         )
 
+    def test_backfill_insert_failure_feeds_eviction_backstop(self):
+        """A no-evict insert that fails on the lookup-backfill path must reach
+        ``_insert_failures`` -- it is the only signal the cleanup backstop
+        uses to retire low-TTL rows and free slots.
+
+        Only the prefill path used to count these, so a cache that filled up
+        through backfill kept failing to insert with no eviction reaction.
+        """
+        harness = _GradHarness(rank=0)
+        ids = torch.tensor([10, 20, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [2.0, 2.0], [4.0, 4.0]])
+        harness.embedding_module._bagpipe_last_lookup_resident = (
+            ids,
+            torch.tensor([True, False, True]),
+        )
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+
+        self.assertEqual(harness._insert_failures, 1)
+        self.assertEqual(harness._stats["bagpipe_insert_failures"], 1.0)
+
     def test_update_grads_single_all_reduce_on_side_stream(self):
         """合并 now/later: 全部共享 id 走单次 all_reduce (侧流), 不再按
         重现窗口切两条路 (两条路调度相同, 双路只是多付一次 6MB all_reduce)。"""
@@ -518,6 +540,27 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         harness._anti_entropy_step = 50
         harness._wait_pending_sync_now()
         self.assertEqual(len(harness.kv_client.invalidations), 1)
+
+    def test_anti_entropy_drops_rows_the_cache_no_longer_holds(self):
+        """Same reconciliation as eviction: a sampled row that C++ does not
+        hold must leave the mirror, otherwise it stays flagged resident."""
+        harness = _GradHarness(rank=0)
+        harness._anti_entropy_step = 49
+        harness._anti_entropy_interval = 50
+        harness._anti_entropy_ids = 2
+        harness._shared_ids_tensor = torch.tensor([10, 30], dtype=torch.int64)
+        harness._dirty_dev[torch.tensor([10, 30])] = True
+        harness._pending_sync_now_work = None
+        harness.kv_client.invalidate_gpu_cache_with_mask = (
+            lambda name, ids: ids != 30
+        )
+
+        harness._wait_pending_sync_now()
+
+        self.assertFalse(bool(harness._cached_dev[10].item()))
+        self.assertFalse(bool(harness._cached_dev[30].item()))
+        self.assertFalse(bool(harness._dirty_dev[30].item()))
+        self.assertEqual(int(harness._ttl_dev[30].item()), 0)
 
 
 class TestCompactTranslation(unittest.TestCase):
@@ -711,7 +754,11 @@ class _EvictionHarness:
         self._shared_ids_tensor = None
         self._eviction_stream = None
         self.embedding_dim = 2
-        self._stats = {"bagpipe_writeback_ids": 0.0}
+        self._stats = {
+            "bagpipe_writeback_ids": 0.0,
+            "bagpipe_evicted_ids": 0.0,
+            "bagpipe_evict_stale_mirror_ids": 0.0,
+        }
         self.written = []
 
     def _to_compact(self, ids):
@@ -766,7 +813,7 @@ class TestShutdownFlush(unittest.TestCase):
 
 
 class TestAuthoritativeInvalidation(unittest.TestCase):
-    def test_partial_removal_updates_only_removed_bookkeeping(self):
+    def test_partial_removal_writes_back_only_removed_rows(self):
         from ..bagpipe_cache.eviction import BagPipeEvictionMixin
 
         class _WithMixin(BagPipeEvictionMixin, _EvictionHarness):
@@ -775,9 +822,15 @@ class TestAuthoritativeInvalidation(unittest.TestCase):
         m = _WithMixin([5, 10, 20])
         m._dirty_dev[torch.tensor([5, 10, 20])] = True
         m._ttl_dev[torch.tensor([5, 10, 20])] = 100
-        m._stats["bagpipe_evicted_ids"] = 0.0
+        m._cleanup_queue = queue.Queue()
 
         class KV:
+            def gpu_cache_lookup_flat(self, keys, embedding_dim):
+                n = int(keys.numel())
+                return torch.arange(
+                    n * embedding_dim, dtype=torch.float32
+                ).reshape(n, embedding_dim)
+
             def invalidate_gpu_cache_with_mask(self, name, ids):
                 self.ids = ids.clone()
                 self.name = name
@@ -787,13 +840,60 @@ class TestAuthoritativeInvalidation(unittest.TestCase):
         m.master_table_name = "t"
         m._evict_entries(torch.tensor([5, 10, 20]))
 
+        # 10 only ever existed in the mirror, so there is nothing to write
+        # back for it; only the genuinely resident 5 and 20 are enqueued.
+        wb_ids, _, _ = m._cleanup_queue.get_nowait()
+        self.assertEqual(wb_ids.tolist(), [5, 20])
+        self.assertEqual(m._stats["bagpipe_writeback_ids"], 2.0)
         self.assertFalse(bool(m._cached_dev[5].item()))
-        self.assertTrue(bool(m._cached_dev[10].item()))
+        self.assertFalse(bool(m._cached_dev[10].item()))
         self.assertFalse(bool(m._cached_dev[20].item()))
         self.assertFalse(bool(m._dirty_dev[5].item()))
-        self.assertTrue(bool(m._dirty_dev[10].item()))
-        self.assertEqual(int(m._ttl_dev[10].item()), 100)
+        self.assertFalse(bool(m._dirty_dev[10].item()))
+        self.assertFalse(bool(m._dirty_dev[20].item()))
+        self.assertEqual(int(m._ttl_dev[10].item()), 0)
         self.assertEqual(m._stats["bagpipe_evicted_ids"], 2.0)
+        self.assertEqual(m._stats["bagpipe_evict_stale_mirror_ids"], 1.0)
+
+    def test_stale_mirror_row_is_not_rewritten_or_reselected(self):
+        """A row the mirror calls resident but the C++ cache does not hold has
+        to leave the mirror.
+
+        Otherwise it is never reported as removed, so it is never cleared, so
+        it stays expired and the very next cleanup picks it again -- an
+        unbounded re-eviction loop that also writes back whatever the miss
+        path read for a row that is not there.
+        """
+        from ..bagpipe_cache.eviction import BagPipeEvictionMixin
+
+        class _WithMixin(BagPipeEvictionMixin, _EvictionHarness):
+            pass
+
+        m = _WithMixin([5, 10, 20])
+        m._dirty_dev[torch.tensor([5, 10, 20])] = True
+        m._ttl_dev[torch.tensor([5, 10, 20])] = 100
+        m._cleanup_queue = queue.Queue()
+
+        class KV:
+            def gpu_cache_lookup_flat(self, keys, embedding_dim):
+                n = int(keys.numel())
+                return torch.arange(
+                    n * embedding_dim, dtype=torch.float32
+                ).reshape(n, embedding_dim)
+
+            def invalidate_gpu_cache_with_mask(self, name, ids):
+                # 10 is gone from the cache; only the mirror still lists it.
+                return torch.tensor([True, False, True])
+
+        m.kv_client = KV()
+        m.master_table_name = "t"
+        m._evict_entries(torch.tensor([5, 10, 20]))
+
+        wb_ids, _, _ = m._cleanup_queue.get_nowait()
+        self.assertEqual(wb_ids.tolist(), [5, 20])
+
+        expired_again = (m._cached_dev & (m._ttl_dev < 101)).nonzero()
+        self.assertEqual(expired_again.tolist(), [])
 
 
 if __name__ == "__main__":

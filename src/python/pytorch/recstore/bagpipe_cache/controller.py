@@ -249,6 +249,7 @@ class BagPipeCacheController(
             "bagpipe_prefetch_throttled": 0.0,
             "bagpipe_all_hit_revalidations": 0.0,
             "bagpipe_insert_failures": 0.0,
+            "bagpipe_evict_stale_mirror_ids": 0.0,
             "bagpipe_sync_now_overlap_ms": 0.0,
             "bagpipe_sync_now_ids": 0.0,
             "bagpipe_sync_later_ids": 0.0,

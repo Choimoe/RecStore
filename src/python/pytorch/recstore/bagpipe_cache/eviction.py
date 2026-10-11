@@ -163,6 +163,11 @@ class BagPipeEvictionMixin:
         kv_client / GPU cache 的 key 空间是 fused id, 调用前统一转换。
         只有 dirty 且非 shared 的条目需要值写回 (no_sync 的 PS 持久化);
         shared 条目已由 barrier 的聚合推送持久化, 本地副本直接失效即可。
+
+        Values are read before invalidation (the cache still holds them), but
+        only rows the C++ cache actually reports as removed are written back:
+        a row the mirror claims but the cache no longer holds reads back
+        undefined bytes, and persisting those would corrupt the PS.
         """
         if expired_ids.numel() == 0:
             return
@@ -177,13 +182,12 @@ class BagPipeEvictionMixin:
             shared_m = torch.zeros_like(dirty_m)
         wb_mask = dirty_m & ~shared_m
         wb_ids = expired_ids[wb_mask]
+        wb_vals = None
+        wb_event = None
         if wb_ids.numel() > 0:
             wb_ids, wb_vals, wb_event = self._read_cache_values(
                 self._to_fused(wb_ids)
             )
-            if wb_vals is not None and wb_ids.numel() > 0:
-                self._cleanup_queue.put((wb_ids, wb_vals, wb_event))
-            self._stats["bagpipe_writeback_ids"] += float(wb_ids.numel())
 
         invalidator = getattr(
             self.kv_client, "invalidate_gpu_cache_with_mask", None
@@ -199,10 +203,24 @@ class BagPipeEvictionMixin:
         expired_ids = requested_evictions[removed]
         self._stats["bagpipe_evicted_ids"] += float(expired_ids.numel())
 
-        # 清簿记 (compact 索引); 只有 C++ 确认移除的行才改变状态。
-        self._cached_dev[expired_ids] = False
-        self._dirty_dev[expired_ids] = False
-        self._ttl_dev[expired_ids] = 0
+        # Enqueue only the rows that were genuinely resident.
+        if wb_vals is not None and wb_ids.numel() > 0:
+            wb_removed = removed[wb_mask]
+            wb_ids = wb_ids[wb_removed]
+            wb_vals = wb_vals[wb_removed]
+            if wb_ids.numel() > 0:
+                self._cleanup_queue.put((wb_ids, wb_vals, wb_event))
+                self._stats["bagpipe_writeback_ids"] += float(wb_ids.numel())
+
+        # Reconcile the mirror with the authoritative result.  Rows the mirror
+        # listed as resident but the cache does not hold have to be dropped
+        # too, otherwise they stay expired and are re-picked every cleanup.
+        self._stats["bagpipe_evict_stale_mirror_ids"] += float(
+            int(requested_evictions.numel()) - int(expired_ids.numel())
+        )
+        self._cached_dev[requested_evictions] = False
+        self._dirty_dev[requested_evictions] = False
+        self._ttl_dev[requested_evictions] = 0
 
     # ------------------------------------------------------------------
     #  Background cleanup thread (opt 5)

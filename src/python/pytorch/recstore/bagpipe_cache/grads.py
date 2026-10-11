@@ -149,11 +149,15 @@ class BagPipeGradMixin:
                 "residency mirror authoritative"
             )
         removed = invalidator(self.master_table_name, self._to_fused(sample))
-        sample = sample[removed]
+        # Same reconciliation as the eviction path: a sampled row the cache no
+        # longer holds has to leave the mirror too, or the mirror keeps
+        # advertising it as resident.
+        self._stats["bagpipe_anti_entropy_ids"] += float(
+            int(removed.sum().item())
+        )
         self._cached_dev[sample] = False
         self._dirty_dev[sample] = False
         self._ttl_dev[sample] = 0
-        self._stats["bagpipe_anti_entropy_ids"] += float(sample.numel())
 
     # ------------------------------------------------------------------
     #  Overlap barrier (aggregated all_reduce of the previous step)
@@ -299,10 +303,16 @@ class BagPipeGradMixin:
             self._ttl_dev[current_compact] = batch_num + self._ttl_margin
         elif residency_mask is not None:
             residency_mask = residency_mask[in_range]
-            self._cached_dev[current_compact[~residency_mask]] = False
+            failed_mask = ~residency_mask
+            self._cached_dev[current_compact[failed_mask]] = False
             resident_compact = current_compact[residency_mask]
             self._cached_dev[resident_compact] = True
             self._ttl_dev[resident_compact] = batch_num + self._ttl_margin
+            # Backfill no-evict insert failures must feed the eviction
+            # backstop too; otherwise a full cache is only noticed via the
+            # prefill path.
+            self._insert_failures += int(failed_mask.sum().item())
+            self._stats["bagpipe_insert_failures"] = float(self._insert_failures)
         else:
             self._cached_dev[current_compact] = False
 
