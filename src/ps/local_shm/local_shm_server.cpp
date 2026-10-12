@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "base/bind_core.h"
 #include "base/factory.h"
 #include "base/log.h"
 #include "ps/base/cache_ps_impl.h"
@@ -366,7 +367,10 @@ void LocalShmParameterServer::Run() {
   worker_threads_.clear();
   worker_threads_.reserve(runtimes_.size() > 0 ? runtimes_.size() - 1 : 0);
   for (std::size_t idx = 1; idx < runtimes_.size(); ++idx) {
-    worker_threads_.emplace_back([this, idx]() { runtimes_[idx]->Run(); });
+    worker_threads_.emplace_back([this, idx]() {
+      base::auto_bind_core();
+      runtimes_[idx]->Run();
+    });
   }
   runtimes_[0]->Run();
   for (auto& worker : worker_threads_) {

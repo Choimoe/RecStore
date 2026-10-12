@@ -1,5 +1,7 @@
 #include "pet_kv.h"
 
+#include "base/bind_core.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -202,7 +204,10 @@ PetMultiKV::PetMultiKV(const std::vector<std::string>& shm_dir,
   shm_kv_.resize(shard_num);
   std::vector<std::thread> thread_pool;
   for (int i = 0; i < shard_num; ++i) {
-    thread_pool.emplace_back(&PetMultiKV::LoadShard, this, i);
+    thread_pool.emplace_back([this, i]() {
+      base::auto_bind_core();
+      LoadShard(i);
+    });
   }
   for (int i = 0; i < shard_num; ++i) {
     thread_pool[i].join();
