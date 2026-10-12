@@ -9,6 +9,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -64,6 +65,11 @@ DEFINE_string(workload,
               "YCSB workload: a/b/c or workloada/workloadb/workloadc");
 DEFINE_string(distribution, "uniform", "key distribution: uniform/zipfian");
 DEFINE_double(zipfian_alpha, 0.9, "Zipfian alpha");
+DEFINE_bool(zipfian_scramble,
+            false,
+            "permute the zipfian rank->key mapping so hot ranks are not low key "
+            "ids; used to test frequency-aware placement without the "
+            "sequential-load bias");
 DEFINE_string(read_mode, "exists", "read mode: exists/get/batch_get_flat");
 DEFINE_int32(batch_keys, 500, "keys per BatchGetFlat operation");
 DEFINE_bool(load, true, "run load phase");
@@ -114,7 +120,8 @@ public:
   KeyGenerator(std::string distribution,
                uint64_t record_count,
                double zipfian_alpha,
-               uint64_t seed)
+               uint64_t seed,
+               bool scramble = false)
       : distribution_(std::move(distribution)),
         record_count_(record_count),
         alpha_(zipfian_alpha),
@@ -130,6 +137,9 @@ public:
         log_n_ = std::log(static_cast<double>(record_count_));
       } else {
         pow_n_ = std::pow(static_cast<double>(record_count_), 1.0 - alpha_);
+      }
+      if (scramble) {
+        scramble_stride_ = ChooseCoprimeStride(record_count_);
       }
     } else if (distribution_ != "uniform") {
       throw std::invalid_argument("distribution must be uniform or zipfian");
@@ -158,7 +168,26 @@ private:
     if (key >= record_count_) {
       key = record_count_ - 1;
     }
+    if (scramble_stride_ != 0) {
+      key = (key * scramble_stride_) % record_count_;
+    }
     return key;
+  }
+
+  static uint64_t ChooseCoprimeStride(uint64_t n) {
+    static constexpr uint64_t kPreferredStrides[] = {
+        104729, 99991, 65537, 10007, 97};
+    for (uint64_t candidate : kPreferredStrides) {
+      if (candidate < n && std::gcd(candidate, n) == 1) {
+        return candidate;
+      }
+    }
+    for (uint64_t candidate = n / 2 + 1; candidate > 1; --candidate) {
+      if (std::gcd(candidate, n) == 1) {
+        return candidate;
+      }
+    }
+    return 0;
   }
 
   std::string distribution_;
@@ -166,6 +195,7 @@ private:
   double alpha_;
   double pow_n_ = 1.0;
   double log_n_ = 0.0;
+  uint64_t scramble_stride_ = 0;
   FastRandom rng_;
 };
 
@@ -365,7 +395,7 @@ PhaseStats LoadRecords(BaseKV* kv, int load_threads, uint64_t record_count) {
 
   for (int tid = 0; tid < load_threads; ++tid) {
     threads.emplace_back([kv, tid, per_thread, record_count, &counts]() {
-      // base::auto_bind_core();
+      base::auto_bind_core();
       std::string value(FLAGS_value_size, static_cast<char>('a' + (tid % 26)));
       const uint64_t begin = static_cast<uint64_t>(tid) * per_thread + 1;
       const uint64_t end   = std::min(record_count + 1, begin + per_thread);
@@ -425,7 +455,8 @@ PhaseStats RunTransactions(
             distribution,
             record_count,
             FLAGS_zipfian_alpha,
-            0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(tid));
+            0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(tid),
+            FLAGS_zipfian_scramble);
         std::string value(
             FLAGS_value_size, static_cast<char>('A' + (tid % 26)));
         std::string read_value;

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <sstream>
@@ -10,6 +11,17 @@
 
 namespace base {
 int global_socket_id = 0;
+
+namespace {
+bool bind_core_disabled() {
+  const char* value = std::getenv("RECSTORE_BIND_CORE_DISABLE");
+  if (value == nullptr || *value == '\0') {
+    return false;
+  }
+  return std::strcmp(value, "0") != 0 && std::strcmp(value, "false") != 0 &&
+         std::strcmp(value, "no") != 0;
+}
+} // namespace
 
 std::vector<std::vector<int>> parse_numa_nodes() {
   FILE* pipe = popen("lscpu", "r");
@@ -81,6 +93,9 @@ int ReadEnvInt(const char* name, int fallback) {
 }
 
 void bind_core_by_index(int raw_core_idx) {
+  if (bind_core_disabled()) {
+    return;
+  }
   if (core_table.empty()) {
     LOG(WARNING) << "skip core binding: no NUMA core table";
     return;
@@ -91,9 +106,27 @@ void bind_core_by_index(int raw_core_idx) {
                  << global_socket_id << " numa_nodes=" << core_table.size();
     return;
   }
-  const auto& cores = core_table[global_socket_id];
-  if (cores.empty()) {
+  const auto& numa_cores = core_table[global_socket_id];
+  if (numa_cores.empty()) {
     LOG(WARNING) << "skip core binding: empty core list for socket "
+                 << global_socket_id;
+    return;
+  }
+  cpu_set_t allowed_mask;
+  CPU_ZERO(&allowed_mask);
+  if (sched_getaffinity(0, sizeof(allowed_mask), &allowed_mask) != 0) {
+    LOG(WARNING) << "skip core binding: sched_getaffinity failed";
+    return;
+  }
+  std::vector<int> cores;
+  cores.reserve(numa_cores.size());
+  for (int cpu : numa_cores) {
+    if (CPU_ISSET(cpu, &allowed_mask)) {
+      cores.push_back(cpu);
+    }
+  }
+  if (cores.empty()) {
+    LOG(WARNING) << "skip core binding: no allowed CPUs for socket "
                  << global_socket_id;
     return;
   }
@@ -104,10 +137,10 @@ void bind_core_by_index(int raw_core_idx) {
   LOG(WARNING) << "bind to core " << cores[core_idx] << " socket="
                << global_socket_id << " requested_core_index=" << raw_core_idx
                << " core_index=" << core_idx;
-  std::cerr << "component=bind_core event=bind" << " socket="
-            << global_socket_id << " requested_core_index=" << raw_core_idx
-            << " core_index=" << core_idx << " cpu=" << cores[core_idx]
-            << std::endl;
+  std::cerr << "component=bind_core event=bind"
+            << " socket=" << global_socket_id << " requested_core_index="
+            << raw_core_idx << " core_index=" << core_idx
+            << " cpu=" << cores[core_idx] << std::endl;
   bind_core(cores[core_idx]);
 }
 
