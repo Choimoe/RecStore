@@ -1,0 +1,38 @@
+"""Auto-generated from version_info.py.in by CMake. Do not edit.
+
+Build metadata for the recstore native extension.  Inspect it from Python via::
+
+    import recstore
+    print(recstore.__build_info__)
+"""
+
+BUILD_INFO = {
+    "version": "@RECSTORE_VERSION@",
+    "git": {
+        "branch": "@RECSTORE_GIT_BRANCH@",
+        "commit_hash": "@RECSTORE_GIT_HASH@",
+        "commit_hash_full": "@RECSTORE_GIT_HASH_FULL@",
+        "commit_time": "@RECSTORE_GIT_TIME@",
+        "commit_author": "@RECSTORE_GIT_AUTHOR@",
+        "commit_message": "@RECSTORE_GIT_MESSAGE@",
+        "tag": "@RECSTORE_GIT_TAG@",
+    },
+    "build": {
+        "build_time": "@RECSTORE_BUILD_TIME@",
+        "build_timestamp": @RECSTORE_BUILD_TIMESTAMP@,
+        "python_version": "@RECSTORE_PYTHON_VERSION@",
+        "platform": "@RECSTORE_PLATFORM@",
+        "hostname": "@RECSTORE_HOSTNAME@",
+        "build_user": "@RECSTORE_BUILD_USER@",
+        "cuda_version": "@RECSTORE_CUDA_VERSION@",
+        "cxx_abi": 1,
+    },
+}
+
+
+def get_version_info():
+    return BUILD_INFO
+
+
+def is_internal_enabled():
+    return 0

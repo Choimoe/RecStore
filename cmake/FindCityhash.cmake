@@ -21,6 +21,13 @@
 
 set(CITYHASH_USE_STATIC_LIBS true)
 
+# This module rewrites the global find_* prefixes/suffixes below so that the
+# cityhash lookup prefers a static library.  Save the caller's values and
+# restore them at the end of the file; otherwise every later find_library() /
+# find_package() call in the project would also be limited to static archives.
+set(_CITYHASH_SAVED_FIND_LIBRARY_PREFIXES "${CMAKE_FIND_LIBRARY_PREFIXES}")
+set(_CITYHASH_SAVED_FIND_LIBRARY_SUFFIXES "${CMAKE_FIND_LIBRARY_SUFFIXES}")
+
 # Set the library prefix and library suffix properly.
 if(CITYHASH_USE_STATIC_LIBS)
 	set(CMAKE_FIND_LIBRARY_PREFIXES ${CMAKE_STATIC_LIBRARY_PREFIX})
@@ -79,3 +86,8 @@ endif()
 if(NOT CITYHASH_FOUND)
 	DO_FIND_CITYHASH_SYSTEM()
 endif()
+
+set(CMAKE_FIND_LIBRARY_PREFIXES "${_CITYHASH_SAVED_FIND_LIBRARY_PREFIXES}")
+set(CMAKE_FIND_LIBRARY_SUFFIXES "${_CITYHASH_SAVED_FIND_LIBRARY_SUFFIXES}")
+unset(_CITYHASH_SAVED_FIND_LIBRARY_PREFIXES)
+unset(_CITYHASH_SAVED_FIND_LIBRARY_SUFFIXES)

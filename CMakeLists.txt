@@ -26,10 +26,26 @@ if(ENABLE_CUDA AND NOT DEFINED CMAKE_CUDA_COMPILER)
   endforeach()
 endif()
 
+# Single source of truth for the version: the repository-root VERSION file is
+# read here for the CMake build and by pyproject.toml for the package metadata.
+# It may carry a PEP 440 local segment naming the build variant (e.g.
+# "0.1.0+cu126", the same convention as torch's "2.7.1+cu126" wheels); that
+# segment shows up in the wheel filename and in recstore.__version__.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" RECSTORE_VERSION_RAW)
+string(STRIP "${RECSTORE_VERSION_RAW}" RECSTORE_VERSION)
+
+# project(VERSION) only accepts numeric components, so drop the local segment
+# for CMake while RECSTORE_VERSION keeps the full string for the package.
+string(REGEX REPLACE "\\+.*$" "" RECSTORE_VERSION_NUMERIC "${RECSTORE_VERSION}")
+if(NOT RECSTORE_VERSION_NUMERIC MATCHES "^[0-9]+\\.[0-9]+")
+  message(FATAL_ERROR
+    "VERSION must start with a numeric release (MAJOR.MINOR[.PATCH]); got '${RECSTORE_VERSION}'")
+endif()
+
 if(ENABLE_CUDA)
-  project(RecStore LANGUAGES CXX CUDA C)
+  project(RecStore VERSION ${RECSTORE_VERSION_NUMERIC} LANGUAGES CXX CUDA C)
 else()
-  project(RecStore LANGUAGES CXX C)
+  project(RecStore VERSION ${RECSTORE_VERSION_NUMERIC} LANGUAGES CXX C)
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -201,6 +217,31 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # building
 
+# The container installs fmt/gflags/boost/TBB into a dependency prefix
+# (dockerfiles/setup_centos7.sh: DEPS_PREFIX=${RECSTORE_DEPS_PREFIX:-$HOME/recstore_deps})
+# and passes it as CMAKE_PREFIX_PATH.  Re-append it here because some build
+# front ends own that variable and overwrite it (scikit-build-core FORCE-sets
+# CMAKE_PREFIX_PATH from its CMake init cache), and because a configure with a
+# fresh build directory otherwise cannot resolve fmt.
+if(NOT RECSTORE_DEPS_PREFIX)
+  if(DEFINED ENV{RECSTORE_DEPS_PREFIX})
+    set(RECSTORE_DEPS_PREFIX "$ENV{RECSTORE_DEPS_PREFIX}")
+  elseif(IS_DIRECTORY "$ENV{HOME}/recstore_deps/lib64/cmake")
+    set(RECSTORE_DEPS_PREFIX "$ENV{HOME}/recstore_deps")
+  endif()
+endif()
+set(RECSTORE_DEPS_PREFIX "${RECSTORE_DEPS_PREFIX}" CACHE PATH
+    "Dependency prefix providing fmt/gflags/boost/TBB (see dockerfiles/setup_centos7.sh)")
+if(RECSTORE_DEPS_PREFIX)
+  list(APPEND CMAKE_PREFIX_PATH "${RECSTORE_DEPS_PREFIX}")
+  # Same reason: the build-tree rpath used to come from a CMAKE_BUILD_RPATH
+  # environment variable, so keep the prefix's libraries on the build rpath from
+  # the project itself (the installed rpath stays $ORIGIN-based).
+  list(APPEND CMAKE_BUILD_RPATH
+       "${RECSTORE_DEPS_PREFIX}/lib"
+       "${RECSTORE_DEPS_PREFIX}/lib64")
+endif()
+
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_LIST_DIR}/third_party/grpc-install")
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/FindGRPC.cmake")
@@ -311,8 +352,33 @@ add_subdirectory(third_party/json)
 # add_subdirectory(third_party/pybind11)
 # add_subdirectory(third_party/mimalloc)
 
+# pybind11 is pip-installed in the container rather than vendored, so locate
+# its CMake package here instead of relying on a pre-populated cache: a fresh
+# configure (for example after scikit-build-core clears the build directory)
+# has to stand on its own.  -DPYBIND11_CMAKE_DIR=... overrides.
+# Note: do not call find_package(Python ...) before find_package(pybind11) here.
+# That switches pybind11 into its FindPython ("NewTools") mode, which needs a
+# pybind11 new enough to define python_add_library; this image's pybind11 only
+# supports the classic mode.
 if(NOT DEFINED PYBIND11_CMAKE_DIR)
-  set(PYBIND11_CMAKE_DIR "/usr/local/lib/python3.10/dist-packages/pybind11/share/cmake/pybind11")
+  set(_recstore_pybind11_candidates
+    "/usr/local/lib/python3.10/dist-packages/pybind11/share/cmake/pybind11"
+    "${Python_SITELIB}/pybind11/share/cmake/pybind11")
+  file(GLOB _recstore_pybind11_globs
+    "/usr/local/lib/python3.*/dist-packages/pybind11/share/cmake/pybind11"
+    "/usr/local/lib/python3.*/site-packages/pybind11/share/cmake/pybind11"
+    "/usr/local/python3.*/lib/python3.*/site-packages/pybind11/share/cmake/pybind11"
+    "$ENV{HOME}/.local/lib/python3.*/site-packages/pybind11/share/cmake/pybind11")
+  list(APPEND _recstore_pybind11_candidates ${_recstore_pybind11_globs})
+  foreach(_recstore_pybind11_candidate IN LISTS _recstore_pybind11_candidates)
+    if(EXISTS "${_recstore_pybind11_candidate}/pybind11Config.cmake")
+      set(PYBIND11_CMAKE_DIR "${_recstore_pybind11_candidate}")
+      break()
+    endif()
+  endforeach()
+endif()
+if(NOT PYBIND11_CMAKE_DIR)
+  message(FATAL_ERROR "pybind11 CMake package not found; pass -DPYBIND11_CMAKE_DIR=<dir>")
 endif()
 list(APPEND CMAKE_PREFIX_PATH ${PYBIND11_CMAKE_DIR})
 find_package(pybind11 REQUIRED)
