@@ -352,24 +352,30 @@ add_subdirectory(third_party/json)
 # add_subdirectory(third_party/pybind11)
 # add_subdirectory(third_party/mimalloc)
 
-# pybind11 is pip-installed in the container rather than vendored, so locate
-# its CMake package here instead of relying on a pre-populated cache: a fresh
-# configure (for example after scikit-build-core clears the build directory)
-# has to stand on its own.  -DPYBIND11_CMAKE_DIR=... overrides.
+# pybind11 is not vendored, so locate its CMake package here instead of relying
+# on a pre-populated cache: a fresh configure (for example after
+# scikit-build-core clears the build directory) has to stand on its own.
+# -DPYBIND11_CMAKE_DIR=... overrides.
+#
+# The pip location is image-specific, and images that install pybind11 through
+# apt (dockerfiles/init_env_inside_docker.sh) keep it under the default system
+# prefix instead, so a miss here is not an error: find_package() below performs
+# the real search and reports anything missing itself.
+#
 # Note: do not call find_package(Python ...) before find_package(pybind11) here.
 # That switches pybind11 into its FindPython ("NewTools") mode, which needs a
-# pybind11 new enough to define python_add_library; this image's pybind11 only
-# supports the classic mode.
+# pybind11 new enough to define python_add_library; some images ship an older
+# pybind11 that only supports the classic mode.
 if(NOT DEFINED PYBIND11_CMAKE_DIR)
-  set(_recstore_pybind11_candidates
-    "/usr/local/lib/python3.10/dist-packages/pybind11/share/cmake/pybind11"
-    "${Python_SITELIB}/pybind11/share/cmake/pybind11")
-  file(GLOB _recstore_pybind11_globs
+  file(GLOB _recstore_pybind11_candidates
     "/usr/local/lib/python3.*/dist-packages/pybind11/share/cmake/pybind11"
     "/usr/local/lib/python3.*/site-packages/pybind11/share/cmake/pybind11"
     "/usr/local/python3.*/lib/python3.*/site-packages/pybind11/share/cmake/pybind11"
     "$ENV{HOME}/.local/lib/python3.*/site-packages/pybind11/share/cmake/pybind11")
-  list(APPEND _recstore_pybind11_candidates ${_recstore_pybind11_globs})
+  if(Python_SITELIB)
+    list(APPEND _recstore_pybind11_candidates
+      "${Python_SITELIB}/pybind11/share/cmake/pybind11")
+  endif()
   foreach(_recstore_pybind11_candidate IN LISTS _recstore_pybind11_candidates)
     if(EXISTS "${_recstore_pybind11_candidate}/pybind11Config.cmake")
       set(PYBIND11_CMAKE_DIR "${_recstore_pybind11_candidate}")
@@ -377,10 +383,9 @@ if(NOT DEFINED PYBIND11_CMAKE_DIR)
     endif()
   endforeach()
 endif()
-if(NOT PYBIND11_CMAKE_DIR)
-  message(FATAL_ERROR "pybind11 CMake package not found; pass -DPYBIND11_CMAKE_DIR=<dir>")
+if(EXISTS "${PYBIND11_CMAKE_DIR}/pybind11Config.cmake")
+  list(APPEND CMAKE_PREFIX_PATH "${PYBIND11_CMAKE_DIR}")
 endif()
-list(APPEND CMAKE_PREFIX_PATH ${PYBIND11_CMAKE_DIR})
 find_package(pybind11 REQUIRED)
 
 set(CTEST_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/Testing")
