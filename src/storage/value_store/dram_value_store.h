@@ -30,10 +30,42 @@ public:
     const auto& dram                 = value.at("dram_allocator");
     const std::string allocator_type = dram.value("type", "R2_SLAB");
     const uint64_t capacity_bytes = dram.at("capacity_bytes").get<uint64_t>();
-    using MF                      = base::
+    std::vector<int> size_classes;
+    if (dram.contains("size_classes")) {
+      size_classes = dram.at("size_classes").get<std::vector<int>>();
+      for (int slab_size : size_classes) {
+        if (slab_size <= 0) {
+          throw std::invalid_argument(
+              "DramValueStore requires positive dram_allocator.size_classes");
+        }
+      }
+    }
+
+    using MF = base::
         Factory<base::MallocApi, const std::string&, int64, const std::string&>;
-    allocator_.reset(MF::NewInstance(
-        allocator_type, path, static_cast<int64>(capacity_bytes), "DRAM"));
+    using MFS =
+        base::Factory<base::MallocApi,
+                      const std::string&,
+                      int64,
+                      const std::string&,
+                      const std::vector<int>&>;
+    if (!size_classes.empty()) {
+      // Only allocators that registered the sized factory accept an explicit
+      // size-class list; everything else keeps the fixed-class constructor.
+      if (MFS::creators().count(allocator_type) == 0) {
+        throw std::invalid_argument(
+            "allocator does not support size_classes: " + allocator_type);
+      }
+      allocator_.reset(MFS::NewInstance(
+          allocator_type,
+          path,
+          static_cast<int64>(capacity_bytes),
+          "DRAM",
+          size_classes));
+    } else {
+      allocator_.reset(MF::NewInstance(
+          allocator_type, path, static_cast<int64>(capacity_bytes), "DRAM"));
+    }
     if (!allocator_) {
       throw std::runtime_error("failed to create DramValueStore allocator");
     }
