@@ -77,6 +77,13 @@ public:
     if (written <= 0) {
       return;
     }
+    // snprintf returns the *would-be* length; anything that did not fit in
+    // `line` would read past the buffer here. kMaxTagLen keeps this
+    // unreachable in practice; if it ever trips, drop the record instead of
+    // emitting a truncated (invalid) JSONL line.
+    if (static_cast<std::size_t>(written) >= sizeof(line)) {
+      return;
+    }
     std::lock_guard<std::mutex> guard(mutex_);
     buffer_.append(line, static_cast<std::size_t>(written));
     // The PS server is killed rather than shut down cleanly, so a purely
@@ -105,6 +112,11 @@ private:
     }
     const char* tag = std::getenv("RECSTORE_RDMA_WIRE_TRACE_TAG");
     tag_ = (tag != nullptr && *tag != '\0') ? tag : std::to_string(getpid());
+    // Keep every record inside `line[224]` in Record(); the fixed fields
+    // already take ~90 bytes at their widest.
+    if (tag_.size() > kMaxTagLen) {
+      tag_.resize(kMaxTagLen);
+    }
     file_ = std::fopen(path, "a");
   }
 
@@ -116,6 +128,7 @@ private:
     buffer_.clear();
   }
 
+  static constexpr std::size_t kMaxTagLen  = 64;
   static constexpr std::size_t kFlushBytes = 256 * 1024;
   // 100ms worth of posts is negligible to lose at process kill time.
   static constexpr unsigned long long kFlushIntervalNs = 100ull * 1000 * 1000;

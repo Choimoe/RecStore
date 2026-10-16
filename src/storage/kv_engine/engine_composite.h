@@ -884,13 +884,16 @@ public:
     return ActiveKeyCount();
   }
 
+  // CollectCheckpointKeys traverses checkpoint_keys_by_thread_ while the put
+  // path (TrackKeys) push_backs into it under a *shared* lock, so collectors
+  // must take the exclusive lock; a shared lock here races the writers.
   uint64_t ActiveKeyCount() const override {
-    std::shared_lock<std::shared_mutex> checkpoint_lock(checkpoint_mu_);
+    std::unique_lock<std::shared_mutex> checkpoint_lock(checkpoint_mu_);
     return static_cast<uint64_t>(CollectCheckpointKeys().size());
   }
 
   std::vector<uint64_t> SnapshotKeys() const override {
-    std::shared_lock<std::shared_mutex> checkpoint_lock(checkpoint_mu_);
+    std::unique_lock<std::shared_mutex> checkpoint_lock(checkpoint_mu_);
     return CollectCheckpointKeys();
   }
 
