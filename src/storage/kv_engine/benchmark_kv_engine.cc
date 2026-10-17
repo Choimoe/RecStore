@@ -65,11 +65,12 @@ DEFINE_string(workload,
               "YCSB workload: a/b/c or workloada/workloadb/workloadc");
 DEFINE_string(distribution, "uniform", "key distribution: uniform/zipfian");
 DEFINE_double(zipfian_alpha, 0.9, "Zipfian alpha");
-DEFINE_bool(zipfian_scramble,
-            false,
-            "permute the zipfian rank->key mapping so hot ranks are not low key "
-            "ids; used to test frequency-aware placement without the "
-            "sequential-load bias");
+DEFINE_bool(
+    zipfian_scramble,
+    false,
+    "permute the zipfian rank->key mapping so hot ranks are not low key "
+    "ids; used to test frequency-aware placement without the "
+    "sequential-load bias");
 DEFINE_string(read_mode, "exists", "read mode: exists/get/batch_get_flat");
 DEFINE_int32(batch_keys, 500, "keys per BatchGetFlat operation");
 DEFINE_bool(load, true, "run load phase");
@@ -193,8 +194,8 @@ private:
   std::string distribution_;
   uint64_t record_count_;
   double alpha_;
-  double pow_n_ = 1.0;
-  double log_n_ = 0.0;
+  double pow_n_             = 1.0;
+  double log_n_             = 0.0;
   uint64_t scramble_stride_ = 0;
   FastRandom rng_;
 };
