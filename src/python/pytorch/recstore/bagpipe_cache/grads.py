@@ -11,15 +11,21 @@ launched in the previous step's update_grads call.
                    **前提是该 id 确实不会被其它 rank 触碰**：只有 oracle
                    预扫描 (_shared_ids_complete) 能证明这一点，因此回退集
                    之外的 id 不算 local-only。
-- shared id:      本地不 apply（避免本地梯度与聚合梯度双重计入）；梯度走
-                   聚合路径（侧流发射，与主流计算重叠），**所有 rank** 在
-                   下一步 prefill 的 barrier 处用聚合梯度 best-effort 原位落
-                   cache。副本收敛 = 同一 PS 初值 + 同一聚合增量序列。rank0
-                   推 PS 降级为持久化（深度-1 异步流水线），不在一致性关键
-                   路径上。聚合路径按共享集大小路由（全 rank 一致判定）：集
-                   合小（≤ _dense_shared_max_rows）走 dense all_reduce 整个
-                   共享集缓冲；集合大则并入稀疏 all_gather，每步只通信实际
-                   出现的 id。
+- shared id:      not applied locally (that would double-count the local
+                   gradient against the aggregated one); the gradient goes
+                   through the aggregation path (issued on a side stream,
+                   overlapping main-stream compute), and **every rank**
+                   applies the aggregated gradient best-effort in place at
+                   the next prefill barrier.  Replica convergence = same PS
+                   initial value + same sequence of aggregated increments.
+                   rank0's push to the PS is demoted to persistence (a
+                   depth-1 async pipeline) and is off the consistency
+                   critical path.  The aggregation path routes on the
+                   shared-set size (a rank-consistent decision): a small set
+                   (<= _dense_shared_max_rows) uses a dense all_reduce over
+                   the whole shared-set buffer; a large one folds into the
+                   sparse all_gather, communicating only the ids that
+                   actually appear this step.
 - unknown id:     集合不完整时，不在已知共享集里的 id 归属未知：走 sparse
                    all_gather 聚合（与 shared 同一 barrier 消费），既不本地
                    apply 也不标 dirty —— 否则各 rank 独立 apply 自己的梯度、
@@ -338,15 +344,21 @@ class BagPipeGradMixin:
             self._cached_dev[local_compact] = True
             self._ttl_dev[local_compact] = batch_num + self._ttl_margin
 
-        # ---- 聚合路径: 集合通信都在侧流发射 (与主流计算重叠), 聚合结果由
-        #      全 rank 在下一步 prefill 的 barrier 处一起落 cache ----
+        # ---- Aggregation path: the collectives are issued on the side
+        #      stream (overlapping main-stream compute); every rank applies
+        #      the aggregated result to its cache at the next prefill
+        #      barrier ----
         self._hot_add("bagpipe_sync_now_ids", shared_mask.sum())
-        # 路由 (全 rank 一致, 无需通信): 共享集小 → dense all_reduce 整个
-        # 共享集缓冲 (行数少时开销可忽略, 且免去逐 id 的 gather); 共享集大
-        # (fallback 采样集 14K 行级别, oracle prescan 后可达全数据集级别)
-        # → shared id 并入稀疏 all_gather, 每步只通信实际出现的行。
-        # dense all_reduce 的字节数 ∝ 共享集总行数, 与本步命中数无关 —
-        # 共享集大而命中率低时是纯浪费 (实测占 2-rank 每步通信的大头)。
+        # Routing (rank-consistent, no communication needed): a small
+        # shared set -> one dense all_reduce over the whole shared-set
+        # buffer (negligible at low row counts, and it avoids the per-id
+        # gather); a large shared set (fallback sample sets are ~14K rows,
+        # and the oracle prescan can reach whole-dataset scale) -> shared
+        # ids fold into the sparse all_gather, communicating only the rows
+        # that actually appear this step.  A dense all_reduce costs bytes
+        # proportional to the total shared-set row count regardless of this
+        # step's hits — pure waste when the set is large and the hit rate
+        # low (measured as the bulk of 2-rank per-step communication).
         shared_t = self._shared_ids_tensor
         use_dense = (
             shared_t is not None
@@ -357,17 +369,21 @@ class BagPipeGradMixin:
         )
         works = []
         if self._is_distributed():
-            # 集合通信无条件发射: 本 rank 的空桶不能跳过其它 rank 会进入的
-            # collective (按 numel 早退会让对端永久等待)。路由条件本身只依
-            # 赖全 rank 一致的量 (_shared_ids_tensor / _global_unique_count),
-            # 不会出现一端 dense 一端 sparse 的错配。
-            # sparse 先于 dense 调用: 侧流串行, dense 的 wait_stream 会把排
-            # 在它后面的 count 交换一并挡在主流积压后面。
-            # 路由真值表 (sparse 列 = 并入稀疏 all_gather 的 mask):
-            #   use_dense & unknown  → sparse: unknown,   dense: shared
-            #   use_dense & 无unknown → sparse: 不发射,    dense: shared
-            #   大共享集 & unknown   → sparse: shared|unknown (单次聚合)
-            #   大共享集 & 无unknown  → sparse: shared,    dense: 不发射
+            # Collectives are issued unconditionally: an empty local bucket
+            # must not skip a collective that other ranks will enter (an
+            # early exit on numel would hang the peer forever).  The routing
+            # condition depends only on rank-consistent quantities
+            # (_shared_ids_tensor / _global_unique_count), so one rank can
+            # never pick dense while another picks sparse.
+            # Sparse is called before dense: the side stream is serial, and
+            # dense's wait_stream would otherwise push the count exchange
+            # queued after it behind the main-stream backlog.
+            # Routing truth table (sparse column = mask folded into the
+            # sparse all_gather):
+            #   use_dense & unknown    -> sparse: unknown,   dense: shared
+            #   use_dense & no unknown -> sparse: none,      dense: shared
+            #   large set & unknown    -> sparse: shared|unknown (single aggregate)
+            #   large set & no unknown -> sparse: shared,    dense: none
             if unknown_mask is not None:
                 self._hot_add(
                     "bagpipe_unknown_aggregated_ids", unknown_mask.sum()

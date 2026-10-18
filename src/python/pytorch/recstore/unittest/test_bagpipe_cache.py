@@ -104,8 +104,9 @@ class _GradHarness(BagPipeGradMixin):
         # 集合外的 id 允许走 local-only 快路径。集合不完整的场景由
         # test_unknown_ids_are_aggregated_when_set_is_incomplete 单独覆盖。
         self._shared_ids_complete = True
-        # 共享集路由阈值 (与 controller 默认一致): {10, 30} 共 2 行 ≤ 阈值
-        # → 默认走 dense; 大集合路由由 _dense_shared_max_rows=0 的用例覆盖。
+        # Shared-set routing threshold (matches the controller default):
+        # {10, 30} is 2 rows <= threshold -> dense routing by default; the
+        # large-set routing is covered by the _dense_shared_max_rows=0 case.
         self._global_unique_count = 2
         self._dense_shared_max_rows = 4096
         # 无 GPU 热累加器 → _hot_add 回退 host float (直接进 _stats)
@@ -208,15 +209,18 @@ class TestBagPipeDenseReduce(unittest.TestCase):
 
 
 class TestCompositeWorkSentinelAggregation(unittest.TestCase):
-    """wait() 用 -1 哨兵掩码恢复各 rank 贡献, 不做逐 rank count 同步。"""
+    """wait() recovers each rank's contribution via the -1 sentinel mask,
+    with no per-rank count synchronization."""
 
     def test_wait_masks_sentinel_rows_and_aggregates_duplicates(self):
         from ..bagpipe_cache.types import _CompositeWork
 
-        # rank0 贡献 [10] (第二行哨兵), rank1 贡献 [15, 10]
+        # rank0 contributes [10] (second row is a sentinel); rank1
+        # contributes [15, 10]
         ids_list = [torch.tensor([10, -1]), torch.tensor([15, 10])]
         grads_list = [
-            torch.tensor([[1.0, 1.0], [9.0, 9.0]]),  # 第二行是哨兵行, 必须被丢弃
+            # rank0's second row is a sentinel row and must be dropped
+            torch.tensor([[1.0, 1.0], [9.0, 9.0]]),
             torch.tensor([[5.0, 5.0], [2.0, 2.0]]),
         ]
         work = _CompositeWork(
@@ -226,7 +230,8 @@ class TestCompositeWorkSentinelAggregation(unittest.TestCase):
         work.wait()
         ids, grads = work.result
         self.assertEqual(ids.tolist(), [10, 15])
-        # id 10 两 rank 求和 [1,1]+[2,2]=[3,3]; 哨兵行的 [9,9] 不计入
+        # id 10 sums across ranks: [1,1]+[2,2]=[3,3]; the sentinel row's
+        # [9,9] must not be counted
         self.assertEqual(grads.tolist(), [[3.0, 3.0], [5.0, 5.0]])
 
     def test_wait_all_sentinel_returns_empty(self):
@@ -249,7 +254,8 @@ class TestCompositeWorkSentinelAggregation(unittest.TestCase):
 
 class TestBagPipeSparseAllGather(unittest.TestCase):
     def test_sparse_all_gather_pads_with_sentinel_and_aggregates(self):
-        """2-rank 伪 all_gather: 对端贡献与本 rank 相同 → 梯度求和。"""
+        """2-rank fake all_gather: the peer contributes the same rows as
+        this rank, so gradients are summed."""
         harness = _CommHarness()
         ids = torch.tensor([10], dtype=torch.int64)
         grads = torch.tensor([[1.0, 2.0]])
@@ -445,40 +451,46 @@ class TestBagPipeUnknownIdAggregation(unittest.TestCase):
 
         harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
 
-        # 本 rank 没有 shared id (dense 桶为空) 仍然发射 (对齐对端的
-        # all_reduce), sparse 携带 unknown id
+        # This rank has no shared ids (empty dense bucket) yet still issues
+        # the collective (matching the peer's all_reduce); sparse carries
+        # the unknown id.
         self.assertEqual(len(harness.dense_calls), 1)
         self.assertEqual(harness.dense_calls[0][0].numel(), 0)
         self.assertEqual(len(harness.sparse_calls), 1)
         self.assertEqual(harness.sparse_calls[0][0].tolist(), [20])
 
     def test_large_shared_set_routes_shared_ids_through_sparse(self):
-        """共享集超过阈值时 shared id 并入稀疏 all_gather (按本步实际出现
-        的行通信), 不再对整个共享集缓冲做 all_reduce。"""
+        """With a shared set above the threshold, shared ids fold into the
+        sparse all_gather (communicating only the rows that actually appear
+        this step) instead of all-reducing the whole shared-set buffer."""
         harness = _GradHarness(rank=0)
-        # oracle 集合 (unknown 路径不触发), 共享集"大" → 稀疏路由
+        # Oracle set (the unknown path never triggers); the shared set is
+        # "large" -> sparse routing
         harness._dense_shared_max_rows = 0
         ids = torch.tensor([10, 20, 30], dtype=torch.int64)
         grads = torch.tensor([[1.0, 1.0], [2.0, 2.0], [4.0, 4.0]])
 
         harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
 
-        # dense 不发射; shared ids (10, 30) 走单次稀疏聚合
+        # dense is not issued; the shared ids (10, 30) go through a single
+        # sparse aggregation
         self.assertEqual(harness.dense_calls, [])
         self.assertEqual(len(harness.sparse_calls), 1)
         s_ids, s_grads, _ = harness.sparse_calls[0]
         self.assertEqual(s_ids.tolist(), [10, 30])
         self.assertEqual(s_grads.tolist(), [[1.0, 1.0], [4.0, 4.0]])
-        # local-only id 20 仍走立即 apply
+        # the local-only id 20 is still applied immediately
         self.assertEqual(len(harness.kv_client.best_effort_applies), 1)
         self.assertEqual(harness.kv_client.best_effort_applies[0][1].tolist(), [20])
 
     def test_large_shared_set_sparse_issued_even_with_empty_bucket(self):
-        """稀疏路由下本 rank 聚合桶为空也不能跳过 all_gather: 对端可能
-        有 shared id 要交换, 早退即挂死。"""
+        """Under sparse routing an empty local aggregation bucket must not
+        skip the all_gather: the peer may have shared ids to exchange, and
+        an early exit would hang it."""
         harness = _GradHarness(rank=0)
         harness._dense_shared_max_rows = 0
-        # 本批只有 local-only id 20 (oracle 证明), 聚合桶为空
+        # This batch has only the local-only id 20 (oracle-proven); the
+        # aggregation bucket is empty
         ids = torch.tensor([20], dtype=torch.int64)
         grads = torch.tensor([[2.0, 2.0]])
 

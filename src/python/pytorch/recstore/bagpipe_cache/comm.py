@@ -209,17 +209,29 @@ class BagPipeCommMixin:
     ) -> tuple[torch.Tensor, torch.Tensor, Any]:
         """Sparse all_gather + aggregate gradients across GPUs (async).
 
-        同步预算: 尺寸协商 (count all_gather + 一次 ``.item()``) 不可避免 —
-        padded 缓冲的分配需要 host 侧的 max_n。但 count 交换的内容 (本 rank
-        的个数) 是 host 已知常量, 不依赖主流上任何计算, 因此把它发射在侧流
-        上且**不**建立主流 → 侧流顺序: ``.item()`` 只等待这个 8 字节集合通
-        信本身, 而不是等主流积压 (backward/replay) 排空后再等通信。payload
-        的 all_gather 读取主流写入的梯度, 保持原来的
-        ``stream.wait_stream(current_stream)`` 顺序。
+        Sync budget: the size negotiation (a count all_gather plus one
+        ``.item()``) is unavoidable — allocating the padded buffers needs
+        max_n on the host.  The count exchange is issued on the side stream
+        with the same ``stream.wait_stream(current_stream)`` ordering as the
+        payload all_gather, and max_n is read back on that same stream (see
+        the comments in the body).
 
-        本方法必须先于 ``_dense_all_reduce_async`` 调用: 侧流是串行的,
-        dense all_reduce 会先 ``wait_stream`` 主流, 若 count 交换排在其后,
-        ``.item()`` 又会被主流积压挡住, 顺序优化就白做了。
+        Stream ordering is a correctness requirement, not an optional
+        optimization: NCCL matches collectives across ranks by the
+        **device-side execution order** of their kernels.  Kernels on
+        different streams within one process carry no execution-order
+        guarantee — if the side-stream count exchange does not wait on the
+        main stream, it can run ahead of a main-stream collective that has
+        not drained yet (e.g. the backward DDP all_reduce) on one rank but
+        not on the other, and the two ranks' collective sequences misalign:
+        the peer then matches later collectives against the wrong sequence
+        numbers, corrupting data at best and deadlocking at worst (observed
+        as a 2-rank RDMA training hang at step 0, with the NCCL watchdog
+        SIGABRT-ing only after 10 minutes).  Every collective issued on the
+        side stream must therefore ``wait_stream`` the main stream first, so
+        that it is ordered after all earlier-enqueued main-stream
+        collectives; the next step's prefill barrier then has the main
+        stream wait on the side stream, closing the ordering loop.
         """
         if not self._is_distributed():
             return ids, grads, None
@@ -236,16 +248,31 @@ class BagPipeCommMixin:
         n_list = [torch.zeros(1, dtype=torch.int64, device=self.device)
                    for _ in range(world_size)]
         if stream is not None:
-            # count 交换无主流依赖: 直接在侧流上发射 (侧流此刻空闲 —
-            # 上一步的聚合已在 prefill barrier 排空)。
+            # See the docstring: a side-stream collective must be ordered
+            # after already-enqueued main-stream collectives (the backward
+            # DDP all_reduce etc.), or the cross-rank matching misaligns.
+            stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 dist.all_gather(n_list, n_tensor)
+                # max_n must be read back on the same stream as the
+                # collective: the ``.item()`` D2H copy is issued on the
+                # current stream and blocks the host — if it lands on the
+                # main stream, which does not wait on the side stream, the
+                # copy can run before the allgather kernel writes and read
+                # the zero-initialized n_list -> max_n=0 -> this rank takes
+                # the early exit while the peer waits in the payload
+                # all_gather, misaligning both ranks' collective sequences
+                # from then on (this rank's barrier matches the peer's
+                # payload) — a deadlock the NCCL watchdog only reports 10
+                # minutes later.
+                max_n = max(int(ni.item()) for ni in n_list)
         else:
             dist.all_gather(n_list, n_tensor)
-        max_n = max(int(ni.item()) for ni in n_list)
+            max_n = max(int(ni.item()) for ni in n_list)
 
         if max_n == 0:
-            # max_n 是全 rank 一致的最大值, 这里早退不会让对端悬空。
+            # max_n is the rank-consistent maximum, so this early exit
+            # cannot leave a peer hanging.
             self._stats["bagpipe_all_reduce_calls"] += 1
             self._stats["bagpipe_all_reduce_ms"] += (time.perf_counter() - t_start) * 1e3
             return ids[:0], grads[:0], None
@@ -257,8 +284,9 @@ class BagPipeCommMixin:
         if not grads_dev.is_contiguous():
             grads_dev = grads_dev.contiguous()
 
-        # 哨兵补齐: 超出本 rank 真实个数的行填 -1, wait() 端用布尔掩码恢复
-        # 各 rank 的贡献, 不再需要逐 rank 的 count .item() 同步。
+        # Sentinel padding: rows beyond this rank's true count are filled
+        # with -1; wait() recovers each rank's contribution with a boolean
+        # mask, so no per-rank count .item() synchronization is needed.
         padded_ids = torch.full((max_n,), -1, dtype=torch.int64, device=self.device)
         padded_ids[:n] = ids_dev
         padded_grads = torch.zeros(max_n, dim, dtype=torch.float32, device=self.device)
@@ -270,9 +298,11 @@ class BagPipeCommMixin:
                        for _ in range(world_size)]
 
         if stream is not None:
-            # 缓冲在主流上写入, 集合通信在侧流上发射: 必须先让侧流等待
-            # 主流, 否则 NCCL kernel 可能读到旧的补齐缓冲 (write-after-read
-            # 竞态, kernel launch 延迟通常掩盖它, 但语义上是 UB)。
+            # The buffers are written on the main stream and consumed by a
+            # collective issued on the side stream: the side stream must
+            # wait on the main stream first, or the NCCL kernel may read a
+            # stale padding buffer (a write-after-read race — kernel launch
+            # latency usually masks it, but it is UB by semantics).
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 work_ids = dist.all_gather(ids_list, padded_ids, async_op=True)

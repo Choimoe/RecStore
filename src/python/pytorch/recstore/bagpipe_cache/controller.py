@@ -209,13 +209,19 @@ class BagPipeCacheController(
         self._init_unique_ids: Set[int] = set()
         self._prescan_done: bool = False
         self._prescan_unique_ids: Set[int] = set()
-        # 共享集行数超过该阈值时, shared id 改走稀疏 all_gather (按本步实际
-        # 出现的 id 通信), 不再对整个 _global_unique_count x dim 缓冲做
-        # all_reduce。阈值与 _global_unique_count 一样是全 rank 一致的量,
-        # 路由选择不需要额外通信。dense all_reduce 的字节数 ∝ 共享集总行数,
-        # 稀疏 all_gather ∝ 本步每 rank 实际 shared id 数 —— 后者通常只有
-        # 前者的零头 (实测 fallback 集 14278 行、每步每 rank 实际命中数千),
-        # oracle prescan 后共享集会扩大到全数据集级别, dense 路径完全不可用。
+        # When the shared-ID set exceeds this row threshold, shared ids are
+        # routed to the sparse all_gather (communicating only the ids that
+        # actually appear this step) instead of all-reducing the whole
+        # _global_unique_count x dim buffer.  Like _global_unique_count,
+        # the threshold is a rank-consistent quantity, so routing needs no
+        # extra communication.  A dense all_reduce costs bytes proportional
+        # to the full shared-set row count regardless of this step's hits,
+        # while the sparse all_gather is proportional to the per-rank
+        # shared ids actually present — usually a small fraction of the
+        # former (measured: a fallback set of 14278 rows with only a few
+        # thousand hits per rank per step; after the oracle prescan the
+        # shared set grows to whole-dataset scale and the dense path
+        # becomes unusable).
         self._dense_shared_max_rows = int(
             os.environ.get("RECSTORE_BAGPIPE_DENSE_SHARED_MAX_ROWS", "4096")
         )
