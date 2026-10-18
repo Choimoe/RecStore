@@ -49,8 +49,13 @@ class BenchmarkConfig:
     prefetch_depth: int = 0
     optimization_cache_capacity: int = 0
     bagpipe_prescan: bool = False
+    optimization_lookahead: int = 0
     index_type: str = "DRAM_PET_HASH"
     torchrec_baselines: tuple[str, ...] = ("hbm",)
+    profiler: bool = False
+    profiler_warmup: int = 30
+    profiler_active: int = 5
+    profiler_repeat: int = 1
     master_port: int = 29500
     python_bin: str = sys.executable
     skip_build: bool = False
