@@ -38,7 +38,7 @@ class BagPipeCacheController(
     Works with the local_shm fast path + GPU cache enabled.
     """
 
-    # nv_gpu_cache.hpp: SET_ASSOCIATIVITY=2, SLAB_SIZE=32 → 64 槽/set
+    # nv_gpu_cache.hpp: SET_ASSOCIATIVITY=2, SLAB_SIZE=32 -> 64 slots/set
     _GPU_CACHE_SET_SLOTS = 64
 
     def __init__(
@@ -70,12 +70,13 @@ class BagPipeCacheController(
         self._lookahead_adjust_interval = 10
         self.cleanup_batch_proportion = float(cleanup_batch_proportion)
         self.cleanup_interval = max(1, int(self.cleanup_batch_proportion * self._dynamic_lookahead))
-        # C++ gpu cache 的 capacity 单位是 slab set, 每 set 持有
-        # SET_ASSOCIATIVITY(2) × SLAB_SIZE(32) = 64 个 entry 槽
-        # (nv_gpu_cache.hpp / nv_gpu_cache.cu num_slot_ 计算)。簿记的
-        # 容量压力判定必须换算成 entry 数, 否则会在 1/64 真实容量处
-        # 提前触发容量驱逐, 造成无谓的 writeback churn (实测 92.8K →
-        # 76.1K samples/s)。
+        # The C++ gpu cache's capacity unit is a slab set; each set holds
+        # SET_ASSOCIATIVITY(2) x SLAB_SIZE(32) = 64 entry slots
+        # (nv_gpu_cache.hpp / nv_gpu_cache.cu num_slot_ computation). The
+        # bookkeeping's capacity-pressure test must convert to entry
+        # counts, otherwise capacity eviction triggers at 1/64 of the real
+        # capacity and causes pointless writeback churn (measured 92.8K ->
+        # 76.1K samples/s).
         self.cache_capacity = int(cache_capacity) * self._GPU_CACHE_SET_SLOTS
         self.embedding_dim = int(embedding_dim)
         self.fuse_k = int(fuse_k)
@@ -88,21 +89,23 @@ class BagPipeCacheController(
         self._id_extractor = id_extractor
 
         # ---- Oracle tracking: flat tensors indexed by compact ID ----
-        # 原版 BagPipe 的 oracle 用 numpy 扁平数组做全部 per-id 决策
-        # (latest_tracker[table][ids] 向量化); 这里用同构的 GPU 张量,
-        # 消灭逐 fid 的 Python dict 循环 (实测 12K id/步在 enqueue 路径
-        # 花掉 ~15ms)。四张平行张量按 compact id 直接索引:
-        #   _latest_dev  int32  最近一次 enqueue 见到该 id 的批次号
-        #   _ttl_dev     int32  缓存条目过期批次号 (0 = 过期)
-        #   _cached_dev  bool   是否驻留在 GPU cache
-        #   _dirty_dev   bool   本地 SGD 已应用、尚未写回 PS
+        # The original BagPipe oracle makes every per-id decision on flat
+        # numpy arrays (latest_tracker[table][ids] vectorized); this uses
+        # isomorphic GPU tensors, eliminating the per-fid Python dict loop
+        # (measured ~15ms in the enqueue path at 12K ids/step). Four
+        # parallel tensors are indexed directly by compact id:
+        #   _latest_dev  int32  batch number that last enqueued this id
+        #   _ttl_dev     int32  expiry batch of the cache entry (0 = expired)
+        #   _cached_dev  bool   resident in the GPU cache
+        #   _dirty_dev   bool   local SGD applied, not yet written back to PS
         #
-        # fused id = (table_idx << fuse_k) | row (fuse_k=30, 26 张表 →
-        # 名义空间 ~2^35, 直接按 fused id 建扁平张量会 OOM)。实际占用
-        # 是每表 [t<<fuse_k, t<<fuse_k + cap_t), 因此映射到紧凑的
-        # 表内偏移: compact = (table_idx << _bk_shift) | row,
-        # stride = next_pow2(max cap), 总空间 = num_tables << shift
-        # (~6.8M, 四张张量共 ~68MB)。
+        # fused id = (table_idx << fuse_k) | row (fuse_k=30, 26 tables ->
+        # nominal space ~2^35; a flat tensor over raw fused ids would OOM).
+        # The actual occupancy is [t<<fuse_k, t<<fuse_k + cap_t) per table,
+        # so ids map to a compact per-table offset:
+        # compact = (table_idx << _bk_shift) | row, with
+        # stride = next_pow2(max cap) and total space = num_tables << shift
+        # (~6.8M; the four tensors together ~68MB).
         caps = [int(v) for v in (table_sizes or {}).values()] or [1 << 20]
         max_cap = max(caps)
         self._bk_stride = 1 << max(1, max_cap - 1).bit_length()
@@ -151,16 +154,20 @@ class BagPipeCacheController(
         # is protected by a high-watermark fallback eviction in cleanup().
         self._ttl_margin = 256
         self._capacity_watermark = 0.9
-        # 单次 cleanup 的到期驱逐上限: 防止冷启动后一次性弹出数万条目
-        # 造成 eviction 尖峰 (writeback 队列也会随之堆积)。超出的条目
-        # 保持旧 ttl, 下一次 cleanup 自然再被扫出。
+        # Per-cleanup cap on TTL evictions: prevents tens of thousands of
+        # entries being evicted at once after a cold start, causing an
+        # eviction spike (and a piling-up writeback queue). Excess entries
+        # keep their old ttl and are naturally picked up by the next
+        # cleanup.
         self._max_evict_per_cleanup = 4096
 
         # ---- Stats ----
         self._stats: Dict[str, float] = {}
-        # 热路径计数 (每步多次累加) 用 GPU 标量张量持有, 避免在
-        # update_grads / _preissue_prefetch 中途 .item() 强制排空设备队列;
-        # consume_stats 在 timer.finish() (device drain) 之后统一取回。
+        # Hot-path counters (accumulated several times per step) are held
+        # as GPU scalar tensors, avoiding a mid-update_grads /
+        # _preissue_prefetch .item() that would force-drain the device
+        # queue; consume_stats drains them after timer.finish() (the
+        # device drain point).
         self._hot_stats_dev: Dict[str, torch.Tensor] = {
             k: torch.zeros((), dtype=torch.float64, device=device)
             for k in (
@@ -180,8 +187,9 @@ class BagPipeCacheController(
         self._cleanup_thread.start()
 
         # ---- Overlap state: async all_reduce on a separate CUDA stream ----
-        # 聚合梯度的 dense all_reduce 统一在侧流上发射 (与主流计算重叠),
-        # 下一步 prefill 的 barrier 处等待并原位落 cache。
+        # The aggregated-gradient all_reduce is issued on a side stream
+        # (overlapping main-stream compute) and waited on at the next
+        # prefill's barrier, applying in place into the cache.
         self._sync_later_stream: Optional[torch.cuda.Stream] = None
         self._eviction_stream: Optional[torch.cuda.Stream] = None
         if self.device.type == "cuda":
@@ -189,14 +197,6 @@ class BagPipeCacheController(
             self._eviction_stream = torch.cuda.Stream(device=self.device)
         self._pending_sync_now_work = None
         self._pending_sync_now_lr: Optional[float] = None
-        # rank0 聚合推送 PS 的深度-1 流水线句柄: 持久化不在一致性关键路径
-        # 上, 但必须保序 (等上一条完成再发下一条)。
-        self._pending_ps_push_handle: Optional[int] = None
-
-        # ---- Anti-entropy backstop (fill-vs-push ordering race) ----
-        self._anti_entropy_step = 0
-        self._anti_entropy_interval = 50
-        self._anti_entropy_ids = 200
 
         # ---- no_sync: shared / unknown / local-only IDs ----
         self._shared_ids: Optional[Set[int]] = None
@@ -209,6 +209,16 @@ class BagPipeCacheController(
         self._init_unique_ids: Set[int] = set()
         self._prescan_done: bool = False
         self._prescan_unique_ids: Set[int] = set()
+        # Per-batch prescan metadata (opt 2): each batch's unique-ID tensor is
+        # kept until finalize_prescan, which exchanges the per-batch shared-ID
+        # counts across ranks into _prescan_sparse_max.  update_grads then
+        # sizes the sparse all_gather from it -- no per-step count exchange,
+        # no .item().  _prescan_batch_numels feeds the enqueue alignment
+        # tripwire (the metadata is only sound while the training order
+        # matches the prescan order).
+        self._prescan_batch_ids: list = []
+        self._prescan_batch_numels: list = []
+        self._prescan_sparse_max: Optional[list] = None
         # When the shared-ID set exceeds this row threshold, shared ids are
         # routed to the sparse all_gather (communicating only the ids that
         # actually appear this step) instead of all-reducing the whole
@@ -280,7 +290,6 @@ class BagPipeCacheController(
             "bagpipe_writeback_ids": 0.0,
             "bagpipe_sgd_cache_success": 0.0,
             "bagpipe_sgd_cache_fallback": 0.0,
-            "bagpipe_anti_entropy_ids": 0.0,
             "bagpipe_all_reduce_calls": 0.0,
             "bagpipe_all_reduce_ids": 0.0,
             "bagpipe_all_reduce_ms": 0.0,
@@ -291,6 +300,7 @@ class BagPipeCacheController(
             "bagpipe_eviction_stream_overlap_ms": 0.0,
             "bagpipe_prescan_batches": 0.0,
             "bagpipe_prescan_ids": 0.0,
+            "bagpipe_prescan_sparse_max_sum": 0.0,
             "bagpipe_dynamic_lookahead": 0.0,
             "bagpipe_cache_pressure": 0.0,
         }
@@ -298,14 +308,17 @@ class BagPipeCacheController(
     def consume_stats(self, *, reset: bool = True) -> Dict[str, float]:
         """Merge current stats into a snapshot.
 
-        热计数器在此取回 (.item() 位于 timer.finish() 的 device drain 之后,
-        不在关键路径上引入同步)。GPU 热累加器无论 reset 与否都会清零:
-        累加器已并入 ``_stats``, 若留在设备上, 下一次 consume_stats 会把它
-        二次计入。
+        Hot counters are drained here (the .item() sits after
+        timer.finish()'s device drain, adding no synchronization to the
+        critical path). The GPU hot accumulators are zeroed regardless of
+        ``reset``: the accumulated value has already been merged into
+        ``_stats``, and leaving it on the device would make the next
+        consume_stats count it a second time.
 
-        ``reset=False`` 是"只读快照": 返回累计值但 ``_stats`` 保留, 后续
-        ``reset=True`` 的调用会把整个累计区间 (含只读快照期间的部分) 一并
-        返回后才清零 —— 计数只被消费一次。
+        ``reset=False`` is a read-only snapshot: it returns the accumulated
+        values but keeps ``_stats``; a later ``reset=True`` call returns the
+        whole accumulated interval (including the snapshot period) before
+        zeroing -- every count is consumed exactly once.
         """
         for key, acc in self._hot_stats_dev.items():
             self._stats[key] = self._stats.get(key, 0.0) + float(acc.item())
@@ -318,7 +331,8 @@ class BagPipeCacheController(
         return stats
 
     # ------------------------------------------------------------------
-    #  Flat-tensor bookkeeping (原版 oracle 的 numpy 扁平数组同构)
+    #  Flat-tensor bookkeeping (isomorphic to the original oracle's flat
+    #  numpy arrays)
     # ------------------------------------------------------------------
 
     def _alloc_bookkeeping(self, size: int) -> None:
@@ -340,21 +354,21 @@ class BagPipeCacheController(
         self._dirty_dev = dirty
 
     def _to_compact(self, fused: torch.Tensor) -> torch.Tensor:
-        """fused id → compact 表内偏移索引 (向量化, 保序)."""
+        """fused id -> compact per-table offset index (vectorized, order-preserving)."""
         row = fused & ((1 << self.fuse_k) - 1)
         return ((fused >> self.fuse_k) << self._bk_shift) + row
 
     def _to_fused(self, compact: torch.Tensor) -> torch.Tensor:
-        """compact 索引 → fused id (向量化, 保序; _to_compact 的逆)."""
+        """compact index -> fused id (vectorized, order-preserving; inverse of _to_compact)."""
         row = compact & (self._bk_stride - 1)
         return ((compact >> self._bk_shift) << self.fuse_k) + row
 
     def _compact_in_range(self, compact: torch.Tensor) -> torch.Tensor:
-        """过滤超出簿记空间的 compact id (未知表/越界 row, 不应出现)。"""
+        """Drop compact ids beyond the bookkeeping space (unknown table / out-of-range row; should not occur)."""
         return compact[compact < self._latest_dev.numel()]
 
     def _hot_add(self, key: str, count: torch.Tensor) -> None:
-        """热路径计数累加: 优先 GPU 标量 (无同步), 否则回退 host float。"""
+        """Hot-path counter accumulation: GPU scalar when available (no synchronization), host float otherwise."""
         acc = self._hot_stats_dev.get(key)
         if acc is not None:
             acc += count.to(dtype=acc.dtype)

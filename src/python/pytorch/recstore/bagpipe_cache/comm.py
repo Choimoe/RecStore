@@ -25,7 +25,9 @@ class BagPipeCommMixin:
     ``_shared_ids_tensor`` (sorted int64 tensor), ``_shared_ids_complete``
     (True only for an oracle set), ``_global_id_to_index``,
     ``_global_unique_count``, ``_init_unique_ids``, ``_prescan_done``,
-    ``_prescan_unique_ids``, ``_stats``, ``lookahead_value``.
+    ``_prescan_unique_ids``, ``_prescan_batch_ids`` (per-batch CPU id
+    tensors collected during prescan), ``_prescan_batch_numels``,
+    ``_prescan_sparse_max``, ``_stats``, ``lookahead_value``.
     """
 
     def _is_distributed(self) -> bool:
@@ -39,43 +41,6 @@ class BagPipeCommMixin:
             return dist.get_rank() if dist.is_initialized() else 0
         except Exception:
             return 0
-
-    def _load_balanced_push(
-        self, table_name: str, ids: torch.Tensor, grads: torch.Tensor
-    ) -> None:
-        """Push aggregated gradients to the PS, load-balanced across ranks.
-
-        Each rank pushes a disjoint contiguous slice of the (already
-        all_reduced) gradients, relieving rank-0 which also hosts the PS
-        server.  Mirrors the original BagPipe eviction writeback that splits
-        global IDs by ``chunk_size = len // world_size``.
-        """
-        if ids.numel() == 0:
-            return
-        if not self._is_distributed():
-            try:
-                self.kv_client.update(table_name, ids, grads)
-            except Exception as exc:
-                logger.warning("[BagPipe] load-balanced push failed: %s", exc)
-            return
-        rank = self._get_rank()
-        world = dist.get_world_size()
-        n = int(ids.size(0))
-        chunk = n // world
-        start = rank * chunk
-        end = n if rank == world - 1 else (rank + 1) * chunk
-        if start >= end:
-            return
-        my_ids = ids[start:end]
-        my_grads = grads[start:end]
-        if not my_ids.is_contiguous():
-            my_ids = my_ids.contiguous()
-        if not my_grads.is_contiguous():
-            my_grads = my_grads.contiguous()
-        try:
-            self.kv_client.update(table_name, my_ids, my_grads)
-        except Exception as exc:
-            logger.warning("[BagPipe] load-balanced push failed: %s", exc)
 
     # ------------------------------------------------------------------
     #  Shared-ID set construction (opt 1, opt 8 prescan)
@@ -169,9 +134,10 @@ class BagPipeCommMixin:
 
         self._shared_ids = {fid for fid, cnt in id_rank_count.items() if cnt > 1}
         all_shared = sorted(self._shared_ids)
-        # 排序张量同时服务两处: torch.isin 的 shared/local 切分, 以及
-        # searchsorted 的 fid -> dense 缓冲行号映射（= sorted 序即
-        # _global_id_to_index 的值, 免去逐 fid dict.get 循环）。
+        # The sorted tensor serves two purposes at once: the shared/local
+        # split (searchsorted membership), and the fid -> dense-buffer row
+        # mapping (the sorted position IS the _global_id_to_index value,
+        # avoiding a per-fid dict.get loop).
         self._shared_ids_tensor = torch.tensor(
             all_shared, dtype=torch.int64, device=self.device
         )
@@ -180,7 +146,15 @@ class BagPipeCommMixin:
         self._shared_ids_complete = bool(complete)
 
     def finalize_prescan(self) -> None:
-        """After all batches pre-scanned, build the complete shared-ID set."""
+        """After all batches pre-scanned, build the complete shared-ID set.
+
+        Also exchanges the per-batch shared-ID counts across ranks
+        (:meth:`_build_prescan_sparse_max`) so the sparse all_gather in
+        ``update_grads`` can size its buffers without the per-step count
+        exchange.  Collective: every rank must call it after its own prescan
+        pass, and all ranks must agree on whether prescan ran at all (the
+        training loop gates the whole prescan on the same config flag).
+        """
         if self._prescan_done:
             return
         self._build_shared_id_set_from(self._prescan_unique_ids, complete=True)
@@ -196,6 +170,70 @@ class BagPipeCommMixin:
             int(self._stats["bagpipe_prescan_batches"]),
         )
         self._prescan_unique_ids = set()
+        self._build_prescan_sparse_max()
+
+    def _build_prescan_sparse_max(self) -> None:
+        """Exchange per-batch shared-ID counts for sync-free sparse sizing.
+
+        For every prescan batch t, computes ``|shared set ∩ batch_t|`` locally
+        (searchsorted against the just-built sorted shared tensor), then
+        all_gathers the count vectors across ranks and keeps the per-batch
+        maximum.  ``update_grads`` uses that maximum as the padded all_gather
+        width for step t, eliminating the per-step count all_gather and its
+        ``.item()`` readback.
+
+        Correctness contract: the maximum is an upper bound on every rank's
+        sparse bucket at step t *iff* the training pass consumes the batches
+        in the prescan order.  The runner guarantees that (fixed-seed
+        DistributedSampler without set_epoch; the wrap-around repeats the
+        epoch-0 order, hence the modulo indexing), and ``enqueue`` verifies
+        it cheaply via the per-batch unique-ID counts (a mismatch raises --
+        failing loudly beats a silent collective misalignment).
+        """
+        batches = getattr(self, "_prescan_batch_ids", None) or []
+        self._prescan_batch_ids = None
+        self._prescan_batch_numels = [int(b.numel()) for b in batches]
+        if not self._is_distributed():
+            # A single rank never aggregates: no sizing metadata needed.
+            self._prescan_sparse_max = None
+            return
+
+        n = len(batches)
+        shared_t = self._shared_ids_tensor
+        local_counts = torch.zeros(max(n, 1), dtype=torch.int64,
+                                   device=self.device)
+        if n > 0 and shared_t is not None and shared_t.numel() > 0:
+            for t, batch in enumerate(batches):
+                batch_dev = batch.to(self.device, dtype=torch.int64)
+                pos = torch.searchsorted(shared_t, batch_dev)
+                pos_clamped = pos.clamp(max=shared_t.numel() - 1)
+                hits = (shared_t[pos_clamped] == batch_dev)
+                local_counts[t] = hits.sum()
+
+        # Exchange: ranks may scan different batch counts (shard boundary);
+        # pad the shorter vectors with 0 so the per-index maximum still comes
+        # from whichever rank actually has that batch.
+        world_size = dist.get_world_size()
+        n_tensor = torch.tensor([n], dtype=torch.int64, device=self.device)
+        n_list = [torch.zeros(1, dtype=torch.int64, device=self.device)
+                  for _ in range(world_size)]
+        dist.all_gather(n_list, n_tensor)
+        max_batches = max(int(ni.item()) for ni in n_list)
+        if max_batches == 0:
+            self._prescan_sparse_max = None
+            return
+        padded_counts = torch.zeros(max_batches, dtype=torch.int64,
+                                    device=self.device)
+        padded_counts[:n] = local_counts[:n]
+        counts_list = [torch.zeros(max_batches, dtype=torch.int64,
+                                   device=self.device)
+                       for _ in range(world_size)]
+        dist.all_gather(counts_list, padded_counts)
+        max_counts = torch.stack(counts_list).amax(dim=0)
+        self._prescan_sparse_max = [int(c) for c in max_counts.tolist()]
+        self._stats["bagpipe_prescan_sparse_max_sum"] = float(
+            sum(self._prescan_sparse_max)
+        )
 
     # ------------------------------------------------------------------
     #  All-reduce primitives (opt 2)
@@ -210,11 +248,14 @@ class BagPipeCommMixin:
         """Sparse all_gather + aggregate gradients across GPUs (async).
 
         Sync budget: the size negotiation (a count all_gather plus one
-        ``.item()``) is unavoidable — allocating the padded buffers needs
-        max_n on the host.  The count exchange is issued on the side stream
-        with the same ``stream.wait_stream(current_stream)`` ordering as the
-        payload all_gather, and max_n is read back on that same stream (see
-        the comments in the body).
+        ``.item()``) is the price of not knowing the bucket sizes ahead of
+        time — allocating the padded buffers needs max_n on the host.  The
+        count exchange is issued on the side stream with the same
+        ``stream.wait_stream(current_stream)`` ordering as the payload
+        all_gather, and max_n is read back on that same stream (see the
+        comments in the body).  The oracle prescan path avoids this entire
+        exchange: :meth:`_all_gather_sparse_prescan_async` sizes the buffers
+        from the prescan count metadata instead.
 
         Stream ordering is a correctness requirement, not an optional
         optimization: NCCL matches collectives across ranks by the
@@ -318,13 +359,118 @@ class BagPipeCommMixin:
         self._stats["bagpipe_all_reduce_ms"] += (time.perf_counter() - t_start) * 1e3
         return ids_dev, grads_dev, work
 
+    def _all_gather_sparse_prescan_async(
+        self,
+        ids: torch.Tensor,
+        grads: torch.Tensor,
+        mask: torch.Tensor,
+        max_n: int,
+        stream: Optional[torch.cuda.Stream] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, Any]:
+        """Sparse all_gather sized by oracle prescan counts (async, sync-free).
+
+        ``max_n`` comes from the one-time prescan count exchange
+        (:meth:`_build_prescan_sparse_max`) instead of a per-step count
+        all_gather, so this path issues no host readback at all.  The bucket
+        (``mask`` over the step's unique ids) is compacted GPU-side with an
+        index-preserving scatter: masked rows land at their cumsum slot,
+        unmasked rows pile into a trash slot that is sliced off -- boolean
+        indexing would need the output size on the host and force a
+        synchronization.
+
+        Correctness notes (see also _build_prescan_sparse_max):
+
+        - ``max_n`` is rank-consistent (identical prescan metadata on every
+          rank), so the skip/issue decision when ``max_n == 0`` cannot leave
+          a peer hanging in the collective.
+        - The bucket size is bounded by ``|shared ∩ batch_t|`` by
+          construction (the mask is computed against the same shared tensor
+          the prescan counts were), so masked cumsum slots stay below
+          ``max_n``.  If the dataloader order ever diverged from the prescan
+          despite the numel tripwire in ``enqueue``, slots beyond the buffer
+          raise a device-side indexing assert rather than corrupting data
+          silently (an overflow of exactly one row collides with the trash
+          slot and is dropped -- a documented residual).
+        """
+        if not self._is_distributed():
+            return ids, grads, None
+
+        t_start = time.perf_counter()
+        world_size = dist.get_world_size()
+
+        if grads.dim() == 1:
+            grads = grads.unsqueeze(1)
+        dim = grads.size(1)
+
+        if max_n <= 0:
+            # Every rank computed the same prescan maximum, so skipping the
+            # collective here cannot leave a peer hanging.
+            self._stats["bagpipe_all_reduce_calls"] += 1
+            self._stats["bagpipe_all_reduce_ms"] += (time.perf_counter() - t_start) * 1e3
+            return ids[:0], grads[:0], None
+
+        ids_dev = ids.to(self.device, dtype=torch.int64)
+        grads_dev = grads.to(self.device, dtype=torch.float32)
+        if not ids_dev.is_contiguous():
+            ids_dev = ids_dev.contiguous()
+        if not grads_dev.is_contiguous():
+            grads_dev = grads_dev.contiguous()
+
+        # GPU-side sentinel padding: masked row i -> slot cumsum(i)-1 (dense
+        # order), unmasked rows -> trash slot max_n.  index_put with tensor
+        # indices is shape-known, so no host synchronization is needed.
+        slot = torch.cumsum(mask, 0) - 1
+        trash = torch.full_like(slot, max_n)
+        dest = torch.where(mask, slot, trash)
+
+        padded_ids = torch.full((max_n + 1,), -1, dtype=torch.int64,
+                                device=self.device)
+        padded_ids[dest] = ids_dev
+        padded_ids = padded_ids[:max_n]
+        padded_grads = torch.zeros(max_n + 1, dim, dtype=torch.float32,
+                                   device=self.device)
+        padded_grads[dest] = grads_dev
+        padded_grads = padded_grads[:max_n]
+
+        ids_list = [torch.zeros(max_n, dtype=torch.int64, device=self.device)
+                    for _ in range(world_size)]
+        grads_list = [torch.zeros(max_n, dim, dtype=torch.float32, device=self.device)
+                      for _ in range(world_size)]
+
+        if stream is not None:
+            # Same ordering requirements as _all_gather_sparse_async: the
+            # padding was written on the main stream and the collective runs
+            # on the side stream, so the side stream must wait first (also
+            # ordering it after any earlier main-stream collective, or the
+            # cross-rank NCCL matching would misalign).
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                work_ids = dist.all_gather(ids_list, padded_ids, async_op=True)
+                work_grads = dist.all_gather(grads_list, padded_grads, async_op=True)
+        else:
+            work_ids = dist.all_gather(ids_list, padded_ids, async_op=True)
+            work_grads = dist.all_gather(grads_list, padded_grads, async_op=True)
+
+        work = _CompositeWork(work_ids, work_grads, ids_list, grads_list,
+                              world_size, dim, self.device, self._stats,
+                              padded=(padded_ids, padded_grads))
+        self._stats["bagpipe_all_reduce_calls"] += 1
+        self._stats["bagpipe_all_reduce_ms"] += (time.perf_counter() - t_start) * 1e3
+        return ids_dev, grads_dev, work
+
     def _dense_all_reduce_async(
         self,
         ids: torch.Tensor,
         grads: torch.Tensor,
         stream: Optional[torch.cuda.Stream] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, Any]:
-        """Dense all_reduce of shared-ID gradients using a global index mapping."""
+        """Dense all_reduce of shared-ID gradients using a global index mapping.
+
+        The reduced buffer is identical on every rank; the returned work
+        extracts its nonzero rows so that all ranks apply the exact same
+        aggregated rows (see :class:`_DenseWork` for why own-row extraction
+        would fork the replicas).
+        """
         if not self._is_distributed():
             return ids, grads, None
 
@@ -346,10 +492,12 @@ class BagPipeCommMixin:
         ids_dev = ids.to(self.device, dtype=torch.int64)
         grads_dev = grads.to(self.device, dtype=torch.float32)
 
-        # 向量化 fid -> dense 缓冲行号: _shared_ids_tensor 有序,
-        # searchsorted 命中即行号（与 _global_id_to_index 的值一致）。
-        # 不做 .any() 早退 —— 那是一次强制同步; 空 valid 集合时 all_reduce
-        # 聚合的是零缓冲, _apply_aggregated 对空 id 集自然跳过。
+        # Vectorized fid -> dense-buffer row: _shared_ids_tensor is
+        # sorted, so a searchsorted hit IS the row number (identical to
+        # the _global_id_to_index value).  No .any() early exit -- that
+        # would be a forced synchronization; with an empty valid set the
+        # all_reduce aggregates a zero buffer and _apply_aggregated
+        # naturally skips the empty id set.
         shared_tensor = self._shared_ids_tensor
         if shared_tensor is None or shared_tensor.numel() == 0:
             self._stats["bagpipe_all_reduce_calls"] += 1
@@ -366,8 +514,9 @@ class BagPipeCommMixin:
         dense_grads.index_put_((valid_indices,), valid_grads)
 
         if stream is not None:
-            # 同上: index_put_ 在主流上写入 dense_grads, all_reduce 在侧流
-            # 上消费 —— 先建立主流 -> 侧流的顺序。
+            # Same as above: index_put_ writes dense_grads on the main
+            # stream and the all_reduce consumes it on the side stream --
+            # establish main -> side ordering first.
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 work = dist.all_reduce(dense_grads, async_op=True)
@@ -378,7 +527,12 @@ class BagPipeCommMixin:
         self._stats["bagpipe_all_reduce_ids"] += float(len(valid_indices))
         self._stats["bagpipe_all_reduce_ms"] += (time.perf_counter() - t_start) * 1e3
 
+        # The work handle extracts the nonzero rows of the reduced buffer, a
+        # set identical on every rank (the all_reduced buffer is bit-equal
+        # everywhere): every rank must apply the same aggregated rows or the
+        # replicas fork -- see _DenseWork.  valid_ids/valid_grads (this
+        # rank's own contributions) are only stats/return-value material.
         work_obj = _DenseWork(
-            work, dense_grads, valid_indices, valid_ids, dim, self.device
+            work, dense_grads, shared_tensor, dim, self.device
         )
         return valid_ids, valid_grads, work_obj

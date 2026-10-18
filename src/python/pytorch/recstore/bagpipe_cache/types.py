@@ -79,21 +79,32 @@ class _CompositeWork:
 
 
 class _DenseWork:
-    """Work handle for dense all_reduce that extracts reduced grads for our IDs."""
+    """Work handle for dense all_reduce returning a rank-uniform apply set.
 
-    def __init__(self, work, dense_grads, valid_indices, ids, dim, device):
+    ``wait()`` extracts the nonzero rows of the all_reduced buffer, NOT this
+    rank's own contributions: the reduced buffer is bit-identical on every
+    rank, so the nonzero row set is identical everywhere and every rank
+    applies the same aggregated rows.  Extracting only own rows would fork
+    the replicas for a shared id that appears in one rank's batch but not
+    the other's -- and with dirty-flag persistence (no per-step PS push, no
+    anti-entropy repair) a forked replica is permanent.  Zero-gradient rows
+    are arithmetic no-ops, so dropping them changes nothing; it also keeps
+    them out of the dirty set (an untouched row needs no writeback).
+    """
+
+    def __init__(self, work, dense_grads, shared_ids, dim, device):
         self._work = work
         self._dense_grads = dense_grads
-        self._valid_indices = valid_indices
-        self._ids = ids
+        self._shared_ids = shared_ids
         self._dim = dim
         self._device = device
         self._result = None
 
     def wait(self):
         self._work.wait()
-        reduced = self._dense_grads.index_select(0, self._valid_indices)
-        self._result = (self._ids.to(self._device), reduced)
+        reduced = self._dense_grads
+        nonzero = reduced.abs().amax(dim=1) != 0
+        self._result = (self._shared_ids[nonzero], reduced[nonzero])
 
     @property
     def result(self):
