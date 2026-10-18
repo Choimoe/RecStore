@@ -28,6 +28,10 @@ DECLARE_int32(num_server_processes);
 DECLARE_int32(num_client_processes);
 DECLARE_int32(rdma_rc_client_id_base);
 DECLARE_int32(rdma_rc_qps_per_client_per_shard);
+DECLARE_int32(rdma_rc_server_get_workers);
+DECLARE_int32(rdma_lane_rebuild_max_attempts);
+DECLARE_int32(rdma_lane_rebuild_cooldown_ms);
+DECLARE_int32(rdma_lane_rebuild_wait_ms);
 DECLARE_int32(rdma_rc_slots_per_qp);
 DECLARE_string(rdma_get_response_mode);
 DECLARE_bool(rdma_lane_rebuild_enabled);
@@ -520,6 +524,168 @@ TEST(PetPSIntegrationTest, LaneRebuildResumesServiceSingleShard) {
   // A second round proves the generations keep advancing in lockstep.
   ASSERT_EQ(petps::PetPSClientTestAccess::RebuildAllLanes(client), lanes);
   expect_get_ok();
+}
+
+// REPRO for the review finding: an async RPC in flight when its lane is
+// rebuilt is erased from pending_rpcs_, and its caller observes
+// QueryRPCFinished()==true / WaitRPCFinish() returning silently, then decodes
+// whatever the (possibly untouched) buffer holds as the RPC result.
+TEST(PetPSIntegrationTest, RebuildDropsInflightAsyncRpcRepro) {
+  if (!FLAGS_rdma_lane_rebuild_enabled) {
+    GTEST_SKIP() << "requires --rdma_lane_rebuild_enabled on server and client";
+  }
+  const int embedding_dim = FLAGS_value_size / sizeof(float);
+  auto& client            = SingleShardClient();
+
+  std::vector<std::uint64_t> keys;
+  for (int i = 0; i < 64; ++i) {
+    keys.push_back(8800001ULL + static_cast<std::uint64_t>(i));
+  }
+  auto values = MakeHashedValues(keys, embedding_dim);
+  ASSERT_EQ(client.PutParameter(keys, values), 0);
+
+  void* recv_buffer =
+      client.GetReceiveBuffer(client.ResponseBufferBytes(keys.size()));
+  float* buf = static_cast<float*>(recv_buffer);
+  const std::size_t floats =
+      keys.size() * static_cast<std::size_t>(embedding_dim);
+  // Sentinel pre-fill: distinguishes "response never arrived" from zeros.
+  for (std::size_t i = 0; i <= floats; ++i) {
+    buf[i] = -1.0f;
+  }
+
+  const int rpc_id = client.GetParameter(
+      base::ConstArray<std::uint64_t>(keys), buf, /*isAsync=*/true);
+  const int lanes = FLAGS_rdma_rc_qps_per_client_per_shard;
+  const int rebuilt =
+      petps::PetPSClientTestAccess::RebuildAllLanes(client);
+  printf("RECSTORE_REPRO rpc_id=%d rebuilt=%d/%d\n", rpc_id, rebuilt, lanes);
+
+  const bool query_finished = client.QueryRPCFinished(rpc_id);
+  printf("RECSTORE_REPRO query_finished=%d\n", query_finished ? 1 : 0);
+
+  client.WaitRPCFinish(rpc_id);
+  printf("RECSTORE_REPRO wait_returned_without_throw\n");
+
+  const std::int32_t status_word =
+      static_cast<std::int32_t>(buf[floats]);
+  std::size_t sentinel_left = 0;
+  std::size_t correct       = 0;
+  for (std::size_t i = 0; i < floats; ++i) {
+    if (buf[i] == -1.0f) {
+      ++sentinel_left;
+    } else if (buf[i] == values.data_as<float>()[i]) {
+      ++correct;
+    }
+  }
+  printf("RECSTORE_REPRO status_word=%d sentinel_left=%zu correct=%zu/%zu\n",
+         status_word,
+         sentinel_left,
+         correct,
+         floats);
+  SUCCEED();
+}
+
+// REPRO for the review finding: server-side QP rebuild (RESET + CQ drain on
+// the polling thread) racing get-payload worker threads posting payload WRs
+// on the same lane QP. Needs --rdma_rc_server_get_workers > 0 on the server.
+TEST(PetPSIntegrationTest, RebuildRacesGetPayloadWorkersRepro) {
+  if (!FLAGS_rdma_lane_rebuild_enabled) {
+    GTEST_SKIP() << "requires --rdma_lane_rebuild_enabled on server and client";
+  }
+  printf("RECSTORE_REPRO2 client_sees_get_workers=%d (server-side flag)\n",
+         FLAGS_rdma_rc_server_get_workers);
+  const int embedding_dim = FLAGS_value_size / sizeof(float);
+  auto& client            = SingleShardClient();
+
+  std::vector<std::uint64_t> keys;
+  for (int i = 0; i < 256; ++i) {
+    keys.push_back(8900001ULL + static_cast<std::uint64_t>(i));
+  }
+  auto values = MakeHashedValues(keys, embedding_dim);
+  ASSERT_EQ(client.PutParameter(keys, values), 0);
+
+  // Sustained collision: raise the rebuild budget so lanes never go dead, then
+  // hammer GETs (through the server's payload workers) while continuously
+  // forcing lane rebuilds. Each GET pre-fills its buffer with a sentinel so a
+  // truncated/missing row is distinguishable from a correct one.
+  FLAGS_rdma_lane_rebuild_max_attempts = 1000000;
+  FLAGS_rdma_lane_rebuild_cooldown_ms  = 0;
+  FLAGS_rdma_lane_rebuild_wait_ms      = 50;
+
+  std::atomic<bool> stop{false};
+  std::atomic<long> gets_ok{0};
+  std::atomic<long> gets_failed{0};
+  std::atomic<long> rebuild_rounds{0};
+  std::mutex print_mu;
+
+  std::thread rebuilder([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      petps::PetPSClientTestAccess::RebuildAllLanes(client);
+      rebuild_rounds.fetch_add(1, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  });
+
+  const auto getter = [&]() {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline &&
+           !stop.load(std::memory_order_relaxed)) {
+      std::vector<float> output(
+          keys.size() * static_cast<std::size_t>(embedding_dim), -1.0f);
+      base::RecTensor output_tensor(
+          output.data(), {static_cast<int64_t>(keys.size()), embedding_dim});
+      int rc = -1;
+      try {
+        rc = client.GetParameter(
+            base::ConstArray<std::uint64_t>(keys), output_tensor);
+      } catch (const std::exception& error) {
+        gets_failed.fetch_add(1, std::memory_order_relaxed);
+        const std::lock_guard<std::mutex> guard(print_mu);
+        printf("RECSTORE_REPRO2 get_threw: %s\n", error.what());
+        continue;
+      }
+      if (rc != 0) {
+        gets_failed.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      const float* got = output_tensor.data_as<float>();
+      std::size_t wrong = 0;
+      for (std::size_t i = 0; i < output.size(); ++i) {
+        if (got[i] != values.data_as<float>()[i]) {
+          ++wrong;
+        }
+      }
+      if (wrong > 0) {
+        const std::lock_guard<std::mutex> guard(print_mu);
+        printf("RECSTORE_REPRO2 KOK_OVER_MISSING_PAYLOAD rc=%d wrong=%zu/%zu "
+               "first_bad=%f expected=%f\n",
+               rc,
+               wrong,
+               output.size(),
+               got[0],
+               values.data_as<float>()[0]);
+      } else {
+        gets_ok.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  };
+  std::vector<std::thread> getters;
+  for (int i = 0; i < 4; ++i) {
+    getters.emplace_back(getter);
+  }
+  for (auto& thread : getters) {
+    thread.join();
+  }
+  stop.store(true, std::memory_order_relaxed);
+  rebuilder.join();
+  printf("RECSTORE_REPRO2 summary gets_ok=%ld gets_failed=%ld "
+         "rebuild_rounds=%ld\n",
+         gets_ok.load(),
+         gets_failed.load(),
+         rebuild_rounds.load());
+  SUCCEED();
 }
 
 // Client fast-fail scenario. Needs an external parent that freezes shard 1
