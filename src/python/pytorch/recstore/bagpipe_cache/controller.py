@@ -9,6 +9,7 @@ is provided by the corresponding mixins.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 from collections import deque
@@ -208,6 +209,16 @@ class BagPipeCacheController(
         self._init_unique_ids: Set[int] = set()
         self._prescan_done: bool = False
         self._prescan_unique_ids: Set[int] = set()
+        # 共享集行数超过该阈值时, shared id 改走稀疏 all_gather (按本步实际
+        # 出现的 id 通信), 不再对整个 _global_unique_count x dim 缓冲做
+        # all_reduce。阈值与 _global_unique_count 一样是全 rank 一致的量,
+        # 路由选择不需要额外通信。dense all_reduce 的字节数 ∝ 共享集总行数,
+        # 稀疏 all_gather ∝ 本步每 rank 实际 shared id 数 —— 后者通常只有
+        # 前者的零头 (实测 fallback 集 14278 行、每步每 rank 实际命中数千),
+        # oracle prescan 后共享集会扩大到全数据集级别, dense 路径完全不可用。
+        self._dense_shared_max_rows = int(
+            os.environ.get("RECSTORE_BAGPIPE_DENSE_SHARED_MAX_ROWS", "4096")
+        )
         self._stats["bagpipe_no_sync_ids"] = 0.0
         self._stats["bagpipe_unknown_aggregated_ids"] = 0.0
         self._stats["bagpipe_shared_ids"] = 0.0

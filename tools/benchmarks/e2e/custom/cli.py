@@ -41,6 +41,7 @@ def _build_config_from_args(args: argparse.Namespace) -> tuple[BenchmarkConfig, 
         read_mode=args.read_mode,
         prefetch_depth=args.prefetch_depth,
         optimization_cache_capacity=args.optimization_cache_capacity,
+        bagpipe_prescan=args.bagpipe_prescan,
         index_type=args.index_type,
         torchrec_baselines=() if args.no_torchrec else parse_torchrec_baselines(args.torchrec_baselines),
         master_port=args.master_port,
@@ -80,6 +81,16 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "GPU cache capacity for optimization plugins such as BagPipe; "
             "0 keeps the rs_demo default."
+        ),
+    )
+    parser.add_argument(
+        "--bagpipe-prescan",
+        action="store_true",
+        default=False,
+        help=(
+            "read_mode=bagpipe: pre-scan the dataset once before training so "
+            "the shared-ID set is complete (oracle prescan); local-only IDs "
+            "then skip the per-step cross-rank gradient aggregation."
         ),
     )
     parser.add_argument(

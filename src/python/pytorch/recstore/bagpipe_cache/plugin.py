@@ -196,6 +196,27 @@ class BagPipePlugin(OptimizationPlugin):
         if self._controller is not None:
             self._controller.prefill_cache(sparse_features, device)
 
+    def prescan_batch(self, batch_num: int, sparse_features: Any) -> None:
+        """Oracle prescan hook: record a batch's unique IDs before training.
+
+        Call once per batch during a pre-training pass over the dataset, then
+        :meth:`finalize_prescan` once at the end.  The resulting shared-ID set
+        is complete, which licenses the local-only fast path in
+        ``update_grads`` (IDs provably untouched by other ranks skip the
+        cross-rank aggregation entirely).  No-op when the plugin is disabled.
+        """
+        if self._controller is not None:
+            self._controller.prescan_batch(batch_num, sparse_features)
+
+    def finalize_prescan(self) -> None:
+        """Build the complete shared-ID set from the prescanned batches.
+
+        Collective (all_gather): every rank must call it after finishing its
+        own prescan pass.  No-op when the plugin is disabled.
+        """
+        if self._controller is not None:
+            self._controller.finalize_prescan()
+
     def on_step_end(self, step: int, row: Dict[str, Any]) -> None:
         """Step-end hook: TTL eviction + writeback + stats.
 

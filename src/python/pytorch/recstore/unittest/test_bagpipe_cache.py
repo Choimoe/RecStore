@@ -104,6 +104,10 @@ class _GradHarness(BagPipeGradMixin):
         # 集合外的 id 允许走 local-only 快路径。集合不完整的场景由
         # test_unknown_ids_are_aggregated_when_set_is_incomplete 单独覆盖。
         self._shared_ids_complete = True
+        # 共享集路由阈值 (与 controller 默认一致): {10, 30} 共 2 行 ≤ 阈值
+        # → 默认走 dense; 大集合路由由 _dense_shared_max_rows=0 的用例覆盖。
+        self._global_unique_count = 2
+        self._dense_shared_max_rows = 4096
         # 无 GPU 热累加器 → _hot_add 回退 host float (直接进 _stats)
         self._hot_stats_dev = {}
         self.dense_calls = []
@@ -201,6 +205,80 @@ class TestBagPipeDenseReduce(unittest.TestCase):
         self.assertEqual(dense[2].tolist(), [1.0, 2.0])
         self.assertEqual(dense[0].tolist(), [5.0, 6.0])
         self.assertEqual(dense[1].tolist(), [0.0, 0.0])
+
+
+class TestCompositeWorkSentinelAggregation(unittest.TestCase):
+    """wait() 用 -1 哨兵掩码恢复各 rank 贡献, 不做逐 rank count 同步。"""
+
+    def test_wait_masks_sentinel_rows_and_aggregates_duplicates(self):
+        from ..bagpipe_cache.types import _CompositeWork
+
+        # rank0 贡献 [10] (第二行哨兵), rank1 贡献 [15, 10]
+        ids_list = [torch.tensor([10, -1]), torch.tensor([15, 10])]
+        grads_list = [
+            torch.tensor([[1.0, 1.0], [9.0, 9.0]]),  # 第二行是哨兵行, 必须被丢弃
+            torch.tensor([[5.0, 5.0], [2.0, 2.0]]),
+        ]
+        work = _CompositeWork(
+            _DoneWork(), _DoneWork(), ids_list, grads_list,
+            world_size=2, dim=2, device=torch.device("cpu"), stats={},
+        )
+        work.wait()
+        ids, grads = work.result
+        self.assertEqual(ids.tolist(), [10, 15])
+        # id 10 两 rank 求和 [1,1]+[2,2]=[3,3]; 哨兵行的 [9,9] 不计入
+        self.assertEqual(grads.tolist(), [[3.0, 3.0], [5.0, 5.0]])
+
+    def test_wait_all_sentinel_returns_empty(self):
+        from ..bagpipe_cache.types import _CompositeWork
+
+        ids_list = [torch.tensor([-1]), torch.tensor([-1])]
+        grads_list = [
+            torch.zeros(1, 2),
+            torch.zeros(1, 2),
+        ]
+        work = _CompositeWork(
+            _DoneWork(), _DoneWork(), ids_list, grads_list,
+            world_size=2, dim=2, device=torch.device("cpu"), stats={},
+        )
+        work.wait()
+        ids, grads = work.result
+        self.assertEqual(ids.numel(), 0)
+        self.assertEqual(grads.shape, (0, 2))
+
+
+class TestBagPipeSparseAllGather(unittest.TestCase):
+    def test_sparse_all_gather_pads_with_sentinel_and_aggregates(self):
+        """2-rank 伪 all_gather: 对端贡献与本 rank 相同 → 梯度求和。"""
+        harness = _CommHarness()
+        ids = torch.tensor([10], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 2.0]])
+
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(
+                 comm_module.dist, "all_gather",
+                 side_effect=_fake_two_rank_all_gather,
+             ):
+            _, _, work = harness._all_gather_sparse_async(ids, grads)
+            work.wait()
+
+        agg_ids, agg_grads = work.result
+        self.assertEqual(agg_ids.tolist(), [10])
+        self.assertEqual(agg_grads.tolist(), [[2.0, 4.0]])
+
+    def test_sparse_all_gather_early_returns_when_all_ranks_empty(self):
+        harness = _CommHarness()
+
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(
+                 comm_module.dist, "all_gather",
+                 side_effect=_fake_two_rank_all_gather,
+             ):
+            _, _, work = harness._all_gather_sparse_async(
+                torch.empty(0, dtype=torch.int64), torch.zeros(0, 2)
+            )
+
+        self.assertIsNone(work)
 
 
 class _SharedIdSetHarness(BagPipeCommMixin):
@@ -362,18 +440,53 @@ class TestBagPipeUnknownIdAggregation(unittest.TestCase):
     def test_dense_and_sparse_collectives_are_both_issued(self):
         """空桶也不能跳过集合通信: 对端会进入, 早退即挂死。"""
         harness = self._incomplete_harness()
-        harness._shared_ids = set()
-        harness._shared_ids_tensor = torch.empty(0, dtype=torch.int64)
         ids = torch.tensor([20], dtype=torch.int64)
         grads = torch.tensor([[2.0, 2.0]])
 
         harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
 
-        # dense 桶为空仍然发射 (对齐对端的 all_reduce), sparse 携带 unknown id
+        # 本 rank 没有 shared id (dense 桶为空) 仍然发射 (对齐对端的
+        # all_reduce), sparse 携带 unknown id
         self.assertEqual(len(harness.dense_calls), 1)
         self.assertEqual(harness.dense_calls[0][0].numel(), 0)
         self.assertEqual(len(harness.sparse_calls), 1)
         self.assertEqual(harness.sparse_calls[0][0].tolist(), [20])
+
+    def test_large_shared_set_routes_shared_ids_through_sparse(self):
+        """共享集超过阈值时 shared id 并入稀疏 all_gather (按本步实际出现
+        的行通信), 不再对整个共享集缓冲做 all_reduce。"""
+        harness = _GradHarness(rank=0)
+        # oracle 集合 (unknown 路径不触发), 共享集"大" → 稀疏路由
+        harness._dense_shared_max_rows = 0
+        ids = torch.tensor([10, 20, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [2.0, 2.0], [4.0, 4.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+
+        # dense 不发射; shared ids (10, 30) 走单次稀疏聚合
+        self.assertEqual(harness.dense_calls, [])
+        self.assertEqual(len(harness.sparse_calls), 1)
+        s_ids, s_grads, _ = harness.sparse_calls[0]
+        self.assertEqual(s_ids.tolist(), [10, 30])
+        self.assertEqual(s_grads.tolist(), [[1.0, 1.0], [4.0, 4.0]])
+        # local-only id 20 仍走立即 apply
+        self.assertEqual(len(harness.kv_client.best_effort_applies), 1)
+        self.assertEqual(harness.kv_client.best_effort_applies[0][1].tolist(), [20])
+
+    def test_large_shared_set_sparse_issued_even_with_empty_bucket(self):
+        """稀疏路由下本 rank 聚合桶为空也不能跳过 all_gather: 对端可能
+        有 shared id 要交换, 早退即挂死。"""
+        harness = _GradHarness(rank=0)
+        harness._dense_shared_max_rows = 0
+        # 本批只有 local-only id 20 (oracle 证明), 聚合桶为空
+        ids = torch.tensor([20], dtype=torch.int64)
+        grads = torch.tensor([[2.0, 2.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+
+        self.assertEqual(harness.dense_calls, [])
+        self.assertEqual(len(harness.sparse_calls), 1)
+        self.assertEqual(harness.sparse_calls[0][0].numel(), 0)
 
     def test_barrier_applies_dense_and_sparse_aggregates_together(self):
         harness = _GradHarness(rank=0)

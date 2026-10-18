@@ -207,7 +207,20 @@ class BagPipeCommMixin:
         grads: torch.Tensor,
         stream: Optional[torch.cuda.Stream] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, Any]:
-        """Sparse all_gather + aggregate gradients across GPUs (async)."""
+        """Sparse all_gather + aggregate gradients across GPUs (async).
+
+        同步预算: 尺寸协商 (count all_gather + 一次 ``.item()``) 不可避免 —
+        padded 缓冲的分配需要 host 侧的 max_n。但 count 交换的内容 (本 rank
+        的个数) 是 host 已知常量, 不依赖主流上任何计算, 因此把它发射在侧流
+        上且**不**建立主流 → 侧流顺序: ``.item()`` 只等待这个 8 字节集合通
+        信本身, 而不是等主流积压 (backward/replay) 排空后再等通信。payload
+        的 all_gather 读取主流写入的梯度, 保持原来的
+        ``stream.wait_stream(current_stream)`` 顺序。
+
+        本方法必须先于 ``_dense_all_reduce_async`` 调用: 侧流是串行的,
+        dense all_reduce 会先 ``wait_stream`` 主流, 若 count 交换排在其后,
+        ``.item()`` 又会被主流积压挡住, 顺序优化就白做了。
+        """
         if not self._is_distributed():
             return ids, grads, None
 
@@ -222,10 +235,17 @@ class BagPipeCommMixin:
         n_tensor = torch.tensor([n], dtype=torch.int64, device=self.device)
         n_list = [torch.zeros(1, dtype=torch.int64, device=self.device)
                    for _ in range(world_size)]
-        dist.all_gather(n_list, n_tensor)
+        if stream is not None:
+            # count 交换无主流依赖: 直接在侧流上发射 (侧流此刻空闲 —
+            # 上一步的聚合已在 prefill barrier 排空)。
+            with torch.cuda.stream(stream):
+                dist.all_gather(n_list, n_tensor)
+        else:
+            dist.all_gather(n_list, n_tensor)
         max_n = max(int(ni.item()) for ni in n_list)
 
         if max_n == 0:
+            # max_n 是全 rank 一致的最大值, 这里早退不会让对端悬空。
             self._stats["bagpipe_all_reduce_calls"] += 1
             self._stats["bagpipe_all_reduce_ms"] += (time.perf_counter() - t_start) * 1e3
             return ids[:0], grads[:0], None
@@ -237,7 +257,9 @@ class BagPipeCommMixin:
         if not grads_dev.is_contiguous():
             grads_dev = grads_dev.contiguous()
 
-        padded_ids = torch.zeros(max_n, dtype=torch.int64, device=self.device)
+        # 哨兵补齐: 超出本 rank 真实个数的行填 -1, wait() 端用布尔掩码恢复
+        # 各 rank 的贡献, 不再需要逐 rank 的 count .item() 同步。
+        padded_ids = torch.full((max_n,), -1, dtype=torch.int64, device=self.device)
         padded_ids[:n] = ids_dev
         padded_grads = torch.zeros(max_n, dim, dtype=torch.float32, device=self.device)
         padded_grads[:n] = grads_dev
@@ -249,7 +271,7 @@ class BagPipeCommMixin:
 
         if stream is not None:
             # 缓冲在主流上写入, 集合通信在侧流上发射: 必须先让侧流等待
-            # 主流, 否则 NCCL kernel 可能读到旧的全零缓冲 (write-after-read
+            # 主流, 否则 NCCL kernel 可能读到旧的补齐缓冲 (write-after-read
             # 竞态, kernel launch 延迟通常掩盖它, 但语义上是 UB)。
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
@@ -260,7 +282,8 @@ class BagPipeCommMixin:
             work_grads = dist.all_gather(grads_list, padded_grads, async_op=True)
 
         work = _CompositeWork(work_ids, work_grads, ids_list, grads_list,
-                              n_list, world_size, dim, self.device, self._stats)
+                              world_size, dim, self.device, self._stats,
+                              padded=(padded_ids, padded_grads))
         self._stats["bagpipe_all_reduce_calls"] += 1
         self._stats["bagpipe_all_reduce_ms"] += (time.perf_counter() - t_start) * 1e3
         return ids_dev, grads_dev, work

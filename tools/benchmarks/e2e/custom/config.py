@@ -48,6 +48,7 @@ class BenchmarkConfig:
     read_mode: str = "prefetch"
     prefetch_depth: int = 0
     optimization_cache_capacity: int = 0
+    bagpipe_prescan: bool = False
     index_type: str = "DRAM_PET_HASH"
     torchrec_baselines: tuple[str, ...] = ("hbm",)
     master_port: int = 29500

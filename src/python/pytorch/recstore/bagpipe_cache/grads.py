@@ -11,12 +11,15 @@ launched in the previous step's update_grads call.
                    **前提是该 id 确实不会被其它 rank 触碰**：只有 oracle
                    预扫描 (_shared_ids_complete) 能证明这一点，因此回退集
                    之外的 id 不算 local-only。
-- shared id:      本地不 apply（避免本地梯度与聚合梯度双重计入）；梯度进
-                   单次 dense all_reduce（侧流发射，与主流计算重叠），
-                   **所有 rank** 在下一步 prefill 的 barrier 处用聚合梯度
-                   best-effort 原位落 cache。副本收敛 =
-                   同一 PS 初值 + 同一聚合增量序列。rank0 推 PS 降级为
-                   持久化（深度-1 异步流水线），不在一致性关键路径上。
+- shared id:      本地不 apply（避免本地梯度与聚合梯度双重计入）；梯度走
+                   聚合路径（侧流发射，与主流计算重叠），**所有 rank** 在
+                   下一步 prefill 的 barrier 处用聚合梯度 best-effort 原位落
+                   cache。副本收敛 = 同一 PS 初值 + 同一聚合增量序列。rank0
+                   推 PS 降级为持久化（深度-1 异步流水线），不在一致性关键
+                   路径上。聚合路径按共享集大小路由（全 rank 一致判定）：集
+                   合小（≤ _dense_shared_max_rows）走 dense all_reduce 整个
+                   共享集缓冲；集合大则并入稀疏 all_gather，每步只通信实际
+                   出现的 id。
 - unknown id:     集合不完整时，不在已知共享集里的 id 归属未知：走 sparse
                    all_gather 聚合（与 shared 同一 barrier 消费），既不本地
                    apply 也不标 dirty —— 否则各 rank 独立 apply 自己的梯度、
@@ -56,7 +59,7 @@ class BagPipeGradMixin:
         - self._pending_sync_now_work, self._pending_sync_now_lr
         - self._anti_entropy_step, _anti_entropy_interval, _anti_entropy_ids
         - self._shared_ids, self._shared_ids_tensor, self._shared_ids_complete,
-          self._stats
+          self._global_unique_count, self._dense_shared_max_rows, self._stats
         - self._dense_all_reduce_async(), _all_gather_sparse_async(),
           _record_shared_id_candidates()
         - self._hot_add(), self._is_distributed(), _get_rank()
@@ -335,32 +338,61 @@ class BagPipeGradMixin:
             self._cached_dev[local_compact] = True
             self._ttl_dev[local_compact] = batch_num + self._ttl_margin
 
-        # ---- 聚合路径: 已知共享走 dense all_reduce, 归属未知走 sparse
-        #      all_gather；两者都在侧流发射 (与主流计算重叠), 聚合结果由全
-        #      rank 在下一步 prefill 的 barrier 处一起落 cache ----
+        # ---- 聚合路径: 集合通信都在侧流发射 (与主流计算重叠), 聚合结果由
+        #      全 rank 在下一步 prefill 的 barrier 处一起落 cache ----
         self._hot_add("bagpipe_sync_now_ids", shared_mask.sum())
+        # 路由 (全 rank 一致, 无需通信): 共享集小 → dense all_reduce 整个
+        # 共享集缓冲 (行数少时开销可忽略, 且免去逐 id 的 gather); 共享集大
+        # (fallback 采样集 14K 行级别, oracle prescan 后可达全数据集级别)
+        # → shared id 并入稀疏 all_gather, 每步只通信实际出现的行。
+        # dense all_reduce 的字节数 ∝ 共享集总行数, 与本步命中数无关 —
+        # 共享集大而命中率低时是纯浪费 (实测占 2-rank 每步通信的大头)。
+        shared_t = self._shared_ids_tensor
+        use_dense = (
+            shared_t is not None
+            and shared_t.numel() > 0
+            and getattr(self, "_global_unique_count", 0) > 0
+            and getattr(self, "_global_unique_count", 0)
+            <= getattr(self, "_dense_shared_max_rows", 0)
+        )
         works = []
         if self._is_distributed():
             # 集合通信无条件发射: 本 rank 的空桶不能跳过其它 rank 会进入的
-            # collective (按 numel 早退会让对端永久等待)。
-            _, _, dense_work = self._dense_all_reduce_async(
-                ids_cuda[shared_mask],
-                grads_cuda[shared_mask],
-                stream=self._sync_later_stream,
-            )
-            if dense_work is not None:
-                works.append(dense_work)
+            # collective (按 numel 早退会让对端永久等待)。路由条件本身只依
+            # 赖全 rank 一致的量 (_shared_ids_tensor / _global_unique_count),
+            # 不会出现一端 dense 一端 sparse 的错配。
+            # sparse 先于 dense 调用: 侧流串行, dense 的 wait_stream 会把排
+            # 在它后面的 count 交换一并挡在主流积压后面。
+            # 路由真值表 (sparse 列 = 并入稀疏 all_gather 的 mask):
+            #   use_dense & unknown  → sparse: unknown,   dense: shared
+            #   use_dense & 无unknown → sparse: 不发射,    dense: shared
+            #   大共享集 & unknown   → sparse: shared|unknown (单次聚合)
+            #   大共享集 & 无unknown  → sparse: shared,    dense: 不发射
             if unknown_mask is not None:
                 self._hot_add(
                     "bagpipe_unknown_aggregated_ids", unknown_mask.sum()
                 )
+                sparse_mask = (
+                    unknown_mask if use_dense else (shared_mask | unknown_mask)
+                )
+            else:
+                sparse_mask = None if use_dense else shared_mask
+            if sparse_mask is not None:
                 _, _, sparse_work = self._all_gather_sparse_async(
-                    ids_cuda[unknown_mask],
-                    grads_cuda[unknown_mask],
+                    ids_cuda[sparse_mask],
+                    grads_cuda[sparse_mask],
                     stream=self._sync_later_stream,
                 )
                 if sparse_work is not None:
                     works.append(sparse_work)
+            if use_dense:
+                _, _, dense_work = self._dense_all_reduce_async(
+                    ids_cuda[shared_mask],
+                    grads_cuda[shared_mask],
+                    stream=self._sync_later_stream,
+                )
+                if dense_work is not None:
+                    works.append(dense_work)
         self._pending_sync_now_work = works or None
         self._pending_sync_now_lr = lr if works else None
 

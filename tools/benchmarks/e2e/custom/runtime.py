@@ -366,6 +366,8 @@ def build_client_command(
                 str(cfg.optimization_cache_capacity),
             ]
         )
+    if cfg.bagpipe_prescan:
+        cmd.append("--optimization-prescan")
     cmd.extend(
         [
             "--dense-arch-layer-sizes",

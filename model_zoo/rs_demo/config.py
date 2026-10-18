@@ -309,6 +309,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="GPU cache capacity (number of embedding rows) for plugins that use it.",
     )
+    parser.add_argument(
+        "--optimization-prescan",
+        action="store_true",
+        default=False,
+        help=(
+            "BagPipe: pre-scan the dataset once before training to build the "
+            "complete shared-ID set (oracle prescan). Without it the fallback "
+            "set only covers the first steps and every ID outside it must "
+            "take the cross-rank sparse aggregation path each step."
+        ),
+    )
     parser.add_argument("--master-addr", type=str, default="127.0.0.1")
     parser.add_argument("--master-port", type=int, default=29500)
     parser.add_argument("--rdzv-backend", type=str, default="c10d")
@@ -559,6 +570,7 @@ def _migrate_legacy_optim_fields(raw: dict) -> dict:
             opt.setdefault("cleanup_proportion", 0.25)
             opt.setdefault("cache_capacity", 0)
             opt.setdefault("embedding_dim", raw.get("embedding_dim", 128))
+            opt.setdefault("prescan", False)
             opt.setdefault("plugin_config", {})
         return raw
 
@@ -605,6 +617,7 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
         cleanup_proportion=float(cfg_kwargs.pop("optimization_cleanup_proportion", 0.25)),
         cache_capacity=int(cfg_kwargs.pop("optimization_cache_capacity", 0)),
         embedding_dim=int(cfg_kwargs.get("embedding_dim", 128)),
+        prescan=bool(cfg_kwargs.pop("optimization_prescan", False)),
     )
     cfg_kwargs["optimization"] = optimization
 
