@@ -254,20 +254,27 @@ private:
     int slot_in_qp     = -1;
     int poll_thread_id = -1;
     std::uint64_t seq  = 0;
+    // Transport response epoch when the request was accepted; a later rebuild
+    // invalidates the slot this task would complete.
+    std::uint64_t response_epoch = 0;
     petps::RequestDescriptor descriptor{};
     const char* payload = nullptr;
     petps::RcShardServerTransport::ResponseView response{};
   };
 
   struct GetPayloadCompletion {
-    int slot           = -1;
-    int client_id      = -1;
-    int qp_index       = -1;
-    int slot_in_qp     = -1;
-    int poll_thread_id = -1;
-    std::uint64_t seq  = 0;
+    int slot                     = -1;
+    int client_id                = -1;
+    int qp_index                 = -1;
+    int slot_in_qp               = -1;
+    int poll_thread_id           = -1;
+    std::uint64_t seq            = 0;
+    std::uint64_t response_epoch = 0;
     petps::RcShardServerTransport::ResponseView response{};
     bool payload_written_direct = false;
+    // The lane was rebuilt while the worker held this task, so its response
+    // must not be completed (the payload WRs were flushed or refused).
+    bool stale = false;
   };
 
   struct ProfileCounters {
@@ -601,12 +608,29 @@ private:
 
       const bool profile_enabled = FLAGS_rdma_rc_profile_interval_ms > 0;
       const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      const bool payload_written_direct   = HandleGet(
-          task.descriptor,
-          task.payload,
-          &task.response,
-          worker_id,
-          task.slot_in_qp);
+      bool payload_written_direct         = false;
+      bool stale                          = false;
+      try {
+        payload_written_direct = HandleGet(
+            task.descriptor,
+            task.payload,
+            &task.response,
+            worker_id,
+            task.slot_in_qp,
+            task.response_epoch);
+      } catch (const petps::RcLaneRebuiltDuringResponse&) {
+        // A rebuild released this request's slot; completing it would overwrite
+        // the new generation's response.
+        stale = true;
+      } catch (const std::exception& error) {
+        // Never let a worker exception terminate the shard: the client will
+        // time out and retire the lane.
+        LOG(ERROR) << "component=rdma_rc_server event=get_payload_worker_error"
+                   << " shard=" << shard_id_ << " worker_id=" << worker_id
+                   << " slot=" << task.slot << " error=\"" << error.what()
+                   << "\"";
+        stale = true;
+      }
       if (profile_enabled) {
         profile_.handled_get.fetch_add(1, std::memory_order_relaxed);
         profile_.handle_get_ns.fetch_add(
@@ -619,8 +643,10 @@ private:
           task.slot_in_qp,
           task.poll_thread_id,
           task.seq,
+          task.response_epoch,
           task.response,
           payload_written_direct,
+          stale,
       };
       PushGetPayloadCompletion(completion);
     }
@@ -683,6 +709,19 @@ private:
   void DrainGetPayloadCompletions(int poll_thread_id, bool profile_enabled) {
     GetPayloadCompletion completion;
     while (TryPopGetPayloadCompletion(poll_thread_id, &completion)) {
+      if (completion.stale ||
+          completion.response_epoch !=
+              transport_->ResponseEpoch(
+                  completion.client_id, completion.qp_index)) {
+        // The lane was rebuilt after the request was accepted. Its payload WRs
+        // were flushed by the reset (or refused), so writing the status word
+        // now would report kOk for a response that never reached the client.
+        VLOG(1) << "component=rdma_rc_server event=get_payload_dropped_stale"
+                << " shard=" << shard_id_ << " client_id="
+                << completion.client_id << " qp=" << completion.qp_index
+                << " slot=" << completion.slot << " seq=" << completion.seq;
+        continue;
+      }
       if (completion.payload_written_direct) {
         CompleteResponseStatusOnlyForSlot(
             completion.slot,
@@ -725,6 +764,7 @@ private:
       petps::RcShardServerTransport::ResponseView* response,
       int thread_id,
       int slot_in_qp,
+      std::uint64_t response_epoch,
       CachePS::FlatGetProfile* get_profile) {
     if (descriptor.response_bytes == 0 || descriptor.embedding_dim == 0) {
       return false;
@@ -808,6 +848,7 @@ private:
           descriptor.client_id,
           descriptor.qp_index,
           slot_in_qp,
+          response_epoch,
           base::ConstArray<petps::RawVerbsSge>(
               sges.data(), static_cast<int>(sge_count)),
           response_offset,
@@ -834,7 +875,8 @@ private:
                  const char* payload,
                  petps::RcShardServerTransport::ResponseView* response,
                  int thread_id,
-                 int slot_in_qp) {
+                 int slot_in_qp,
+                 std::uint64_t response_epoch) {
     if (FLAGS_rdma_rc_fake_get_mode == "status_only") {
       response->status->status =
           static_cast<std::int32_t>(petps::RpcStatus::kOk);
@@ -881,7 +923,13 @@ private:
         FLAGS_rdma_rc_profile_interval_ms > 0 ? &get_profile : nullptr;
     if ((descriptor.flags & petps::kRcFlagGetDirectSg) != 0) {
       const bool direct_ok = HandleGetDirectSg(
-          descriptor, keys, response, thread_id, slot_in_qp, get_profile_ptr);
+          descriptor,
+          keys,
+          response,
+          thread_id,
+          slot_in_qp,
+          response_epoch,
+          get_profile_ptr);
       if (direct_ok) {
         return true;
       }
@@ -1224,6 +1272,7 @@ private:
             slot_in_qp,
             thread_id,
             seq,
+            transport_->ResponseEpoch(client_id, qp_index),
             *descriptor,
             payload,
             response,
@@ -1235,8 +1284,13 @@ private:
         return true;
       } else {
         const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-        const bool payload_written_direct =
-            HandleGet(*descriptor, payload, &response, thread_id, slot_in_qp);
+        const bool payload_written_direct   = HandleGet(
+            *descriptor,
+            payload,
+            &response,
+            thread_id,
+            slot_in_qp,
+            transport_->ResponseEpoch(client_id, qp_index));
         if (profile_enabled) {
           profile_.handled_get.fetch_add(1, std::memory_order_relaxed);
           profile_.handle_get_ns.fetch_add(

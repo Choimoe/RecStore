@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -60,6 +61,16 @@ struct RcClientQpView {
 class RcTrackedCompletionTimeout : public std::runtime_error {
 public:
   explicit RcTrackedCompletionTimeout(const std::string& message)
+      : std::runtime_error(message) {}
+};
+
+// Raised when a response payload must not be posted because its lane was
+// rebuilt after the request was accepted. The client slot now belongs to a new
+// generation, so writing it would corrupt that generation's response; the
+// caller must drop the response instead of completing it.
+class RcLaneRebuiltDuringResponse : public std::runtime_error {
+public:
+  explicit RcLaneRebuiltDuringResponse(const std::string& message)
       : std::runtime_error(message) {}
 };
 
@@ -152,10 +163,20 @@ public:
                         int slot_in_qp,
                         const ResponseView& response,
                         std::uint64_t seq);
+  // Current response epoch of a lane. It changes on every server-side lane
+  // rebuild, so a caller that captured it before posting can tell whether the
+  // slot it is about to write still belongs to the same client generation.
+  std::uint64_t ResponseEpoch(int client_id, int qp_index) const;
+  // Posts response payload rows from `sges`. Throws RcLaneRebuiltDuringResponse
+  // when the lane was rebuilt after `expected_epoch` was captured: the payload
+  // would land in a slot the client already released (and whose pool may have
+  // handed it to a new request). Get-payload workers pass the epoch they
+  // captured when the request was accepted.
   void WriteResponsePayloadSg(
       int client_id,
       int qp_index,
       int slot_in_qp,
+      std::uint64_t expected_epoch,
       base::ConstArray<RawVerbsSge> sges,
       std::uint64_t response_offset,
       std::uint64_t bytes);
@@ -186,6 +207,13 @@ private:
     // Last client lane generation observed per logical client id. A change
     // means the client rebuilt its side, so this side must rebuild too.
     std::vector<std::uint64_t> observed_client_generation;
+    // Serializes QP reset/rebuild against payload posts from the get-payload
+    // workers. A post either completes before the rebuild (its WR is flushed by
+    // the reset) or observes the bumped epoch afterwards and refuses.
+    std::mutex rebuild_mu;
+    // Bumped on every server-side rebuild. Payload posts carry the value they
+    // captured when the request was accepted.
+    std::atomic<std::uint64_t> response_epoch{0};
   };
 
   Lane& LaneAt(int client_id, int qp_index);

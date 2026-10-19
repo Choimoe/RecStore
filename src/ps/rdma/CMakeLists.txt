@@ -100,7 +100,7 @@ add_test(
             --server-count 1
             --config-path ${PROJECT_SOURCE_DIR}/src/test/configs/recstore_config.rdma_test.json
             --test-binary $<TARGET_FILE:petps_integration_test>
-            --gtest-filter=PetPSIntegrationTest.LaneRebuildResumesServiceSingleShard
+            --gtest-filter=PetPSIntegrationTest.LaneRebuildResumesServiceSingleShard:PetPSIntegrationTest.RebuildDropsInflightAsyncRpcRepro
             --rdma-lane-rebuild
             --client-timeout 60
             --cluster-timeout 60
@@ -128,6 +128,29 @@ add_test(
         PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 60
+            LABELS "rdma_integration"
+    )
+
+    # Lane rebuild racing the get-payload worker threads. Needs the offload
+    # workers so it is opt-in: the sustained collision takes ~30s.
+    add_test(
+        NAME petps_lane_rebuild_get_workers_test
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/src/test/scripts/run_petps_integration.py
+                --server-count 1
+                --config-path ${PROJECT_SOURCE_DIR}/src/test/configs/recstore_config.rdma_test.json
+                --test-binary $<TARGET_FILE:petps_integration_test>
+                --gtest-filter=PetPSIntegrationTest.RebuildRacesGetPayloadWorkersRepro
+                --rdma-lane-rebuild
+                --rdma-rc-server-get-workers=4
+                --client-timeout 120
+                --cluster-timeout 60
+    )
+    set_tests_properties(
+        petps_lane_rebuild_get_workers_test
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
             LABELS "rdma_integration"
     )
 

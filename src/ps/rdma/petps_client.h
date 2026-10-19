@@ -133,6 +133,11 @@ private:
     std::size_t key_count      = 0;       // Number of keys in this RPC.
     std::size_t response_bytes = 0;       // Dense response payload bytes.
     std::uint64_t lane_epoch   = 0;       // QpContext::epoch at submit time.
+    // Set when a lane rebuild discarded this RPC before its response arrived.
+    // The entry is kept (not erased) so every waiter path reports an error
+    // instead of a missing entry that looks like success; the slot was already
+    // released by the rebuild, so RevokeRPCResource must not touch it.
+    bool failed = false;
   };
 
   struct ProfileCounters {
@@ -181,9 +186,9 @@ private:
                      std::int64_t waited_ms,
                      bool rebuildable = false);
   // Rebuilds a degraded lane's QP and, on success, returns it to service (frees
-  // its slots and drops its pending RPCs). Returns false when the rebuild
-  // failed or the budget is exhausted (which marks the lane Dead). Requires
-  // mu_.
+  // its slots and marks its pending RPCs failed). Returns false when the
+  // rebuild failed or the budget is exhausted (which marks the lane Dead).
+  // Requires mu_.
   bool TryRebuildLaneLocked(int qp_index);
   // Retires the lane on a CQ completion error and throws: peer-side failures
   // (retry exhaustion, flushes) surface as ShardUnreachableError, local or
@@ -196,6 +201,8 @@ private:
   const SlotContext& SlotAt(int qp_index, int slot_in_qp) const;
   void EnsureThreadInitializedLocked() const;
   bool PendingRpcLocked(int rpc_id, PendingRpc* pending) const;
+  // True when `rpc_id` was discarded by a lane rebuild. Requires mu_.
+  bool RpcFailedLocked(int rpc_id) const;
   bool RequestPayloadFitsSlot(std::size_t payload_bytes) const;
   float* AllocateStatusReceiveBufferLocked();
   void MaybeReportProfile();

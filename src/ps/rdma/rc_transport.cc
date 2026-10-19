@@ -761,10 +761,12 @@ RcShardServerTransport::RcShardServerTransport(const RcTransportConfig& config)
   if (config_.slots_per_qp <= 0) {
     throw std::runtime_error("slots_per_qp must be positive");
   }
-  lanes_.reserve(static_cast<std::size_t>(config_.qps_per_client_per_shard));
   const int raw_lane_count = RawLanesPerOsClient(config_);
+  // Lane owns a mutex and an atomic epoch, so it is neither copyable nor
+  // movable; build the vector directly instead of growing it in place.
+  lanes_ = std::vector<Lane>(static_cast<std::size_t>(raw_lane_count));
   for (int raw_lane = 0; raw_lane < raw_lane_count; ++raw_lane) {
-    Lane lane;
+    Lane& lane               = lanes_[static_cast<std::size_t>(raw_lane)];
     const int response_slots = config_.num_clients * config_.slots_per_qp;
     const std::size_t local_bytes =
         ServerLaneBytes(config_) +
@@ -788,7 +790,6 @@ RcShardServerTransport::RcShardServerTransport(const RcTransportConfig& config)
       lane.response_staging.push_back(response_slot);
     }
     lane.verbs->PublishAndConnect();
-    lanes_.push_back(std::move(lane));
   }
 }
 
@@ -1017,10 +1018,17 @@ void RcShardServerTransport::CompleteResponse(
   }
 }
 
+std::uint64_t
+RcShardServerTransport::ResponseEpoch(int client_id, int qp_index) const {
+  return LaneAt(client_id, qp_index)
+      .response_epoch.load(std::memory_order_acquire);
+}
+
 void RcShardServerTransport::WriteResponsePayloadSg(
     int client_id,
     int qp_index,
     int slot_in_qp,
+    std::uint64_t expected_epoch,
     base::ConstArray<RawVerbsSge> sges,
     std::uint64_t response_offset,
     std::uint64_t bytes) {
@@ -1033,15 +1041,24 @@ void RcShardServerTransport::WriteResponsePayloadSg(
   const int raw_lane = RawLaneForLogicalClient(config_, client_id, qp_index);
   const int client_node_id =
       config_.num_servers + OsClientIndexForLogicalClient(config_, client_id);
-  lane.verbs->WriteSg(
-      sges,
-      GlobalAddress{
-          static_cast<std::uint16_t>(client_node_id),
-          ClientResponseOffsetForRawLane(config_, raw_lane, slot_in_qp) +
-              response_offset,
-      },
-      /*wr_id=*/0,
-      false);
+  {
+    const std::lock_guard<std::mutex> guard(lane.rebuild_mu);
+    if (lane.response_epoch.load(std::memory_order_acquire) != expected_epoch) {
+      throw RcLaneRebuiltDuringResponse(
+          "lane rebuilt while the response payload was in flight: shard=" +
+          std::to_string(config_.shard_id) + " client_id=" +
+          std::to_string(client_id) + " qp=" + std::to_string(qp_index));
+    }
+    lane.verbs->WriteSg(
+        sges,
+        GlobalAddress{
+            static_cast<std::uint16_t>(client_node_id),
+            ClientResponseOffsetForRawLane(config_, raw_lane, slot_in_qp) +
+                response_offset,
+        },
+        /*wr_id=*/0,
+        false);
+  }
   if (FLAGS_rdma_rc_profile_interval_ms > 0) {
     auto& profile = TransportProfile();
     profile.response_payload_sg_write_count.fetch_add(
@@ -1139,12 +1156,22 @@ bool RcShardServerTransport::RebuildClientLaneIfStale(
   // The CQ is exclusive to this QP (checked above), so the reset's flush
   // completions can be drained. The response flags are cleared before any new
   // response is posted, so a stale completion cannot be matched to a fresh one.
-  lane.verbs->RebuildQp(static_cast<std::uint16_t>(client_node_id));
-  for (int slot_in_qp = 0; slot_in_qp < config_.slots_per_qp; ++slot_in_qp) {
-    const std::size_t ordinal = static_cast<std::size_t>(
-        ResponseSlotOrdinal(config_, client_id, slot_in_qp));
-    lane.response_completion_pending[ordinal] = 0;
-    lane.response_completion_ready[ordinal]   = 0;
+  //
+  // Payload offload posts from the get-payload worker threads are fenced by
+  // rebuild_mu: a post either finishes before the reset (and is flushed with
+  // the rest of the old generation) or observes the bumped response_epoch and
+  // refuses. Without the fence a worker can land payload rows in the client's
+  // new-generation slot while the status word already reports kOk.
+  {
+    const std::lock_guard<std::mutex> guard(lane.rebuild_mu);
+    lane.response_epoch.fetch_add(1, std::memory_order_acq_rel);
+    lane.verbs->RebuildQp(static_cast<std::uint16_t>(client_node_id));
+    for (int slot_in_qp = 0; slot_in_qp < config_.slots_per_qp; ++slot_in_qp) {
+      const std::size_t ordinal = static_cast<std::size_t>(
+          ResponseSlotOrdinal(config_, client_id, slot_in_qp));
+      lane.response_completion_pending[ordinal] = 0;
+      lane.response_completion_ready[ordinal]   = 0;
+    }
   }
   observed                        = meta.lane_generation;
   const std::uint16_t client_node = static_cast<std::uint16_t>(client_node_id);

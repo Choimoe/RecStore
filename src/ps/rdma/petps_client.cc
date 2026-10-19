@@ -238,6 +238,11 @@ const float* PetPSClient::BorrowGetResultPayload(
       return nullptr;
     }
   }
+  if (pending.failed) {
+    throw ShardUnreachableError(
+        "shard " + std::to_string(shard_) + " unreachable: lane " +
+        std::to_string(pending.qp_index) + " rebuilt during wait");
+  }
 
   auto& slot                 = SlotAt(pending.qp_index, pending.slot_in_qp);
   const bool profile_enabled = FLAGS_rdma_rc_profile_interval_ms > 0;
@@ -389,17 +394,18 @@ bool PetPSClient::TryRebuildLaneLocked(int qp_index) {
     return false;
   }
   // The QP was reset, so every slot of this lane is free again and any RPC
-  // still pending on it lost its response (its caller already saw the failure).
-  // Dropping the pending entries keeps a later RevokeRPCResource from freeing a
-  // slot that a new request has since reused.
+  // still pending on it lost its response. Mark those entries failed instead of
+  // erasing them: a missing entry makes QueryRPCFinished() report "done" and
+  // WaitRPCFinish() return silently, so the caller would decode a response that
+  // never arrived (a zeroed buffer decodes as RpcStatus::kOk). The marker also
+  // keeps RevokeRPCResource from clearing a slot that a new request has since
+  // reused.
   for (auto& slot : lane.slots) {
     slot.busy = false;
   }
-  for (auto it = pending_rpcs_.begin(); it != pending_rpcs_.end();) {
-    if (it->second.qp_index == qp_index) {
-      it = pending_rpcs_.erase(it);
-    } else {
-      ++it;
+  for (auto& entry : pending_rpcs_) {
+    if (entry.second.qp_index == qp_index) {
+      entry.second.failed = true;
     }
   }
   // Bump the epoch before clearing dirty so a waiter can never observe
@@ -560,6 +566,11 @@ bool PetPSClient::PendingRpcLocked(int rpc_id, PendingRpc* pending) const {
     *pending = it->second;
   }
   return true;
+}
+
+bool PetPSClient::RpcFailedLocked(int rpc_id) const {
+  const auto it = pending_rpcs_.find(rpc_id);
+  return it != pending_rpcs_.end() && it->second.failed;
 }
 
 bool PetPSClient::RequestPayloadFitsSlot(std::size_t payload_bytes) const {
@@ -881,6 +892,18 @@ bool PetPSClient::GetPrefetchResult(uint64_t prefetch_id,
     state = it->second;
     prefetches_.erase(it);
   }
+  bool failed = false;
+  {
+    std::lock_guard<std::mutex> guard(mu_);
+    failed = RpcFailedLocked(state.rpc_id);
+  }
+  if (failed) {
+    // The lane was rebuilt while this prefetch was in flight, so the response
+    // buffer holds no result. The status word cannot tell (a zero-filled buffer
+    // decodes as kOk), so check the pending marker first.
+    RevokeRPCResource(state.rpc_id);
+    return false;
+  }
   const auto* status =
       FixedSlotStatusWord(state.recv_buffer, state.key_count, FLAGS_value_size);
   if (*status != static_cast<std::int32_t>(RpcStatus::kOk)) {
@@ -968,6 +991,11 @@ bool PetPSClient::QueryRPCFinished(int rpc_id) {
   if (!PendingRpcLocked(rpc_id, &pending)) {
     return true;
   }
+  if (pending.failed) {
+    throw ShardUnreachableError(
+        "shard " + std::to_string(shard_) + " unreachable: lane " +
+        std::to_string(pending.qp_index) + " rebuilt during wait");
+  }
   const auto& slot = SlotAt(pending.qp_index, pending.slot_in_qp);
   return StatusWordDone(*slot.view.status, pending.seq);
 }
@@ -978,6 +1006,11 @@ void PetPSClient::WaitRPCFinish(int rpc_id) {
     std::lock_guard<std::mutex> guard(mu_);
     if (!PendingRpcLocked(rpc_id, &pending)) {
       return;
+    }
+    if (pending.failed) {
+      throw ShardUnreachableError(
+          "shard " + std::to_string(shard_) + " unreachable: lane " +
+          std::to_string(pending.qp_index) + " rebuilt during wait");
     }
   }
 
@@ -1029,7 +1062,13 @@ void PetPSClient::RevokeRPCResource(int rpc_id) {
   const std::uint64_t revoke_start_ns = profile_enabled ? NowNs() : 0;
   auto& qp   = qps_[static_cast<std::size_t>(it->second.qp_index)];
   auto& slot = qp.slots[static_cast<std::size_t>(it->second.slot_in_qp)];
-  if (qp.dirty.load(std::memory_order_relaxed)) {
+  if (it->second.failed) {
+    // A lane rebuild already released this slot; it may now belong to another
+    // request, so clearing it would corrupt that request's commit word.
+    VLOG(1) << "component=rdma_rc_client event=revoke_skipped_failed_rpc"
+            << " shard=" << shard_ << " lane=" << it->second.qp_index
+            << " slot=" << it->second.slot_in_qp;
+  } else if (qp.dirty.load(std::memory_order_relaxed)) {
     // A retired lane never hands its slots back: the server may still read the
     // request payload, or the completion may still arrive later.
     VLOG(1) << "component=rdma_rc_client event=revoke_skipped_dirty_lane"
