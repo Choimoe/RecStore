@@ -513,6 +513,44 @@ private:
         << " poller_max_get_thread=" << poller_max_get_thread << std::endl;
   }
 
+  // Periodically surfaces the two rebuild-fence counters so a test driver can
+  // assert the fence actually fired. Like MaybeReportProfile this is opt-in
+  // through an interval flag (0 = off), so it never writes to stderr in a
+  // production run; the counters can only move when lane rebuild is enabled.
+  void MaybeReportRebuildFenceStats() {
+    if (FLAGS_rdma_rc_server_fence_stats_interval_ms <= 0 ||
+        !FLAGS_rdma_lane_rebuild_enabled) {
+      return;
+    }
+    const std::uint64_t kIntervalNs =
+        static_cast<std::uint64_t>(
+            FLAGS_rdma_rc_server_fence_stats_interval_ms) *
+        1000000ull;
+    const std::uint64_t now = NowNs();
+    std::uint64_t expected =
+        next_fence_report_ns_.load(std::memory_order_relaxed);
+    if (expected == 0) {
+      next_fence_report_ns_.compare_exchange_strong(
+          expected, now + kIntervalNs, std::memory_order_relaxed);
+      return;
+    }
+    if (now < expected ||
+        !next_fence_report_ns_.compare_exchange_strong(
+            expected, now + kIntervalNs, std::memory_order_relaxed)) {
+      return;
+    }
+    const std::uint64_t rejected =
+        transport_ == nullptr ? 0 : transport_->ResponseRejectedEpochCount();
+    const std::uint64_t dropped =
+        payload_completion_dropped_stale_.load(std::memory_order_relaxed);
+    // std::cerr, not LOG(INFO): the test driver captures the process pipe,
+    // while glog INFO lines only land in the per-process log files.
+    std::cerr << "component=rdma_rc_server event=rebuild_fence_stats"
+              << " shard=" << shard_id_ << " fence_rejected=" << rejected
+              << " dropped_stale=" << dropped
+              << " fence_events=" << (rejected + dropped) << std::endl;
+  }
+
   bool GetPayloadOffloadEnabled() const {
     return get_payload_worker_count_ > 0;
   }
@@ -604,6 +642,15 @@ private:
         }
         task = get_payload_tasks_.front();
         get_payload_tasks_.pop_front();
+      }
+
+      // Test-only: widen the enqueue-to-post window so a lane rebuild lands in
+      // the middle of this task's lifetime. That forces the response-epoch
+      // fence (RcLaneRebuiltDuringResponse / stale completion drop) to fire,
+      // which the tight loopback timing otherwise almost never does.
+      if (FLAGS_rdma_rc_server_get_worker_hold_us > 0) {
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(FLAGS_rdma_rc_server_get_worker_hold_us));
       }
 
       const bool profile_enabled = FLAGS_rdma_rc_profile_interval_ms > 0;
@@ -716,6 +763,8 @@ private:
         // The lane was rebuilt after the request was accepted. Its payload WRs
         // were flushed by the reset (or refused), so writing the status word
         // now would report kOk for a response that never reached the client.
+        payload_completion_dropped_stale_.fetch_add(
+            1, std::memory_order_relaxed);
         VLOG(1) << "component=rdma_rc_server event=get_payload_dropped_stale"
                 << " shard=" << shard_id_ << " client_id="
                 << completion.client_id << " qp=" << completion.qp_index
@@ -742,6 +791,7 @@ private:
             profile_enabled);
       }
     }
+    MaybeReportRebuildFenceStats();
   }
 
   // Count a direct_sg batch that failed after the probe and record the probe
@@ -1506,6 +1556,10 @@ private:
   std::atomic<int> started_threads_{0};
   std::atomic<bool> ready_published_{false};
   std::atomic<bool> stop_requested_{false};
+  // Rebuild-fence observability: completions dropped because the response epoch
+  // changed, and the next periodic fence-stats report deadline.
+  std::atomic<std::uint64_t> payload_completion_dropped_stale_{0};
+  std::atomic<std::uint64_t> next_fence_report_ns_{0};
   ProfileCounters profile_;
 };
 

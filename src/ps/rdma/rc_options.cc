@@ -62,6 +62,18 @@ DEFINE_int32(rdma_rc_server_get_workers,
              0,
              "Experimental RC write server GET payload worker thread count. "
              "0 keeps GET handling on the polling thread");
+DEFINE_int32(
+    rdma_rc_server_get_worker_hold_us,
+    0,
+    "Test-only: hold each GET payload worker for this many microseconds "
+    "before it handles the task, so a task provably straddles a lane rebuild "
+    "and exercises the response-epoch fence. 0 disables the hold");
+DEFINE_int32(
+    rdma_rc_server_fence_stats_interval_ms,
+    0,
+    "Interval between rebuild-fence counter reports on the server stderr "
+    "(`event=rebuild_fence_stats`). 0 disables the reports, which is the "
+    "production default; test drivers enable them to assert the fence fired");
 DEFINE_int32(rdma_rc_client_id_base,
              -1,
              "Logical RC write client id base for this OS process. A negative "

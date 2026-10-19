@@ -1044,6 +1044,7 @@ void RcShardServerTransport::WriteResponsePayloadSg(
   {
     const std::lock_guard<std::mutex> guard(lane.rebuild_mu);
     if (lane.response_epoch.load(std::memory_order_acquire) != expected_epoch) {
+      response_rejected_epoch_count_.fetch_add(1, std::memory_order_relaxed);
       throw RcLaneRebuiltDuringResponse(
           "lane rebuilt while the response payload was in flight: shard=" +
           std::to_string(config_.shard_id) + " client_id=" +

@@ -154,6 +154,33 @@ add_test(
             LABELS "rdma_integration"
     )
 
+    # Deterministic fence proof: stall the GET payload workers so a task
+    # provably straddles a lane rebuild. The driver asserts shard-0 reported
+    # fence events (fence_rejected + dropped_stale > 0); the test itself only
+    # guards that no wrong response leaks through.
+    add_test(
+        NAME petps_lane_rebuild_fence_test
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/src/test/scripts/run_petps_integration.py
+                --server-count 1
+                --config-path ${PROJECT_SOURCE_DIR}/src/test/configs/recstore_config.rdma_test.json
+                --test-binary $<TARGET_FILE:petps_integration_test>
+                --gtest-filter=PetPSIntegrationTest.RebuildRacesGetPayloadWorkersRepro
+                --rdma-lane-rebuild
+                --rdma-rc-server-get-workers=4
+                --rdma-rc-server-get-worker-hold-us=2000000
+                --client-timeout 120
+                --cluster-timeout 60
+                --expect-fence-events
+    )
+    set_tests_properties(
+        petps_lane_rebuild_fence_test
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
+            LABELS "rdma_integration"
+    )
+
     add_test(
         NAME petps_adapter_split_get_multi_shard_test
         COMMAND ${Python3_EXECUTABLE}

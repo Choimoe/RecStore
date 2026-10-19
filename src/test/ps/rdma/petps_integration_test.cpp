@@ -29,6 +29,7 @@ DECLARE_int32(num_client_processes);
 DECLARE_int32(rdma_rc_client_id_base);
 DECLARE_int32(rdma_rc_qps_per_client_per_shard);
 DECLARE_int32(rdma_rc_server_get_workers);
+DECLARE_int32(rdma_rc_server_get_worker_hold_us);
 DECLARE_int32(rdma_lane_rebuild_max_attempts);
 DECLARE_int32(rdma_lane_rebuild_cooldown_ms);
 DECLARE_int32(rdma_lane_rebuild_wait_ms);
@@ -695,7 +696,13 @@ TEST(PetPSIntegrationTest, RebuildRacesGetPayloadWorkersRepro) {
   // A rebuild may legitimately fail an in-flight GET (the caller retries), but
   // it must never return rc=0 with payload that the client did not receive.
   EXPECT_EQ(wrong_responses.load(), 0);
-  EXPECT_GT(gets_ok.load(), 0);
+  if (FLAGS_rdma_rc_server_get_worker_hold_us == 0) {
+    // Only the un-stalled lane must actually serve GETs. The fence-proof lane
+    // deliberately stalls the payload workers, so its GETs mostly fail on
+    // purpose; there the driver asserts the fence counters instead, and this
+    // test only guards against a wrong response leaking through.
+    EXPECT_GT(gets_ok.load(), 0);
+  }
 }
 
 // Client fast-fail scenario. Needs an external parent that freezes shard 1

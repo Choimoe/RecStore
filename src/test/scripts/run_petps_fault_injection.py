@@ -18,6 +18,7 @@ Exit codes: 0 = passed, 1 = failed, 77 = RDMA unavailable on this host.
 """
 
 import argparse
+import contextlib
 import signal
 import subprocess
 import sys
@@ -176,14 +177,15 @@ def inject_fault(spec, shard1, log_path, freeze_seconds):
     return True
 
 
-def start_client(runner, spec, test_binary, log_path):
-    argv = [test_binary, f"--gtest_filter={spec.gtest_filter}"]
+def start_client(runner, spec, test_binary, log_path, test_binary_abs):
+    argv = [test_binary_abs, f"--gtest_filter={spec.gtest_filter}"]
     argv.extend(spec.client_flags)
-    env = runner.build_client_env(CLIENT_INDEX)
-    env[spec.env_var] = "1"
+    cmd, env = runner.build_client_launch(
+        argv, client_index=CLIENT_INDEX, env_extra={spec.env_var: "1"}
+    )
     handle = open(log_path, "w")
     process = subprocess.Popen(
-        runner.build_client_cmd(argv, client_index=CLIENT_INDEX),
+        cmd,
         cwd=str(REPO_ROOT),
         env=env,
         stdout=handle,
@@ -215,7 +217,7 @@ def report(spec, checks, log_path):
     return passed
 
 
-def run_scenario(spec, args, config_path, log_dir):
+def run_scenario(spec, args, config_path, log_dir, test_binary):
     log_path = log_dir / f"{spec.name}.client.log"
     print(
         f"[fault-injection] scenario={spec.name} fault={spec.fault} "
@@ -231,11 +233,14 @@ def run_scenario(spec, args, config_path, log_dir):
         status_refresh_interval=0,
         show_status_logs=False,
         show_control_plane_logs=args.show_runner_logs,
+        rdma_control_plane_host=args.rdma_control_plane_host,
         rdma_rc_qps_per_client_per_shard=spec.lanes,
         rdma_rc_slots_per_qp=1,
         rdma_wait_timeout_ms=spec.wait_timeout_ms,
         rdma_lane_rebuild_enabled=spec.lane_rebuild,
         server_command_wrapper=lambda _global_id, cmd: cmd + spec.server_flags,
+        client_ssh=args.client_ssh or None,
+        client_ssh_port=args.client_ssh_port,
     )
     client = None
     client_handle = None
@@ -245,7 +250,7 @@ def run_scenario(spec, args, config_path, log_dir):
         # start() appends the server processes in global_id order.
         shard1 = runner.processes[FAULT_SHARD][0]
         client, client_handle = start_client(
-            runner, spec, args.test_binary, log_path
+            runner, spec, args.test_binary, log_path, test_binary
         )
 
         if not wait_for_marker(log_path, spec.warm_marker, WARM_MARKER_TIMEOUT):
@@ -283,6 +288,9 @@ def run_scenario(spec, args, config_path, log_dir):
                 client.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+            # The killed local process is just the ssh client; reap the remote
+            # process too, otherwise it keeps holding the servers.
+            runner.cleanup_remote_client(test_binary)
         if shard1 is not None and shard1.poll() is None:
             # A stopped shard cannot be reaped cleanly; resume it before stop().
             shard1.send_signal(signal.SIGCONT)
@@ -311,6 +319,33 @@ def parse_args():
         action="store_true",
         help="stream the control-plane and petps_server logs",
     )
+    parser.add_argument(
+        "--client-ssh",
+        default="",
+        help=(
+            "run the client on this SSH target (user@host) instead of locally; "
+            "sshpass must be available and SSHPASS set in the environment"
+        ),
+    )
+    parser.add_argument(
+        "--client-ssh-port",
+        type=int,
+        default=22222,
+        help="SSH port for --client-ssh",
+    )
+    parser.add_argument(
+        "--rdma-control-plane-host",
+        default="127.0.0.1",
+        help="host/IP the control plane binds and the (possibly remote) client connects to",
+    )
+    parser.add_argument(
+        "--runtime-dir",
+        help=(
+            "directory for the materialized RDMA config; must be readable by "
+            "every host. Defaults to a temporary directory locally, or "
+            "<repo>/.cross-run when --client-ssh is used"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -322,8 +357,25 @@ def main():
 
     args = parse_args()
     spec = SCENARIOS[args.scenario]
+    test_binary = Path(args.test_binary)
+    if not test_binary.is_absolute():
+        test_binary = (REPO_ROOT / test_binary).resolve()
+    test_binary = str(test_binary)
 
-    with tempfile.TemporaryDirectory(prefix="recstore_petps_fault_") as runtime_dir:
+    if args.client_ssh:
+        runtime_path = (
+            Path(args.runtime_dir)
+            if args.runtime_dir
+            else REPO_ROOT / ".cross-run"
+        )
+        runtime_path.mkdir(parents=True, exist_ok=True)
+        runtime_context = contextlib.nullcontext(str(runtime_path))
+    else:
+        runtime_context = tempfile.TemporaryDirectory(
+            prefix="recstore_petps_fault_"
+        )
+
+    with runtime_context as runtime_dir:
         config_path = materialize_rdma_config(
             resolve_rdma_integration_config(SERVER_COUNT, args.config_path),
             SERVER_COUNT,
@@ -332,7 +384,7 @@ def main():
         )
         log_dir = Path(args.log_dir) if args.log_dir else Path(runtime_dir) / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        passed = run_scenario(spec, args, config_path, log_dir)
+        passed = run_scenario(spec, args, config_path, log_dir, test_binary)
 
     print(
         f"[fault-injection] scenario={spec.name} "

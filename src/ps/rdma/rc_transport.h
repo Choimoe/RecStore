@@ -167,6 +167,13 @@ public:
   // rebuild, so a caller that captured it before posting can tell whether the
   // slot it is about to write still belongs to the same client generation.
   std::uint64_t ResponseEpoch(int client_id, int qp_index) const;
+  // Number of response payload posts refused because the lane was rebuilt after
+  // the request was accepted (RcLaneRebuiltDuringResponse). A non-zero value is
+  // direct evidence that the rebuild fence fired instead of merely that no bad
+  // response reached the client.
+  std::uint64_t ResponseRejectedEpochCount() const {
+    return response_rejected_epoch_count_.load(std::memory_order_relaxed);
+  }
   // Posts response payload rows from `sges`. Throws RcLaneRebuiltDuringResponse
   // when the lane was rebuilt after `expected_epoch` was captured: the payload
   // would land in a slot the client already released (and whose pool may have
@@ -222,6 +229,9 @@ private:
 
   RcTransportConfig config_; // Transport sizing and namespace config.
   std::vector<Lane> lanes_;  // One verbs RC lane per qp_index.
+  // Fence observability: incremented by WriteResponsePayloadSg() when it
+  // refuses to post into a rebuilt lane.
+  std::atomic<std::uint64_t> response_rejected_epoch_count_{0};
 };
 
 } // namespace petps
