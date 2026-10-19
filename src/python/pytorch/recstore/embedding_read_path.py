@@ -202,6 +202,12 @@ class EmbeddingReadPath(Protocol):
     ) -> None:
         """Post-update hook (window advance / future bagpipe wait)."""
 
+    def after_step_sync(self, row: dict[str, Any]) -> None:
+        """Post-``timer.finish()`` hook: only work safe to run after the
+        device drain point.  Stats draining with host readbacks belongs
+        here (a readback issued before ``timer.finish()`` silently moves
+        device-wait time into the enclosing phase's timer)."""
+
     def advance_all(self) -> int:
         """Issue reads for all recorded-but-unissued batches (end-of-run drain)."""
 
@@ -244,6 +250,9 @@ class DirectReadPath:
         row: dict[str, Any],
     ) -> None:
         del step, sparse_features, sparse_optimizer, row
+
+    def after_step_sync(self, row: dict[str, Any]) -> None:
+        del row
 
     def advance_all(self) -> int:
         return 0
@@ -404,6 +413,9 @@ class PrefetchReadPath:
             self._ensure_issued(int(step) + self._depth)
         # Intentionally no stale repair — that is bagpipe's job.
 
+    def after_step_sync(self, row: dict[str, Any]) -> None:
+        del row
+
     def advance_all(self) -> int:
         if self._depth <= 0 or not self._recorded:
             return 0
@@ -438,9 +450,10 @@ class BagPipeReadPath:
         row: dict[str, Any],
     ) -> Any:
         del step, sparse_batch
-        # ticket = (unique_ids, inverse, raw_count) 由 controller 的 enqueue
-        # 产生 (设备端), 训练循环把它透传给 record_pooled_grad 的 prepared
-        # 路径, 免去第二次 unique。
+        # ticket = (unique_ids, inverse, raw_count) comes from the
+        # controller's enqueue (device-side); the training loop threads it
+        # through to record_pooled_grad's prepared path, avoiding a second
+        # unique().
         enqueue_start = time.perf_counter()
         ticket = self._plugin.on_prepare(sparse_features)
         row["bagpipe_enqueue_ms"] = (time.perf_counter() - enqueue_start) * 1e3
@@ -465,6 +478,12 @@ class BagPipeReadPath:
     ) -> None:
         del sparse_features, sparse_optimizer
         self._plugin.on_step_end(step, row)
+
+    def after_step_sync(self, row: dict[str, Any]) -> None:
+        # Stats draining runs here -- after the runner's timer.finish()
+        # device drain -- so the hot-accumulator readbacks add no hidden
+        # wait to the enclosing phase timers.
+        self._plugin.consume_stats_into(row)
 
     def advance_all(self) -> int:
         return 0  # bagpipe manages its own pipeline internally

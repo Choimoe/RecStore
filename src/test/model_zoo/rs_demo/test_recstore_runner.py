@@ -1067,6 +1067,9 @@ class TestRecStoreRunner(unittest.TestCase):
             def on_step_end(self, step, row) -> None:
                 del step, row
 
+            def consume_stats_into(self, row) -> None:
+                del row
+
             def shutdown(self) -> None:
                 self.shutdown_calls += 1
 

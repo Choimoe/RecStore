@@ -83,7 +83,8 @@ class _GradHarness(BagPipeGradMixin):
         self.embedding_module = type("EmbeddingModule", (), {})()
         self.master_table_name = "table"
         self.lr = 0.01
-        # 扁平张量簿记 (与 controller._alloc_bookkeeping 同构, 固定 64 大小)
+        # Flat-tensor bookkeeping (isomorphic to
+        # controller._alloc_bookkeeping, fixed 64)
         self._latest_dev = torch.zeros(64, dtype=torch.int32)
         self._ttl_dev = torch.zeros(64, dtype=torch.int32)
         self._cached_dev = torch.zeros(64, dtype=torch.bool)
@@ -93,21 +94,29 @@ class _GradHarness(BagPipeGradMixin):
         self._sync_later_stream = None
         self._pending_sync_now_work = None
         self._pending_sync_now_lr = None
-        self._pending_ps_push_handle = None
-        self._anti_entropy_step = 0
-        self._anti_entropy_interval = 50
-        self._anti_entropy_ids = 200
         self._ttl_margin = 256
         self._shared_ids = {10, 30}
         self._shared_ids_tensor = torch.tensor([10, 30], dtype=torch.int64)
-        # harness 声明的是 oracle 集合 (id 20 确实只在本 rank 出现), 因此
-        # 集合外的 id 允许走 local-only 快路径。集合不完整的场景由
-        # test_unknown_ids_are_aggregated_when_set_is_incomplete 单独覆盖。
+        # The harness declares an oracle set (id 20 really is rank-local),
+        # so ids outside the set may take the local-only fast path. The
+        # incomplete-set scenario is covered separately by
+        # test_unknown_ids_are_aggregated_when_set_is_incomplete.
         self._shared_ids_complete = True
-        # 无 GPU 热累加器 → _hot_add 回退 host float (直接进 _stats)
+        # Shared-set routing threshold (matches the controller default):
+        # {10, 30} is 2 rows <= threshold -> dense routing by default; the
+        # large-set routing is covered by the _dense_shared_max_rows=0 case.
+        self._global_unique_count = 2
+        self._dense_shared_max_rows = 4096
+        # Oracle prescan sizing metadata is absent by default: the sparse
+        # path then uses the count-exchange variant (same as the fallback
+        # training mode).  Tests for the sync-free path set it explicitly.
+        self._prescan_sparse_max = None
+        # No GPU hot accumulators -> _hot_add falls back to host float
+        # (straight into _stats)
         self._hot_stats_dev = {}
         self.dense_calls = []
         self.sparse_calls = []
+        self.prescan_sparse_calls = []
         self._stats = {
             "bagpipe_update_ms": 0.0,
             "bagpipe_sgd_cache_success": 0.0,
@@ -118,7 +127,6 @@ class _GradHarness(BagPipeGradMixin):
             "bagpipe_sync_later_ids": 0.0,
             "bagpipe_no_sync_ids": 0.0,
             "bagpipe_unknown_aggregated_ids": 0.0,
-            "bagpipe_anti_entropy_ids": 0.0,
         }
 
     def _is_distributed(self):
@@ -127,7 +135,8 @@ class _GradHarness(BagPipeGradMixin):
     def _get_rank(self):
         return self._rank
 
-    # 身份映射: 单测直接用 fused id 当 compact 索引 (固定 64 大小簿记)
+    # Identity mapping: tests use the fused id directly as the compact
+    # index (fixed 64-slot bookkeeping)
     def _to_compact(self, ids):
         return ids
 
@@ -141,8 +150,9 @@ class _GradHarness(BagPipeGradMixin):
         return None
 
     def _hot_add(self, key, count):
-        # 单测 harness 无 GPU 热累加器: 直接累加 host float (与控制器
-        # _hot_stats_dev 为空时的回退分支同构)
+        # Test harness has no GPU hot accumulators: accumulate host floats
+        # directly (isomorphic to the controller's fallback branch when
+        # _hot_stats_dev is empty)
         if isinstance(count, torch.Tensor):
             count = float(count.item())
         self._stats[key] = self._stats.get(key, 0.0) + count
@@ -155,8 +165,30 @@ class _GradHarness(BagPipeGradMixin):
         self.sparse_calls.append((ids.clone(), grads.clone(), stream))
         if ids.numel() == 0:
             return ids, grads, None
-        # 聚合结果 = 本 rank 贡献 (单进程 harness 无对端)
+        # Aggregated result = this rank's contribution (single-process
+        # harness has no peer)
         return ids, grads, _DenseWork(ids.clone(), grads.clone())
+
+    def _all_gather_sparse_prescan_async(self, ids, grads, mask, max_n,
+                                         stream=None):
+        self.prescan_sparse_calls.append(
+            (ids.clone(), grads.clone(), mask.clone(), int(max_n), stream)
+        )
+        # Mirror the real implementation's GPU-side compaction so tests can
+        # assert on the padded payload.
+        slot = torch.cumsum(mask, 0) - 1
+        trash = torch.full_like(slot, max_n)
+        dest = torch.where(mask, slot, trash)
+        padded_ids = torch.full((max_n + 1,), -1, dtype=torch.int64)
+        padded_ids[dest] = ids
+        padded_ids = padded_ids[:max_n]
+        if max_n == 0 or padded_ids.numel() == 0:
+            return ids[:0], grads[:0], None
+        return (
+            ids, grads,
+            _DenseWork(padded_ids.clone(),
+                       torch.zeros(max_n, grads.size(1))),
+        )
 
 
 class TestBagPipeDenseReduce(unittest.TestCase):
@@ -202,9 +234,121 @@ class TestBagPipeDenseReduce(unittest.TestCase):
         self.assertEqual(dense[0].tolist(), [5.0, 6.0])
         self.assertEqual(dense[1].tolist(), [0.0, 0.0])
 
+    def test_dense_work_applies_peer_rows_this_rank_did_not_contribute(self):
+        """The dense apply set must be rank-uniform: the all_reduced buffer is
+        identical on every rank, so every rank must apply its nonzero rows --
+        including rows a peer contributed and this rank never saw.  Applying
+        only own rows would fork the replicas for shared ids whose batch
+        membership differs across ranks (no per-step PS push exists to
+        repair them afterwards)."""
+        harness = _CommHarness()
+        harness._shared_ids_tensor = torch.tensor([10, 20, 30], dtype=torch.int64)
+        harness._global_unique_count = 3
+        harness._global_id_to_index = {10: 0, 20: 1, 30: 2}
+        # This rank's batch touches only id 10.
+        ids = torch.tensor([10], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 2.0]])
+
+        def fake_all_reduce(t, async_op=True):
+            # Simulate the peer's contribution: id 20 (row 1) carries a
+            # gradient this rank did not contribute; id 30 (row 2) stays 0.
+            t[1] += torch.tensor([7.0, 8.0])
+            return _DoneWork()
+
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(comm_module.dist, "all_reduce", side_effect=fake_all_reduce):
+            _, _, work = harness._dense_all_reduce_async(ids, grads)
+            work.wait()
+
+        result_ids, result_grads = work.result
+        # Uniform nonzero set: own row 10 AND peer row 20; untouched row 30
+        # is a no-op and must stay out (it would otherwise be marked dirty).
+        self.assertEqual(result_ids.tolist(), [10, 20])
+        self.assertEqual(result_grads.tolist(), [[1.0, 2.0], [7.0, 8.0]])
+
+
+class TestCompositeWorkSentinelAggregation(unittest.TestCase):
+    """wait() recovers each rank's contribution via the -1 sentinel mask,
+    with no per-rank count synchronization."""
+
+    def test_wait_masks_sentinel_rows_and_aggregates_duplicates(self):
+        from ..bagpipe_cache.types import _CompositeWork
+
+        # rank0 contributes [10] (second row is a sentinel); rank1
+        # contributes [15, 10]
+        ids_list = [torch.tensor([10, -1]), torch.tensor([15, 10])]
+        grads_list = [
+            # rank0's second row is a sentinel row and must be dropped
+            torch.tensor([[1.0, 1.0], [9.0, 9.0]]),
+            torch.tensor([[5.0, 5.0], [2.0, 2.0]]),
+        ]
+        work = _CompositeWork(
+            _DoneWork(), _DoneWork(), ids_list, grads_list,
+            world_size=2, dim=2, device=torch.device("cpu"), stats={},
+        )
+        work.wait()
+        ids, grads = work.result
+        self.assertEqual(ids.tolist(), [10, 15])
+        # id 10 sums across ranks: [1,1]+[2,2]=[3,3]; the sentinel row's
+        # [9,9] must not be counted
+        self.assertEqual(grads.tolist(), [[3.0, 3.0], [5.0, 5.0]])
+
+    def test_wait_all_sentinel_returns_empty(self):
+        from ..bagpipe_cache.types import _CompositeWork
+
+        ids_list = [torch.tensor([-1]), torch.tensor([-1])]
+        grads_list = [
+            torch.zeros(1, 2),
+            torch.zeros(1, 2),
+        ]
+        work = _CompositeWork(
+            _DoneWork(), _DoneWork(), ids_list, grads_list,
+            world_size=2, dim=2, device=torch.device("cpu"), stats={},
+        )
+        work.wait()
+        ids, grads = work.result
+        self.assertEqual(ids.numel(), 0)
+        self.assertEqual(grads.shape, (0, 2))
+
+
+class TestBagPipeSparseAllGather(unittest.TestCase):
+    def test_sparse_all_gather_pads_with_sentinel_and_aggregates(self):
+        """2-rank fake all_gather: the peer contributes the same rows as
+        this rank, so gradients are summed."""
+        harness = _CommHarness()
+        ids = torch.tensor([10], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 2.0]])
+
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(
+                 comm_module.dist, "all_gather",
+                 side_effect=_fake_two_rank_all_gather,
+             ):
+            _, _, work = harness._all_gather_sparse_async(ids, grads)
+            work.wait()
+
+        agg_ids, agg_grads = work.result
+        self.assertEqual(agg_ids.tolist(), [10])
+        self.assertEqual(agg_grads.tolist(), [[2.0, 4.0]])
+
+    def test_sparse_all_gather_early_returns_when_all_ranks_empty(self):
+        harness = _CommHarness()
+
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(
+                 comm_module.dist, "all_gather",
+                 side_effect=_fake_two_rank_all_gather,
+             ):
+            _, _, work = harness._all_gather_sparse_async(
+                torch.empty(0, dtype=torch.int64), torch.zeros(0, 2)
+            )
+
+        self.assertIsNone(work)
+
 
 class _SharedIdSetHarness(BagPipeCommMixin):
-    """BagPipeCommMixin 的最小宿主: 只测共享集构建/完整性标志。"""
+    """Minimal host for BagPipeCommMixin: only exercises shared-set
+    construction / completeness flags."""
 
     def __init__(self):
         self.device = torch.device("cpu")
@@ -216,11 +360,15 @@ class _SharedIdSetHarness(BagPipeCommMixin):
         self._init_unique_ids = set()
         self._prescan_done = False
         self._prescan_unique_ids = set()
+        self._prescan_batch_ids = []
+        self._prescan_batch_numels = []
+        self._prescan_sparse_max = None
         self._dynamic_lookahead = 4
         self._stats = {
             "bagpipe_shared_ids": 0.0,
             "bagpipe_prescan_batches": 0.0,
             "bagpipe_prescan_ids": 0.0,
+            "bagpipe_prescan_sparse_max_sum": 0.0,
         }
 
     @property
@@ -232,7 +380,8 @@ class _SharedIdSetHarness(BagPipeCommMixin):
 
 
 def _fake_two_rank_all_gather(out_list, tensor, async_op=False):
-    """伪 2-rank all_gather: rank1 贡献与 rank0 相同 (所有 id 都是共享的)。"""
+    """Fake 2-rank all_gather: rank1 contributes the same as rank0 (every
+    id is shared)."""
     for out in out_list:
         out.copy_(tensor)
     return _DoneWork()
@@ -265,7 +414,8 @@ class TestBagPipeSharedIdSetBuild(unittest.TestCase):
             self.assertIsNone(harness._shared_ids)  # 3 < max(lookahead, 2)
             harness._maybe_build_shared_id_set(4)
         self.assertEqual(harness._shared_ids, {10, 20})
-        # 回退集只是前缀采样 → 不能授权 local-only 快路径
+        # The fallback set is only a prefix sample -> it cannot license
+        # the local-only fast path
         self.assertFalse(harness._shared_ids_complete)
         self.assertEqual(harness._global_unique_count, 2)
 
@@ -291,7 +441,8 @@ class TestBagPipeSharedIdSetBuild(unittest.TestCase):
 
 class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
     def test_cleanup_builds_the_set_at_the_step_boundary(self):
-        """构建点是 cleanup (每步每 rank 都走到), 不是各 rank 自己的批计数。"""
+        """The build point is cleanup (reached by every rank every step),
+        not each rank's own batch counter."""
         from ..bagpipe_cache.eviction import BagPipeEvictionMixin
 
         seen = []
@@ -313,11 +464,14 @@ class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
 
 
 class TestBagPipeUnknownIdAggregation(unittest.TestCase):
-    """集合不完整时, 集合外的 id 是 unknown, 不能当作 local-only。
+    """While the set is incomplete, ids outside it are unknown-ownership
+    and must not be treated as local-only.
 
-    回退集只覆盖前 max(lookahead, 2) 个 step, 因此集合外的 id 仍可能在别的
-    rank 上出现: 若按 local-only 立即原位 apply 并标 dirty, eviction 的值写回
-    会让最后写入的 rank 覆盖掉其它 rank 的增量, 副本永久分叉。
+    The fallback set covers only the first max(lookahead, 2) steps, so an
+    id outside it may still appear on another rank: applying it
+    immediately as local-only and marking it dirty would let the eviction
+    value writeback overwrite other ranks' increments (last-writer-wins)
+    and fork the replicas permanently.
     """
 
     def _incomplete_harness(self):
@@ -332,17 +486,19 @@ class TestBagPipeUnknownIdAggregation(unittest.TestCase):
 
         harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
 
-        # id 20 不在已知共享集里 → 不本地 apply、不标 dirty (写回会互相覆盖)
+        # id 20 is outside the known shared set -> no local apply, no
+        # dirty mark (writebacks would overwrite each other)
         self.assertEqual(harness.kv_client.best_effort_applies, [])
         self.assertFalse(bool(harness._dirty_dev[20].item()))
-        # 而是走 sparse 聚合路径, 与 dense 路径同一 barrier 消费
+        # it goes through the sparse aggregation path instead, consumed at
+        # the same barrier as the dense path
         self.assertEqual(len(harness.sparse_calls), 1)
         s_ids, s_grads, _ = harness.sparse_calls[0]
         self.assertEqual(s_ids.tolist(), [20])
         self.assertEqual(s_grads.tolist(), [[2.0, 2.0]])
         self.assertEqual(harness._stats["bagpipe_unknown_aggregated_ids"], 1.0)
         self.assertEqual(harness._stats["bagpipe_no_sync_ids"], 0.0)
-        # 已知共享的 id 10 仍走 dense
+        # known-shared id 10 still goes dense
         d_ids, _, _ = harness.dense_calls[0]
         self.assertEqual(d_ids.tolist(), [10])
 
@@ -354,26 +510,69 @@ class TestBagPipeUnknownIdAggregation(unittest.TestCase):
 
         harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
 
-        # oracle 集合证明 id 20 只在本 rank 出现 → 快路径仍然可用
+        # the oracle set proves id 20 appears only on this rank -> the
+        # fast path is available again
         self.assertEqual(len(harness.kv_client.best_effort_applies), 1)
         self.assertTrue(bool(harness._dirty_dev[20].item()))
         self.assertEqual(harness.sparse_calls, [])
 
     def test_dense_and_sparse_collectives_are_both_issued(self):
-        """空桶也不能跳过集合通信: 对端会进入, 早退即挂死。"""
+        """An empty bucket must not skip the collective either: the peer
+        enters it, and an early exit hangs it."""
         harness = self._incomplete_harness()
-        harness._shared_ids = set()
-        harness._shared_ids_tensor = torch.empty(0, dtype=torch.int64)
         ids = torch.tensor([20], dtype=torch.int64)
         grads = torch.tensor([[2.0, 2.0]])
 
         harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
 
-        # dense 桶为空仍然发射 (对齐对端的 all_reduce), sparse 携带 unknown id
+        # This rank has no shared ids (empty dense bucket) yet still issues
+        # the collective (matching the peer's all_reduce); sparse carries
+        # the unknown id.
         self.assertEqual(len(harness.dense_calls), 1)
         self.assertEqual(harness.dense_calls[0][0].numel(), 0)
         self.assertEqual(len(harness.sparse_calls), 1)
         self.assertEqual(harness.sparse_calls[0][0].tolist(), [20])
+
+    def test_large_shared_set_routes_shared_ids_through_sparse(self):
+        """With a shared set above the threshold, shared ids fold into the
+        sparse all_gather (communicating only the rows that actually appear
+        this step) instead of all-reducing the whole shared-set buffer."""
+        harness = _GradHarness(rank=0)
+        # Oracle set (the unknown path never triggers); the shared set is
+        # "large" -> sparse routing
+        harness._dense_shared_max_rows = 0
+        ids = torch.tensor([10, 20, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [2.0, 2.0], [4.0, 4.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+
+        # dense is not issued; the shared ids (10, 30) go through a single
+        # sparse aggregation
+        self.assertEqual(harness.dense_calls, [])
+        self.assertEqual(len(harness.sparse_calls), 1)
+        s_ids, s_grads, _ = harness.sparse_calls[0]
+        self.assertEqual(s_ids.tolist(), [10, 30])
+        self.assertEqual(s_grads.tolist(), [[1.0, 1.0], [4.0, 4.0]])
+        # the local-only id 20 is still applied immediately
+        self.assertEqual(len(harness.kv_client.best_effort_applies), 1)
+        self.assertEqual(harness.kv_client.best_effort_applies[0][1].tolist(), [20])
+
+    def test_large_shared_set_sparse_issued_even_with_empty_bucket(self):
+        """Under sparse routing an empty local aggregation bucket must not
+        skip the all_gather: the peer may have shared ids to exchange, and
+        an early exit would hang it."""
+        harness = _GradHarness(rank=0)
+        harness._dense_shared_max_rows = 0
+        # This batch has only the local-only id 20 (oracle-proven); the
+        # aggregation bucket is empty
+        ids = torch.tensor([20], dtype=torch.int64)
+        grads = torch.tensor([[2.0, 2.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+
+        self.assertEqual(harness.dense_calls, [])
+        self.assertEqual(len(harness.sparse_calls), 1)
+        self.assertEqual(harness.sparse_calls[0][0].numel(), 0)
 
     def test_barrier_applies_dense_and_sparse_aggregates_together(self):
         harness = _GradHarness(rank=0)
@@ -391,13 +590,16 @@ class TestBagPipeUnknownIdAggregation(unittest.TestCase):
 
         harness._wait_pending_sync_now()
 
-        # 两路聚合结果合成一次原位 apply + 一次 PS 推送
+        # The two aggregation results merge into one in-place apply; the
+        # applied rows are dirty (their local value is now ahead of the PS).
         self.assertEqual(len(harness.kv_client.best_effort_applies), 1)
         _, a_ids, a_grads, a_lr = harness.kv_client.best_effort_applies[0]
         self.assertEqual(sorted(a_ids.tolist()), [10, 20])
         self.assertEqual(a_grads.shape, (2, 2))
         self.assertEqual(a_lr, 0.25)
-        self.assertEqual(len(harness.kv_client.async_updates), 1)
+        self.assertEqual(len(harness.kv_client.async_updates), 0)
+        self.assertTrue(bool(harness._dirty_dev[10].item()))
+        self.assertTrue(bool(harness._dirty_dev[20].item()))
         self.assertEqual(harness._pending_sync_now_work, None)
 
 
@@ -417,7 +619,8 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         self.assertEqual(l_grads.tolist(), [[2.0, 2.0]])
         self.assertEqual(l_lr, 0.1)
         self.assertTrue(bool(harness._dirty_dev[20].item()))
-        # lookup 回填登记: 驻留 + TTL 续期 (batch 5 + margin 256)
+        # Lookup backfill registration: resident + TTL renewed
+        # (batch 5 + margin 256)
         self.assertTrue(bool(harness._cached_dev[20].item()))
         self.assertEqual(int(harness._ttl_dev[20].item()), 5 + 256)
         # shared ids must NOT be applied locally
@@ -427,6 +630,36 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         self.assertEqual(d_grads.shape, (2, 2))
         # no PS push from update_grads itself (persistence is at the barrier)
         self.assertEqual(harness.kv_client.updates, [])
+
+    def test_update_grads_without_lookup_info_keeps_shared_mirror_and_dirty(self):
+        """Production lookups never record residency info (``last_lookup``
+        is None: ``_bagpipe_last_lookup_resident`` has no production
+        writer).  update_grads must leave the mirror untouched then.
+
+        Clearing it dropped every shared row from the mirror each step: the
+        fill marks them, the clear unmarked them, and the deferred
+        aggregated apply skipped their dirty mark -- so with eviction-based
+        persistence (no per-step PS push, no anti-entropy repair) their
+        increments never reached the PS.  This is the production 2-rank
+        correctness path, which the residency-recording protocol above does
+        not cover."""
+        harness = _GradHarness(rank=0)
+        ids = torch.tensor([10, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [4.0, 4.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+        harness._wait_pending_sync_now()
+
+        # Shared rows stay mirror-resident through update_grads ...
+        self.assertTrue(bool(harness._cached_dev[10].item()))
+        self.assertTrue(bool(harness._cached_dev[30].item()))
+        # ... and the barrier apply marks them dirty, so the eviction
+        # writeback / shutdown flush persist their aggregated increments.
+        self.assertTrue(bool(harness._dirty_dev[10].item()))
+        self.assertTrue(bool(harness._dirty_dev[30].item()))
+        self.assertEqual(
+            len(harness.kv_client.best_effort_applies), 1
+        )
 
     def test_update_grads_uses_authoritative_lookup_residency(self):
         harness = _GradHarness(rank=0)
@@ -471,11 +704,14 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         self.assertEqual(harness._stats["bagpipe_insert_failures"], 1.0)
 
     def test_update_grads_single_all_reduce_on_side_stream(self):
-        """合并 now/later: 全部共享 id 走单次 all_reduce (侧流), 不再按
-        重现窗口切两条路 (两条路调度相同, 双路只是多付一次 6MB all_reduce)。"""
+        """Merged now/later: all shared ids go through a single all_reduce
+        (side stream), no longer split into two paths by the recurrence
+        window (both paths had identical scheduling; the split only paid
+        an extra 6MB all_reduce)."""
         harness = _GradHarness(rank=0)
         harness._sync_later_stream = mock.sentinel.side_stream
-        # id 10 将在批 6 重现 (原 now), id 30 最近一次就是本批 (原 later)
+        # id 10 recurs at batch 6 (formerly now), id 30's last use is
+        # this very batch (formerly later)
         harness._latest_dev[torch.tensor([10])] = 6
         harness._latest_dev[torch.tensor([30])] = 5
         ids = torch.tensor([10, 30], dtype=torch.int64)
@@ -489,7 +725,10 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         self.assertIs(call_stream, mock.sentinel.side_stream)
         self.assertEqual(harness._stats["bagpipe_sync_now_ids"], 2.0)
 
-    def test_barrier_applies_aggregated_on_all_ranks_and_pushes_on_rank0(self):
+    def test_barrier_applies_aggregated_on_all_ranks_without_ps_push(self):
+        """No rank pushes to the PS at the barrier anymore (official BagPipe
+        semantics): every rank applies the aggregate in place and marks the
+        rows dirty; persistence rides on the eviction writeback."""
         for rank in (0, 1):
             harness = _GradHarness(rank=rank)
             harness._pending_sync_now_work = _DenseWork(
@@ -507,66 +746,37 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
             self.assertEqual(a_lr, 0.25)
             # no rank invalidates the aggregated ids anymore
             self.assertEqual(harness.kv_client.invalidations, [])
-            # rank0 persists via the depth-1 async pipeline, other ranks don't
-            if rank == 0:
-                self.assertEqual(len(harness.kv_client.async_updates), 1)
-                self.assertIsNotNone(harness._pending_ps_push_handle)
-            else:
-                self.assertEqual(harness.kv_client.async_updates, [])
-                self.assertIsNone(harness._pending_ps_push_handle)
+            # no rank pushes to the PS (no per-step persistence traffic)
+            self.assertEqual(harness.kv_client.async_updates, [])
+            self.assertEqual(harness.kv_client.updates, [])
+            # the applied row is dirty: local value != PS value
+            self.assertTrue(bool(harness._dirty_dev[10].item()))
             # entries stay cached (in-place update keeps them valid)
             self.assertTrue(bool(harness._cached_dev[10].item()))
 
-    def test_anti_entropy_invalidates_sample_on_interval(self):
+    def test_aggregated_apply_marks_only_resident_rows_dirty(self):
+        """A row the mirror does not hold was skipped by the best-effort
+        apply, so it must not be marked dirty -- the shutdown flush would
+        otherwise read undefined bytes for it and corrupt the PS."""
         harness = _GradHarness(rank=0)
-        harness._anti_entropy_step = 49
-        harness._anti_entropy_interval = 50
-        harness._anti_entropy_ids = 2
-        harness._shared_ids = {10, 20, 30}
-        harness._shared_ids_tensor = torch.tensor([10, 20, 30], dtype=torch.int64)
-        harness._pending_sync_now_work = None
-
-        harness._wait_pending_sync_now()
-
-        self.assertEqual(len(harness.kv_client.invalidations), 1)
-        invalidated = harness.kv_client.invalidations[0][1].tolist()
-        self.assertEqual(len(invalidated), 2)
-        self.assertTrue(set(invalidated).issubset({10, 20, 30}))
-        for fid in invalidated:
-            self.assertFalse(bool(harness._cached_dev[fid].item()))
-            self.assertFalse(bool(harness._dirty_dev[fid].item()))
-            self.assertEqual(int(harness._ttl_dev[fid].item()), 0)
-        # off-interval steps do nothing
-        harness._anti_entropy_step = 50
-        harness._wait_pending_sync_now()
-        self.assertEqual(len(harness.kv_client.invalidations), 1)
-
-    def test_anti_entropy_drops_rows_the_cache_no_longer_holds(self):
-        """Same reconciliation as eviction: a sampled row that C++ does not
-        hold must leave the mirror, otherwise it stays flagged resident."""
-        harness = _GradHarness(rank=0)
-        harness._anti_entropy_step = 49
-        harness._anti_entropy_interval = 50
-        harness._anti_entropy_ids = 2
-        harness._shared_ids_tensor = torch.tensor([10, 30], dtype=torch.int64)
-        harness._dirty_dev[torch.tensor([10, 30])] = True
-        harness._pending_sync_now_work = None
-        harness.kv_client.invalidate_gpu_cache_with_mask = (
-            lambda name, ids: ids != 30
+        harness._cached_dev[torch.tensor([10, 30])] = False
+        harness._pending_sync_now_work = _DenseWork(
+            torch.tensor([10, 30], dtype=torch.int64),
+            torch.tensor([[1.0, 1.0], [4.0, 4.0]]),
         )
+        harness._pending_sync_now_lr = 0.25
 
         harness._wait_pending_sync_now()
 
-        self.assertFalse(bool(harness._cached_dev[10].item()))
-        self.assertFalse(bool(harness._cached_dev[30].item()))
+        self.assertFalse(bool(harness._dirty_dev[10].item()))
         self.assertFalse(bool(harness._dirty_dev[30].item()))
-        self.assertEqual(int(harness._ttl_dev[30].item()), 0)
 
 
 class TestCompactTranslation(unittest.TestCase):
     def test_consume_stats_snapshot_never_double_counts(self):
-        """consume_stats(reset=False) 是只读快照: GPU 热累加器并入返回值后
-        即清零, 后续调用不得把同一批计数二次计入。"""
+        """consume_stats(reset=False) is a read-only snapshot: the GPU hot
+        accumulators are merged into the returned value and then zeroed;
+        later calls must not count the same batch twice."""
         from ..bagpipe_cache.controller import BagPipeCacheController
 
         ctrl = BagPipeCacheController(
@@ -587,12 +797,15 @@ class TestCompactTranslation(unittest.TestCase):
             ctrl._hot_add("bagpipe_no_sync_ids", torch.tensor(5.0))
             snap1 = ctrl.consume_stats(reset=False)
             self.assertEqual(snap1["bagpipe_no_sync_ids"], 5.0)
-            # 累加器已清零且 _stats 未清 (reset=False 累计语义): 无新计数时
-            # 快照值不变 —— 若旧实现 (reset=False 不清累加器) 则会变成 10.0。
+            # Accumulators zeroed and _stats kept (reset=False accumulates):
+            # with no new counts the snapshot value is unchanged -- the old
+            # behavior (reset=False not zeroing the accumulators) would
+            # have made it 10.0.
             snap2 = ctrl.consume_stats(reset=False)
             self.assertEqual(snap2["bagpipe_no_sync_ids"], 5.0)
-            # reset=True 返回的应是整个累计区间 (5 + 3), 之后清零 ——
-            # 只读快照期间的计数不会被吞也不会重复。
+            # reset=True must return the whole accumulated interval (5+3)
+            # and then zero -- counts during the read-only snapshot period
+            # are neither swallowed nor double-counted.
             ctrl._hot_add("bagpipe_no_sync_ids", torch.tensor(3.0))
             snap3 = ctrl.consume_stats(reset=True)
             self.assertEqual(snap3["bagpipe_no_sync_ids"], 8.0)
@@ -601,9 +814,72 @@ class TestCompactTranslation(unittest.TestCase):
         finally:
             ctrl._cleanup_queue.put(None)
 
+    def test_consume_stats_per_step_rows_and_live_state_snapshots(self):
+        """consume_stats(reset=True) is the per-step export path:
+
+        - state-snapshot keys (lookahead / cleanup_interval / shared_ids)
+          are refreshed from live state on every call, so a mid-training
+          change (dynamic lookahead, prescan building the shared set) is
+          visible in the next row instead of the init-time value;
+        - counts are per-step deltas, not cumulative (each call zeroes);
+        - removed dead keys (write points deleted before stats export
+          ever shipped) stay absent."""
+        from ..bagpipe_cache.controller import BagPipeCacheController
+
+        ctrl = BagPipeCacheController(
+            embedding_module=None,
+            kv_client=None,
+            lookahead_value=4,
+            cleanup_batch_proportion=0.25,
+            cache_capacity=1000,
+            embedding_dim=4,
+            fuse_k=30,
+            table_offsets={"a": 0},
+            master_table_name="t",
+            device=torch.device("cpu"),
+            id_extractor=lambda sf: sf,
+            table_sizes={"a": 100},
+        )
+        try:
+            row1 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row1["bagpipe_lookahead"], 4.0)
+            self.assertEqual(row1["bagpipe_shared_ids"], 0.0)
+            # Dynamic lookahead changes mid-training (opt 9): the next
+            # exported row must reflect the new value, not the frozen
+            # init-time one that reset_stats seeding produced.
+            ctrl._dynamic_lookahead = 8
+            ctrl._shared_ids = {1, 2, 3}
+            row2 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row2["bagpipe_lookahead"], 8.0)
+            self.assertEqual(row2["bagpipe_shared_ids"], 3.0)
+            # Per-step deltas: each reset=True call returns only the counts
+            # accumulated since the previous one.
+            ctrl._hot_add("bagpipe_no_sync_ids", torch.tensor(2.0))
+            ctrl._hot_add("bagpipe_sync_now_ids", torch.tensor(7.0))
+            row3 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row3["bagpipe_no_sync_ids"], 2.0)
+            self.assertEqual(row3["bagpipe_sync_now_ids"], 7.0)
+            row4 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row4["bagpipe_no_sync_ids"], 0.0)
+            self.assertEqual(row4["bagpipe_sync_now_ids"], 0.0)
+            # Dead keys (no write point since before stats export shipped)
+            # must not resurface.
+            for dead in (
+                "bagpipe_prefetch_pruned",
+                "bagpipe_prefetch_local_nosync_kept",
+                "bagpipe_sync_later_ids",
+                "bagpipe_sgd_cache_fallback",
+                "bagpipe_eviction_stream_ms",
+                "bagpipe_eviction_stream_overlap_ms",
+            ):
+                self.assertNotIn(dead, row4)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
     def test_fused_compact_roundtrip_and_space(self):
-        """fused id (table<<fuse_k|row) → compact (table<<shift|row) 往返一致,
-        簿记空间 = num_tables << shift (不被 fuse_k=30 的名义空间撑爆)."""
+        """fused id (table<<fuse_k|row) -> compact (table<<shift|row)
+        round-trips consistently; bookkeeping space = num_tables << shift
+        (not blown up by the nominal fuse_k=30 space)."""
         from ..bagpipe_cache.controller import BagPipeCacheController
 
         ctrl = BagPipeCacheController(
@@ -632,7 +908,8 @@ class TestCompactTranslation(unittest.TestCase):
                 compact.tolist(), [5, (1 << 18) + 7, (1 << 18) + 99]
             )
             self.assertEqual(ctrl._to_fused(compact).tolist(), fused.tolist())
-            # 越界 row (>= stride) 的 compact 会落入下一表区段, 由调用侧过滤
+            # An out-of-range row (>= stride) has its compact land in the
+            # next table's segment; callers filter it
             oob = ctrl._to_compact(torch.tensor([(1 << 30) + 300000]))
             self.assertEqual(
                 ctrl._compact_in_range(oob).numel(), 0
@@ -740,7 +1017,8 @@ class TestPrefetchResidencyValidation(unittest.TestCase):
 
 
 class _EvictionHarness:
-    """BagPipeEvictionMixin 的最小宿主: 身份映射 + 固定 64 槽簿记."""
+    """Minimal host for BagPipeEvictionMixin: identity mapping + fixed
+    64-slot bookkeeping."""
 
     def __init__(self, fused_ids):
         from ..bagpipe_cache.eviction import BagPipeEvictionMixin  # noqa: F401
@@ -761,6 +1039,15 @@ class _EvictionHarness:
         }
         self.written = []
 
+    def _is_distributed(self):
+        return False
+
+    def _get_rank(self):
+        return 0
+
+    def _compact_in_range(self, compact):
+        return compact[compact < self._dirty_dev.numel()]
+
     def _to_compact(self, ids):
         return ids
 
@@ -775,7 +1062,10 @@ class _EvictionHarness:
 
 
 class TestShutdownFlush(unittest.TestCase):
-    def test_flush_writes_dirty_non_shared_and_clears_flags(self):
+    def test_flush_writes_all_dirty_rows_including_shared(self):
+        """With no per-step PS push, a dirty shared row carries unpersisted
+        aggregated increments and MUST be flushed at shutdown (single rank:
+        the owner sharding keeps every row)."""
         from ..bagpipe_cache.eviction import BagPipeEvictionMixin
 
         class _WithMixin(BagPipeEvictionMixin, _EvictionHarness):
@@ -802,13 +1092,13 @@ class TestShutdownFlush(unittest.TestCase):
 
         m.shutdown()
 
-        # 只有 dirty 且非 shared 的 5/20 被写回 (10 是 shared)
-        self.assertEqual(sorted(i.tolist() for _, i in m.written), [[5, 20]])
+        # All dirty rows are written back (5/20 local-only, 10 shared).
+        self.assertEqual(sorted(i.tolist() for _, i in m.written), [[5, 10, 20]])
         self.assertFalse(bool(m._dirty_dev[5].item()))
+        self.assertFalse(bool(m._dirty_dev[10].item()))
         self.assertFalse(bool(m._dirty_dev[20].item()))
-        # shared 的 dirty 标记保留 (其持久化走聚合推送)
-        self.assertTrue(bool(m._dirty_dev[10].item()))
-        # 后台线程退出哨兵 (None) 已投递, 队列无残留任务
+        # The background-thread exit sentinel (None) was posted; no tasks
+        # remain in the queue
         self.assertIsNone(m._cleanup_queue.get_nowait())
 
 
@@ -894,6 +1184,261 @@ class TestAuthoritativeInvalidation(unittest.TestCase):
 
         expired_again = (m._cached_dev & (m._ttl_dev < 101)).nonzero()
         self.assertEqual(expired_again.tolist(), [])
+
+
+class TestPrescanSparseAllGather(unittest.TestCase):
+    """_all_gather_sparse_prescan_async: GPU-side sentinel padding with
+    oracle-provided sizing -- no count exchange, no .item()."""
+
+    def test_padding_compacts_masked_rows_in_order(self):
+        harness = _CommHarness()
+        ids = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]])
+        # rows 0 and 2 are in the bucket; max_n = 3
+        mask = torch.tensor([True, False, True, False])
+        captured = {}
+
+        def fake_all_gather(out_list, tensor, async_op=False):
+            for out in out_list:
+                out.copy_(tensor)
+            captured.setdefault("inputs", []).append(tensor.clone())
+            return _DoneWork()
+
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(comm_module.dist, "all_gather",
+                               side_effect=fake_all_gather):
+            _, _, work = harness._all_gather_sparse_prescan_async(
+                ids, grads, mask, max_n=3
+            )
+            work.wait()
+
+        padded_ids = captured["inputs"][0]
+        # masked ids in cumsum order, remaining rows sentinel-padded
+        self.assertEqual(padded_ids.tolist(), [10, 12, -1])
+        # no count exchange: the payload all_gathers are the only collectives
+        self.assertEqual(len(captured["inputs"]), 2)
+        agg_ids, agg_grads = work.result
+        self.assertEqual(agg_ids.tolist(), [10, 12])
+        self.assertEqual(agg_grads.tolist(), [[2.0, 2.0], [6.0, 6.0]])
+
+    def test_zero_max_skips_collectives(self):
+        harness = _CommHarness()
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(comm_module.dist, "all_gather") as ag:
+            _, _, work = harness._all_gather_sparse_prescan_async(
+                torch.tensor([10], dtype=torch.int64),
+                torch.tensor([[1.0, 1.0]]),
+                torch.tensor([True]),
+                max_n=0,
+            )
+        ag.assert_not_called()
+        self.assertIsNone(work)
+
+    def test_empty_mask_is_all_sentinel(self):
+        harness = _CommHarness()
+
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(
+                 comm_module.dist, "all_gather",
+                 side_effect=_fake_two_rank_all_gather,
+             ):
+            _, _, work = harness._all_gather_sparse_prescan_async(
+                torch.tensor([10, 11], dtype=torch.int64),
+                torch.tensor([[1.0, 1.0], [2.0, 2.0]]),
+                torch.tensor([False, False]),
+                max_n=2,
+            )
+            work.wait()
+
+        agg_ids, _ = work.result
+        self.assertEqual(agg_ids.numel(), 0)
+
+
+class TestPrescanCountExchange(unittest.TestCase):
+    """finalize_prescan also exchanges per-batch shared-ID counts so
+    update_grads can size the sparse all_gather without communication."""
+
+    def _harness_with_batches(self):
+        harness = _SharedIdSetHarness()
+        harness._prescan_unique_ids = {10, 20, 30}
+        harness._prescan_batch_ids = [
+            torch.tensor([10, 20], dtype=torch.int64),
+            torch.tensor([20], dtype=torch.int64),
+            torch.tensor([30], dtype=torch.int64),
+        ]
+        return harness
+
+    def test_finalize_builds_sparse_max_per_batch(self):
+        harness = self._harness_with_batches()
+        # Fake 2-rank all_gather: the peer mirrors our contribution, so the
+        # per-batch maximum equals the local |shared ∩ batch| counts.
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(
+                 comm_module.dist, "all_gather",
+                 side_effect=_fake_two_rank_all_gather,
+             ):
+            harness.finalize_prescan()
+        # shared set from the fake exchange = {10, 20, 30} (both "ranks"
+        # contribute the same ids); per-batch hits: [2, 1, 1]
+        self.assertEqual(harness._shared_ids, {10, 20, 30})
+        self.assertEqual(harness._prescan_sparse_max, [2, 1, 1])
+        self.assertEqual(harness._prescan_batch_numels, [2, 1, 1])
+        # per-batch tensors are released after the exchange
+        self.assertIsNone(harness._prescan_batch_ids)
+
+    def test_finalize_without_batches_leaves_metadata_empty(self):
+        harness = _SharedIdSetHarness()
+        harness._prescan_unique_ids = {10, 20}
+        with mock.patch.object(comm_module.dist, "get_world_size", return_value=2), \
+             mock.patch.object(
+                 comm_module.dist, "all_gather",
+                 side_effect=_fake_two_rank_all_gather,
+             ):
+            harness.finalize_prescan()
+        self.assertIsNone(harness._prescan_sparse_max)
+        self.assertEqual(harness._prescan_batch_numels, [])
+
+
+class TestPrescanRoutingInUpdateGrads(unittest.TestCase):
+    def test_oracle_path_routes_through_prescan_sizing(self):
+        harness = _GradHarness(rank=0)
+        harness._dense_shared_max_rows = 0  # force sparse routing
+        harness._prescan_sparse_max = [2, 1, 4]
+        ids = torch.tensor([10, 20, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [2.0, 2.0], [4.0, 4.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=4)
+        # batch_num 4 wraps to prescan index 4 % 3 = 1 -> max_n = 1
+        self.assertEqual(len(harness.prescan_sparse_calls), 1)
+        _, _, mask, max_n, _ = harness.prescan_sparse_calls[0]
+        self.assertEqual(max_n, 1)
+        self.assertEqual(mask.tolist(), [True, False, True])
+        # the count-exchange path must not run alongside
+        self.assertEqual(harness.sparse_calls, [])
+
+    def test_fallback_path_used_without_prescan_metadata(self):
+        harness = _GradHarness(rank=0)
+        harness._dense_shared_max_rows = 0
+        ids = torch.tensor([10, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [4.0, 4.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=0)
+
+        self.assertEqual(harness.prescan_sparse_calls, [])
+        self.assertEqual(len(harness.sparse_calls), 1)
+        s_ids, _, _ = harness.sparse_calls[0]
+        self.assertEqual(s_ids.tolist(), [10, 30])
+
+    def test_incomplete_set_never_uses_prescan_sizing(self):
+        """The unknown-ownership bucket includes ids outside the shared set,
+        so its size is not bounded by the prescan counts."""
+        harness = _GradHarness(rank=0)
+        harness._shared_ids_complete = False
+        harness._dense_shared_max_rows = 0
+        harness._prescan_sparse_max = [2]
+        ids = torch.tensor([10, 20], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [2.0, 2.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=0)
+
+        self.assertEqual(harness.prescan_sparse_calls, [])
+        self.assertEqual(len(harness.sparse_calls), 1)
+        # shared 10 + unknown 20 both fold into the count-exchange path
+        self.assertEqual(harness.sparse_calls[0][0].tolist(), [10, 20])
+
+
+class TestPrescanAlignmentTripwire(unittest.TestCase):
+    """enqueue fails loudly when the training order diverged from prescan."""
+
+    def _controller(self):
+        from ..bagpipe_cache.controller import BagPipeCacheController
+
+        class KV:
+            def contains_gpu_cache(self, keys):
+                return torch.ones_like(keys, dtype=torch.bool)
+
+        return BagPipeCacheController(
+            embedding_module=None,
+            kv_client=KV(),
+            lookahead_value=4,
+            cleanup_batch_proportion=0.25,
+            cache_capacity=10,
+            embedding_dim=4,
+            fuse_k=6,
+            table_offsets={"a": 0},
+            master_table_name="t",
+            device=torch.device("cpu"),
+            id_extractor=lambda sf: sf,
+            table_sizes={"a": 100},
+        )
+
+    def test_enqueue_rejects_diverged_batch(self):
+        ctrl = self._controller()
+        try:
+            ctrl._prescan_batch_numels = [3, 2]
+            with self.assertRaisesRegex(RuntimeError, "alignment broken"):
+                ctrl.enqueue(torch.tensor([7, 8], dtype=torch.int64))
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_enqueue_accepts_matching_and_wrapped_batches(self):
+        ctrl = self._controller()
+        try:
+            ctrl._prescan_batch_numels = [3, 2]
+            ticket = ctrl.enqueue(torch.tensor([7, 8, 9], dtype=torch.int64))
+            self.assertEqual(int(ticket[0].numel()), 3)
+            ctrl.enqueue(torch.tensor([1, 2], dtype=torch.int64))
+            # batch 2 wraps to prescan index 0 (numel 3)
+            ctrl.enqueue(torch.tensor([1, 2, 3], dtype=torch.int64))
+            self.assertEqual(ctrl._next_enqueue_batch, 3)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+
+class TestSharedRowEvictionWriteback(unittest.TestCase):
+    """Eviction writeback keys on dirty alone: a shared row advanced by the
+    aggregated apply is persisted when evicted (no per-step push)."""
+
+    def _harness(self):
+        from ..bagpipe_cache.eviction import BagPipeEvictionMixin
+
+        class _WithMixin(BagPipeEvictionMixin, _EvictionHarness):
+            pass
+
+        m = _WithMixin([5, 10, 20])
+        m._ttl_dev[torch.tensor([5, 10, 20])] = 100
+        m._cleanup_queue = queue.Queue()
+
+        class KV:
+            def gpu_cache_lookup_flat(self, keys, embedding_dim):
+                n = int(keys.numel())
+                return torch.arange(
+                    n * embedding_dim, dtype=torch.float32
+                ).reshape(n, embedding_dim)
+
+            def invalidate_gpu_cache_with_mask(self, name, ids):
+                return torch.ones_like(ids, dtype=torch.bool)
+
+        m.kv_client = KV()
+        m.master_table_name = "t"
+        return m
+
+    def test_dirty_shared_row_is_written_back_at_eviction(self):
+        m = self._harness()
+        m._shared_ids_tensor = torch.tensor([10], dtype=torch.int64)
+        # 10 is shared and dirty (aggregated apply advanced it); 5 is dirty
+        # local-only; 20 is clean (never applied) -> no writeback needed.
+        m._dirty_dev[torch.tensor([5, 10])] = True
+
+        m._evict_entries(torch.tensor([5, 10, 20]))
+
+        wb_ids, _, _ = m._cleanup_queue.get_nowait()
+        self.assertEqual(wb_ids.tolist(), [5, 10])
+
+    def test_clean_rows_skip_writeback(self):
+        m = self._harness()
+        m._evict_entries(torch.tensor([5, 10, 20]))
+        self.assertTrue(m._cleanup_queue.empty())
 
 
 if __name__ == "__main__":

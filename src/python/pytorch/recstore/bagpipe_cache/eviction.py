@@ -3,8 +3,9 @@
 Handles TTL-based eviction, value writeback to PS, async background thread,
 and dynamic lookahead adjustment (opt 4, 5, 6, 7, 9).
 
-驱逐判定是扁平张量上的向量化全空间掩码扫描 (~5.2M 元素, ~0.1ms),
-与原版 BagPipe 的 numpy 数组语义同构; 没有任何逐 fid 的 Python 循环。
+Eviction decisions are a vectorized full-space mask scan over the flat
+tensors (~5.2M elements, ~0.1ms), isomorphic to the original BagPipe's
+numpy-array semantics; there is no per-fid Python loop.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import queue
 import time
 
 import torch
+import torch.distributed as dist
 
 logger = logging.getLogger(__name__)
 
@@ -31,35 +33,52 @@ class BagPipeEvictionMixin:
     ``_lookahead_adjust_interval``, ``cleanup_batch_proportion``,
     ``cleanup_interval``, ``_cached_count()``, ``_is_distributed()``,
     ``_get_rank()``, ``_capacity_watermark``, ``_max_evict_per_cleanup``,
-    ``_to_compact()``, ``_to_fused()``.
+    ``_to_compact()``, ``_to_fused()``, ``_compact_in_range()``.
     """
 
     def cleanup(self, current_batch: int) -> None:
-        """Evict expired cache entries + dynamic lookahead adjustment."""
+        """Evict expired cache entries + dynamic lookahead adjustment.
+
+        Ordering invariant: in the per-step lifecycle (prefill barrier ->
+        lookup -> update_grads -> this cleanup) a row with a pending
+        aggregated gradient always carries ``ttl = batch + _ttl_margin``, so
+        the TTL scan cannot select it and the capacity fallback (topk lowest
+        ttl) practically never does.  Evicting such a row would drop that
+        increment from this rank's replica (the barrier apply is
+        best-effort on resident rows).  Nothing may run a cleanup between
+        the final update_grads and shutdown() -- shutdown consumes the
+        pending work first, and the runner's hook order guarantees the
+        rest.
+        """
         t_start = time.perf_counter()
 
-        # 共享集构建是集合通信, 因此从步骤对齐的钩子触发 (on_step_end 每步每
-        # rank 都会走到), 而不是在 update_grads 里按各 rank 自己的批计数触发。
+        # Building the shared-ID set is a collective, so it is triggered
+        # from the step-aligned hook (on_step_end, reached by every rank
+        # every step) rather than from update_grads, where each rank's own
+        # batch counter could desynchronize the ranks.
         self._maybe_build_shared_id_set(current_batch)
 
         if self._cached_dev is not None:
-            # 到期判定: 驻留且 ttl < 当前批 (向量化全空间扫描)
+            # Expiry test: resident and ttl < current batch (vectorized
+            # full-space scan)
             expired_mask = self._cached_dev & (self._ttl_dev < current_batch)
             expired_ids = expired_mask.nonzero(as_tuple=False).squeeze(1)
             if expired_ids.numel() > 0:
-                # 驱逐上限: 超出的条目保持旧 ttl, 下一次 cleanup 再扫出
+                # Eviction cap: excess rows keep their old ttl and are
+                # picked up by the next cleanup
                 n_evict = min(
                     int(expired_ids.numel()), self._max_evict_per_cleanup
                 )
                 if n_evict < expired_ids.numel():
-                    # 优先逐 ttl 最低的
+                    # Lowest ttl first
                     order = self._ttl_dev[expired_ids].argsort()
                     expired_ids = expired_ids[order[:n_evict]].contiguous()
                 else:
                     expired_ids = expired_ids.contiguous()
                 self._evict_entries(expired_ids)
 
-            # 容量兜底: 超过高水位时按 ttl 最低(最久未用)继续驱逐到水位以下
+            # Capacity backstop: above the high watermark, keep evicting
+            # by lowest ttl (least recently used) until below the watermark
             capacity = self.cache_capacity
             if capacity > 0:
                 high_water = int(capacity * self._capacity_watermark)
@@ -159,10 +178,16 @@ class BagPipeEvictionMixin:
     def _evict_entries(self, expired_ids: torch.Tensor) -> None:
         """Evict expired entries: write back values + invalidate (opt 4, 6).
 
-        ``expired_ids`` 是 compact 索引 (来自簿记张量的 nonzero);
-        kv_client / GPU cache 的 key 空间是 fused id, 调用前统一转换。
-        只有 dirty 且非 shared 的条目需要值写回 (no_sync 的 PS 持久化);
-        shared 条目已由 barrier 的聚合推送持久化, 本地副本直接失效即可。
+        ``expired_ids`` are compact indices (from the bookkeeping tensors'
+        nonzero); the kv_client / GPU cache key space is fused id, converted
+        before the call.  Only dirty entries need a value writeback: dirty is
+        the single source of truth for "local value != PS value", set by the
+        local-only apply AND by the aggregated apply (there is no per-step PS
+        push anymore).  Several ranks may write back the same shared row --
+        every replica applied the same aggregate sequence, and the per-step
+        prefill barrier bounds the inter-rank skew to ~1 step of increments,
+        so last-writer-wins loses at most one increment (the same bound the
+        official BagPipe accepts).
 
         Values are read before invalidation (the cache still holds them), but
         only rows the C++ cache actually reports as removed are written back:
@@ -175,12 +200,7 @@ class BagPipeEvictionMixin:
         requested_evictions = expired_ids
 
         dirty_m = self._dirty_dev[expired_ids]
-        shared_t = self._shared_ids_tensor
-        if shared_t is not None and shared_t.numel() > 0:
-            shared_m = torch.isin(expired_ids, self._to_compact(shared_t))
-        else:
-            shared_m = torch.zeros_like(dirty_m)
-        wb_mask = dirty_m & ~shared_m
+        wb_mask = dirty_m
         wb_ids = expired_ids[wb_mask]
         wb_vals = None
         wb_event = None
@@ -250,17 +270,12 @@ class BagPipeEvictionMixin:
     def shutdown(self) -> None:
         """Signal the background thread to exit and flush pending work."""
         try:
+            # Consumes the last deferred aggregation first: its aggregated
+            # apply marks rows dirty, and the flush below is what persists
+            # them.
             self._wait_pending_sync_now()
         except Exception:
             pass
-        # rank0 深度-1 流水线上未完成的持久化推送
-        pending_push = getattr(self, "_pending_ps_push_handle", None)
-        if pending_push is not None:
-            try:
-                self.kv_client.wait(pending_push)
-            except Exception:
-                pass
-            self._pending_ps_push_handle = None
         try:
             while True:
                 try:
@@ -290,12 +305,15 @@ class BagPipeEvictionMixin:
         self._cleanup_queue.put(None)
 
     def _flush_dirty_at_shutdown(self) -> None:
-        """训练结束时把仍在 cache 的 no_sync (dirty 且非 shared) 值写回 PS。
+        """Flush every dirty row still in the cache to the PS at shutdown.
 
-        容量充裕时 TTL 几乎不会在训练中途到期 (margin 覆盖重现间隔,
-        eviction 是唯一的常规写回触发点), 剩余 dirty 条目必须在此
-        统一落盘, 否则 no_sync 的本地 SGD 增量在进程退出时丢失。
-        分块读写以约束峰值显存 (~32MB/块)。
+        With no per-step PS push, dirty covers local-only rows AND shared
+        rows advanced by the aggregated applies (any such row left unflushed
+        would lose its increments at process exit).  Shared rows are sharded
+        across ranks by their position in the sorted shared set, so each row
+        has exactly one writer: ranks may finish a step apart, and duplicate
+        writers would race last-writer-wins on the final values.  Reads and
+        writes are chunked to bound peak memory (~32MB per chunk).
         """
         if self._dirty_dev is None:
             return
@@ -304,8 +322,26 @@ class BagPipeEvictionMixin:
         except Exception:
             return
         shared_t = self._shared_ids_tensor
-        if shared_t is not None and shared_t.numel() > 0:
-            dirty_mask[self._to_compact(shared_t)] = False
+        if (
+            shared_t is not None
+            and shared_t.numel() > 0
+            and bool(dirty_mask.any().item())
+        ):
+            shared_compact = self._to_compact(shared_t)
+            shared_compact = shared_compact[
+                shared_compact < self._dirty_dev.numel()
+            ]
+            dirty_shared = dirty_mask[shared_compact]
+            keep = dirty_shared
+            if self._is_distributed():
+                world = dist.get_world_size()
+                rank = self._get_rank()
+                owner = (torch.arange(
+                    shared_compact.numel(), device=shared_compact.device
+                ) % world) == rank
+                keep = dirty_shared & owner
+            dirty_mask[shared_compact] = False
+            dirty_mask[shared_compact[keep]] = True
         chunk = 65536
         total = int(dirty_mask.sum().item())
         if total == 0:
@@ -329,6 +365,7 @@ class BagPipeEvictionMixin:
                     logger.warning("[BagPipe] shutdown writeback failed: %s", exc)
                 self._stats["bagpipe_writeback_ids"] += float(ids_fused.numel())
                 done += int(ids_fused.numel())
-            # 无论写回成败都清标记, 防止死循环
+            # Clear the flag whether or not the writeback succeeded, so the
+            # chunking loop cannot spin forever.
             dirty_mask[ids] = False
             self._dirty_dev[ids] = False
