@@ -301,7 +301,18 @@ class BagPipeGradMixin:
             self._insert_failures += int(failed_mask.sum().item())
             self._stats["bagpipe_insert_failures"] = float(self._insert_failures)
         else:
-            self._cached_dev[current_compact] = False
+            # No authoritative residency info for this batch: the production
+            # lookup path records none (``_bagpipe_last_lookup_resident`` has
+            # no production writer).  Leave the mirror untouched.  Clearing
+            # here dropped every shared row from the mirror each step -- the
+            # fill marks them, this path unmarked them, and the deferred
+            # aggregated apply then skipped their dirty mark, so their
+            # increments never reached the PS (no per-step push, no
+            # anti-entropy repair exists to recover them).
+            # Stale bits are tolerated downstream: the eviction writeback
+            # keeps only rows the invalidator actually removed, and the
+            # all-hits lookup revalidates residency via contains_gpu_cache.
+            pass
 
         # ---- no_sync (local-only): immediate best-effort in-place SGD ----
         self._hot_add("bagpipe_no_sync_ids", local_mask.sum())

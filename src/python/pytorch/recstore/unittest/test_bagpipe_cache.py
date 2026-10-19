@@ -631,6 +631,36 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         # no PS push from update_grads itself (persistence is at the barrier)
         self.assertEqual(harness.kv_client.updates, [])
 
+    def test_update_grads_without_lookup_info_keeps_shared_mirror_and_dirty(self):
+        """Production lookups never record residency info (``last_lookup``
+        is None: ``_bagpipe_last_lookup_resident`` has no production
+        writer).  update_grads must leave the mirror untouched then.
+
+        Clearing it dropped every shared row from the mirror each step: the
+        fill marks them, the clear unmarked them, and the deferred
+        aggregated apply skipped their dirty mark -- so with eviction-based
+        persistence (no per-step PS push, no anti-entropy repair) their
+        increments never reached the PS.  This is the production 2-rank
+        correctness path, which the residency-recording protocol above does
+        not cover."""
+        harness = _GradHarness(rank=0)
+        ids = torch.tensor([10, 30], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0], [4.0, 4.0]])
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+        harness._wait_pending_sync_now()
+
+        # Shared rows stay mirror-resident through update_grads ...
+        self.assertTrue(bool(harness._cached_dev[10].item()))
+        self.assertTrue(bool(harness._cached_dev[30].item()))
+        # ... and the barrier apply marks them dirty, so the eviction
+        # writeback / shutdown flush persist their aggregated increments.
+        self.assertTrue(bool(harness._dirty_dev[10].item()))
+        self.assertTrue(bool(harness._dirty_dev[30].item()))
+        self.assertEqual(
+            len(harness.kv_client.best_effort_applies), 1
+        )
+
     def test_update_grads_uses_authoritative_lookup_residency(self):
         harness = _GradHarness(rank=0)
         ids = torch.tensor([10, 20, 30], dtype=torch.int64)
