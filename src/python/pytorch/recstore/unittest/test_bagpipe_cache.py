@@ -814,6 +814,68 @@ class TestCompactTranslation(unittest.TestCase):
         finally:
             ctrl._cleanup_queue.put(None)
 
+    def test_consume_stats_per_step_rows_and_live_state_snapshots(self):
+        """consume_stats(reset=True) is the per-step export path:
+
+        - state-snapshot keys (lookahead / cleanup_interval / shared_ids)
+          are refreshed from live state on every call, so a mid-training
+          change (dynamic lookahead, prescan building the shared set) is
+          visible in the next row instead of the init-time value;
+        - counts are per-step deltas, not cumulative (each call zeroes);
+        - removed dead keys (write points deleted before stats export
+          ever shipped) stay absent."""
+        from ..bagpipe_cache.controller import BagPipeCacheController
+
+        ctrl = BagPipeCacheController(
+            embedding_module=None,
+            kv_client=None,
+            lookahead_value=4,
+            cleanup_batch_proportion=0.25,
+            cache_capacity=1000,
+            embedding_dim=4,
+            fuse_k=30,
+            table_offsets={"a": 0},
+            master_table_name="t",
+            device=torch.device("cpu"),
+            id_extractor=lambda sf: sf,
+            table_sizes={"a": 100},
+        )
+        try:
+            row1 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row1["bagpipe_lookahead"], 4.0)
+            self.assertEqual(row1["bagpipe_shared_ids"], 0.0)
+            # Dynamic lookahead changes mid-training (opt 9): the next
+            # exported row must reflect the new value, not the frozen
+            # init-time one that reset_stats seeding produced.
+            ctrl._dynamic_lookahead = 8
+            ctrl._shared_ids = {1, 2, 3}
+            row2 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row2["bagpipe_lookahead"], 8.0)
+            self.assertEqual(row2["bagpipe_shared_ids"], 3.0)
+            # Per-step deltas: each reset=True call returns only the counts
+            # accumulated since the previous one.
+            ctrl._hot_add("bagpipe_no_sync_ids", torch.tensor(2.0))
+            ctrl._hot_add("bagpipe_sync_now_ids", torch.tensor(7.0))
+            row3 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row3["bagpipe_no_sync_ids"], 2.0)
+            self.assertEqual(row3["bagpipe_sync_now_ids"], 7.0)
+            row4 = ctrl.consume_stats(reset=True)
+            self.assertEqual(row4["bagpipe_no_sync_ids"], 0.0)
+            self.assertEqual(row4["bagpipe_sync_now_ids"], 0.0)
+            # Dead keys (no write point since before stats export shipped)
+            # must not resurface.
+            for dead in (
+                "bagpipe_prefetch_pruned",
+                "bagpipe_prefetch_local_nosync_kept",
+                "bagpipe_sync_later_ids",
+                "bagpipe_sgd_cache_fallback",
+                "bagpipe_eviction_stream_ms",
+                "bagpipe_eviction_stream_overlap_ms",
+            ):
+                self.assertNotIn(dead, row4)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
     def test_fused_compact_roundtrip_and_space(self):
         """fused id (table<<fuse_k|row) -> compact (table<<shift|row)
         round-trips consistently; bookkeeping space = num_tables << shift

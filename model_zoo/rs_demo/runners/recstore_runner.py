@@ -801,6 +801,9 @@ class RecStoreRunner(BenchmarkRunner):
                 row["loss"] = float(loss.detach().float().cpu().item())
                 _merge_consumed_perf_stats(row, _consume_perf_stats(embedding_module))
                 row["step_sync_wait_ms"] = timer.finish()
+                # After the device drain point: readbacks here (stats
+                # draining) add no hidden wait to the phase timers above.
+                read_path.after_step_sync(row)
                 row["dense_compute_ms"] = (
                     row["dense_fwd_ms"]
                     + row["backward_ms"]

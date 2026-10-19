@@ -90,7 +90,6 @@ class BagPipeCommMixin:
             len(self._shared_ids),
             len(self._init_unique_ids) - len(self._shared_ids),
         )
-        self._stats["bagpipe_shared_ids"] = float(len(self._shared_ids))
         self._init_unique_ids = set()
 
     def _build_shared_id_set_from(
@@ -159,7 +158,6 @@ class BagPipeCommMixin:
             return
         self._build_shared_id_set_from(self._prescan_unique_ids, complete=True)
         self._prescan_done = True
-        self._stats["bagpipe_shared_ids"] = float(len(self._shared_ids))
         total_unique = len(self._prescan_unique_ids)
         logger.info(
             "[BagPipe] oracle prescan: %d shared IDs, %d local-only, "

@@ -235,9 +235,6 @@ class BagPipeCacheController(
         self._dense_shared_max_rows = int(
             os.environ.get("RECSTORE_BAGPIPE_DENSE_SHARED_MAX_ROWS", "4096")
         )
-        self._stats["bagpipe_no_sync_ids"] = 0.0
-        self._stats["bagpipe_unknown_aggregated_ids"] = 0.0
-        self._stats["bagpipe_shared_ids"] = 0.0
 
     # ------------------------------------------------------------------
     #  Public API (compatible with LookaheadPrefetcher where possible)
@@ -263,41 +260,37 @@ class BagPipeCacheController(
         return self.lookahead_value
 
     def reset_stats(self) -> None:
+        # Per-step counters/timers only.  State-snapshot keys
+        # (lookahead / cleanup_interval / shared-set size) are written in
+        # consume_stats from live state -- seeding them here would freeze
+        # them at init values, because reset_stats never runs mid-training
+        # with reset=False consumers.
         self._stats = {
-            "bagpipe_lookahead": float(self.lookahead_value),
-            "bagpipe_cleanup_interval": float(self.cleanup_interval),
             "bagpipe_cache_entries": 0.0,
             "bagpipe_dirty_entries": 0.0,
             "bagpipe_prefetch_batches": 0.0,
             "bagpipe_prefetch_ids": 0.0,
             "bagpipe_prefetch_skip_cached": 0.0,
-            "bagpipe_prefetch_pruned": 0.0,
-            "bagpipe_prefetch_local_nosync_kept": 0.0,
             "bagpipe_prefetch_throttled": 0.0,
             "bagpipe_all_hit_revalidations": 0.0,
             "bagpipe_insert_failures": 0.0,
             "bagpipe_evict_stale_mirror_ids": 0.0,
             "bagpipe_sync_now_overlap_ms": 0.0,
             "bagpipe_sync_now_ids": 0.0,
-            "bagpipe_sync_later_ids": 0.0,
             # __init__ seeds these two separately; omitting them here made
             # reset_stats() (called every step via consume_stats) drop the
             # keys and the next update_grads raise KeyError.
             "bagpipe_no_sync_ids": 0.0,
             "bagpipe_unknown_aggregated_ids": 0.0,
-            "bagpipe_shared_ids": 0.0,
             "bagpipe_evicted_ids": 0.0,
             "bagpipe_writeback_ids": 0.0,
             "bagpipe_sgd_cache_success": 0.0,
-            "bagpipe_sgd_cache_fallback": 0.0,
             "bagpipe_all_reduce_calls": 0.0,
             "bagpipe_all_reduce_ids": 0.0,
             "bagpipe_all_reduce_ms": 0.0,
             "bagpipe_prefill_ms": 0.0,
             "bagpipe_update_ms": 0.0,
             "bagpipe_cleanup_ms": 0.0,
-            "bagpipe_eviction_stream_ms": 0.0,
-            "bagpipe_eviction_stream_overlap_ms": 0.0,
             "bagpipe_prescan_batches": 0.0,
             "bagpipe_prescan_ids": 0.0,
             "bagpipe_prescan_sparse_max_sum": 0.0,
@@ -308,12 +301,20 @@ class BagPipeCacheController(
     def consume_stats(self, *, reset: bool = True) -> Dict[str, float]:
         """Merge current stats into a snapshot.
 
-        Hot counters are drained here (the .item() sits after
-        timer.finish()'s device drain, adding no synchronization to the
-        critical path). The GPU hot accumulators are zeroed regardless of
-        ``reset``: the accumulated value has already been merged into
-        ``_stats``, and leaving it on the device would make the next
-        consume_stats count it a second time.
+        Hot counters are drained here; the host readbacks (hot-accumulator
+        .item()s plus the cached/dirty sums) force device work to complete,
+        so the caller MUST invoke this after its device-drain point (the
+        runner's ``timer.finish()``) -- calling it earlier silently moves
+        device-wait time into the enclosing phase's timer.  The GPU hot
+        accumulators are zeroed regardless of ``reset``: the accumulated
+        value has already been merged into ``_stats``, and leaving it on
+        the device would make the next consume_stats count it a second
+        time.
+
+        State-snapshot keys are refreshed from live state on every call:
+        ``bagpipe_lookahead`` / ``bagpipe_cleanup_interval`` (dynamic
+        values that no write point would otherwise update) and
+        ``bagpipe_shared_ids`` (current shared-set size).
 
         ``reset=False`` is a read-only snapshot: it returns the accumulated
         values but keeps ``_stats``; a later ``reset=True`` call returns the
@@ -325,6 +326,12 @@ class BagPipeCacheController(
             acc.zero_()
         self._stats["bagpipe_cache_entries"] = float(self._cached_count())
         self._stats["bagpipe_dirty_entries"] = float(self._dirty_count())
+        self._stats["bagpipe_lookahead"] = float(self.lookahead_value)
+        self._stats["bagpipe_cleanup_interval"] = float(self.cleanup_interval)
+        shared = self._shared_ids
+        self._stats["bagpipe_shared_ids"] = (
+            float(len(shared)) if shared is not None else 0.0
+        )
         stats = dict(self._stats)
         if reset:
             self.reset_stats()
