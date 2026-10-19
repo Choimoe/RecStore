@@ -228,6 +228,13 @@ class BagPipePlugin(OptimizationPlugin):
             row["bagpipe_cleanup_step_ms"] = (
                 time.perf_counter() - cleanup_start
             ) * 1e3
+            # Surface the controller's cumulative stats (prefill/all_reduce
+            # timings, cache/dirty counts, hit/throttle counters) into the
+            # per-step row: without this the benchmark CSVs cannot answer
+            # "where does the step time go" for the BagPipe path.
+            # consume_stats drains the GPU hot accumulators, so it MUST run
+            # every step regardless of whether the caller inspects the row.
+            self.consume_stats_into(row)
         else:
             row.setdefault("bagpipe_gpu_cache_update_ids", 0)
             row.setdefault("bagpipe_gpu_cache_update_attempt_ids", 0)

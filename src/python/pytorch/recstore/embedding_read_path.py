@@ -438,9 +438,10 @@ class BagPipeReadPath:
         row: dict[str, Any],
     ) -> Any:
         del step, sparse_batch
-        # ticket = (unique_ids, inverse, raw_count) 由 controller 的 enqueue
-        # 产生 (设备端), 训练循环把它透传给 record_pooled_grad 的 prepared
-        # 路径, 免去第二次 unique。
+        # ticket = (unique_ids, inverse, raw_count) comes from the
+        # controller's enqueue (device-side); the training loop threads it
+        # through to record_pooled_grad's prepared path, avoiding a second
+        # unique().
         enqueue_start = time.perf_counter()
         ticket = self._plugin.on_prepare(sparse_features)
         row["bagpipe_enqueue_ms"] = (time.perf_counter() - enqueue_start) * 1e3
