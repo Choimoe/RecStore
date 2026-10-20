@@ -1161,7 +1161,7 @@ bool RcShardServerTransport::RebuildClientLaneIfStale(
     // polling thread, and a sick control plane must not stall request service.
     meta = lane.verbs->RefreshPeerMeta(
         static_cast<std::uint16_t>(client_node_id),
-        FLAGS_rdma_lane_rebuild_poll_timeout_ms);
+        std::max(1, FLAGS_rdma_lane_rebuild_poll_timeout_ms));
   } catch (const std::exception&) {
     return false;
   }
