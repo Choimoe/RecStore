@@ -196,14 +196,38 @@ class BagPipePlugin(OptimizationPlugin):
         if self._controller is not None:
             self._controller.prefill_cache(sparse_features, device)
 
-    def on_step_end(self, step: int, row: Dict[str, Any]) -> None:
-        """Step-end hook: TTL eviction + writeback + stats.
+    def prescan_batch(self, batch_num: int, sparse_features: Any) -> None:
+        """Oracle prescan hook: record a batch's unique IDs before training.
 
-        Called after ``sparse_optimizer.step()`` and ``flush()``.
+        Call once per batch during a pre-training pass over the dataset, then
+        :meth:`finalize_prescan` once at the end.  The resulting shared-ID set
+        is complete, which licenses the local-only fast path in
+        ``update_grads`` (IDs provably untouched by other ranks skip the
+        cross-rank aggregation entirely).  No-op when the plugin is disabled.
+        """
+        if self._controller is not None:
+            self._controller.prescan_batch(batch_num, sparse_features)
+
+    def finalize_prescan(self) -> None:
+        """Build the complete shared-ID set from the prescanned batches.
+
+        Collective (all_gather): every rank must call it after finishing its
+        own prescan pass.  No-op when the plugin is disabled.
+        """
+        if self._controller is not None:
+            self._controller.finalize_prescan()
+
+    def on_step_end(self, step: int, row: Dict[str, Any]) -> None:
+        """Step-end hook: schedule eviction for the next safe prefill point.
+
+        Called after ``sparse_optimizer.step()`` and ``flush()``.  Stats
+        draining deliberately does NOT happen here: the readbacks belong
+        after the runner's ``timer.finish()`` device drain (see
+        :meth:`consume_stats_into`).
         """
         if self._controller is not None:
             cleanup_start = time.perf_counter()
-            self._controller.cleanup(step)
+            self._controller.schedule_cleanup(step)
             row["bagpipe_cleanup_step_ms"] = (
                 time.perf_counter() - cleanup_start
             ) * 1e3
@@ -214,9 +238,18 @@ class BagPipePlugin(OptimizationPlugin):
             row.setdefault("bagpipe_gpu_cache_update_failure_reason", "")
 
     def consume_stats_into(self, row: Dict[str, Any]) -> None:
-        """Merge BagPipe cumulative stats into *row* (does not reset)."""
+        """Merge this step's BagPipe stats into *row* (per-step deltas).
+
+        Must be called exactly once per step, after ``timer.finish()``:
+        ``consume_stats(reset=True)`` drains the GPU hot accumulators and
+        zeroes the cumulative dict, so a call issued before the device
+        drain point would silently move device-wait time into the
+        enclosing phase's timer, and a skipped call would drop that step's
+        counts.  The runner invokes it via the read path's
+        ``after_step_sync`` hook.
+        """
         if self._controller is not None:
-            row.update(self._controller.consume_stats(reset=False))
+            row.update(self._controller.consume_stats(reset=True))
 
     def shutdown(self) -> None:
         """Wait for async work and stop the background cleanup thread."""

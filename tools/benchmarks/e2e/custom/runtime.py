@@ -18,6 +18,42 @@ def _server_entries(servers: tuple[ServerSpec, ...]) -> list[dict[str, Any]]:
     ]
 
 
+def _rdma_fabric_node(node_id: int, role: str) -> dict[str, Any]:
+    # petps_server and the trainer's embedded RDMA client both parse the
+    # rdma_deployment section (ParseResolvedRdmaDeploymentConfig) and resolve
+    # their fabric node by node_id. Defaults match the pc160/commA RoCE v2
+    # fabric (mlx5_3 port 1, gid_index 7 is the routable GID); override for
+    # other clusters via RS_DEMO_RDMA_FABRIC
+    # =device:port:gid_index:mode[:hop_limit:traffic_class:flow_label].
+    parts = os.environ.get("RS_DEMO_RDMA_FABRIC", "mlx5_3:1:7:rocev2").split(":")
+    if len(parts) not in (4, 7):
+        raise ValueError(
+            "RS_DEMO_RDMA_FABRIC must be device:port:gid_index:mode"
+            "[:hop_limit:traffic_class:flow_label]"
+        )
+    device, port, gid_index, mode = parts[:4]
+    node: dict[str, Any] = {
+        "node_id": node_id,
+        "role": role,
+        "device": device,
+        "port": int(port),
+        "gid_index": int(gid_index),
+        "mode": mode,
+    }
+    if mode == "rocev2":
+        hop_limit, traffic_class, flow_label = (
+            parts[4:] if len(parts) == 7 else ("64", "0", "0")
+        )
+        node.update(
+            {
+                "hop_limit": int(hop_limit),
+                "traffic_class": int(traffic_class),
+                "flow_label": int(flow_label),
+            }
+        )
+    return node
+
+
 def estimate_runtime_capacity(num_embeddings: int) -> int:
     # DLRM uses one sparse id per table, so the PS key space spans all tables.
     return max(int(num_embeddings) * SPARSE_FEATURES_PER_SAMPLE * 2, 100_000)
@@ -44,7 +80,7 @@ def build_runtime_config(cfg: BenchmarkConfig, *, transport: str, value_path: Pa
             },
         },
     }
-    return {
+    config = {
         "cache_ps": {
             "ps_type": transport_upper,
             "max_batch_keys_size": 65536,
@@ -61,6 +97,30 @@ def build_runtime_config(cfg: BenchmarkConfig, *, transport: str, value_path: Pa
         },
         "client": servers[0],
     }
+    if transport_upper == "RDMA":
+        # petps_server aborts at startup without this section, and the
+        # trainer's embedded client resolves its identity from it:
+        # RANK/WORLD_SIZE must map onto client nodes at
+        # node_id = num_shards + client_index, and num_clients must equal the
+        # trainer world size (both sides validate this).
+        client_process_count = sum(
+            max(int(client.nproc_per_node), 1) for client in cfg.clients
+        )
+        nodes = [
+            _rdma_fabric_node(index, "server") for index in range(len(servers))
+        ]
+        nodes.extend(
+            _rdma_fabric_node(len(servers) + index, "client")
+            for index in range(client_process_count)
+        )
+        config["rdma_deployment"] = {
+            "deployment_id": f"rs-e2e-{cfg.output_dir.name}",
+            "epoch": 1,
+            "protocol_version": 1,
+            "num_clients": client_process_count,
+            "nodes": nodes,
+        }
+    return config
 
 
 def _wrap_remote(cmd: list[str], *, ssh_host: str, ssh_port: int, cwd: Path) -> list[str]:
@@ -389,6 +449,8 @@ def build_client_command(
                 str(cfg.optimization_cache_capacity),
             ]
         )
+    if cfg.bagpipe_prescan:
+        cmd.append("--optimization-prescan")
     if cfg.optimization_lookahead > 0:
         cmd.extend(["--optimization-lookahead", str(cfg.optimization_lookahead)])
     if cfg.profiler:

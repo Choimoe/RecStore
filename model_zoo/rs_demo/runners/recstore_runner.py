@@ -543,6 +543,45 @@ class RecStoreRunner(BenchmarkRunner):
                     dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
                 )
 
+            # -- BagPipe oracle prescan (issue #278) ---------------------------
+            # One pass over this rank's shard before training so the shared-ID
+            # set is complete: IDs provably local-only then skip the per-step
+            # cross-rank aggregation in update_grads.  Without the prescan the
+            # fallback set only covers the first steps and ~73% of IDs take the
+            # sparse path every step.  Meaningful only for data-parallel runs
+            # (world_size == 1 never aggregates, so the scan would be wasted).
+            if (
+                use_bagpipe
+                and cfg.optimization.prescan
+                and plugin is not None
+                and plugin.is_enabled
+                and use_dist
+            ):
+                prescan_start = time.perf_counter()
+                prescan_batches = 0
+                for dense_b, sparse_b, _labels_b in dataloader:
+                    _, sf = build_kjt_batch_from_dense_sparse_labels(
+                        dense_b, sparse_b, _labels_b, device=device
+                    )
+                    plugin.prescan_batch(prescan_batches, sf)
+                    prescan_batches += 1
+                # finalize_prescan is collective (all_gather of the per-rank
+                # ID unions); shard sizes may differ by a batch, and the
+                # all_gather itself blocks until every rank arrives.
+                plugin.finalize_prescan()
+                _barrier_for_step_alignment(
+                    dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
+                )
+                print(
+                    f"[rs_demo] BagPipe oracle prescan: {prescan_batches} batches "
+                    f"in {time.perf_counter() - prescan_start:.1f}s"
+                )
+            elif cfg.optimization.prescan and use_bagpipe and not use_dist:
+                print(
+                    "[rs_demo] --optimization-prescan ignored: single-rank runs "
+                    "never aggregate gradients across ranks"
+                )
+
             rows: list[dict[str, Any]] = []
             data_iter_state = {"iter": iter(dataloader)}
             prepared_batches: deque = deque()
@@ -762,6 +801,9 @@ class RecStoreRunner(BenchmarkRunner):
                 row["loss"] = float(loss.detach().float().cpu().item())
                 _merge_consumed_perf_stats(row, _consume_perf_stats(embedding_module))
                 row["step_sync_wait_ms"] = timer.finish()
+                # After the device drain point: readbacks here (stats
+                # draining) add no hidden wait to the phase timers above.
+                read_path.after_step_sync(row)
                 row["dense_compute_ms"] = (
                     row["dense_fwd_ms"]
                     + row["backward_ms"]

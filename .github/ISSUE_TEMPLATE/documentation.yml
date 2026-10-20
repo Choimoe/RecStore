@@ -1,0 +1,24 @@
+name: 📚 Documentation
+description: Document questions, errata, requests, etc.
+title: "[Doc]: "
+labels: ["documentation"]
+
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 📚 Description
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 🔍 Suggestion
+      description: |
+        Tell us how we could improve the documentation in this regard.
+
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing 🎉!
