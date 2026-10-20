@@ -45,6 +45,20 @@ DEFINE_int32(rdma_lane_rebuild_poll_ms,
              "Server-side interval between client lane-generation checks in "
              "milliseconds");
 DEFINE_int32(
+    rdma_lane_rebuild_poll_max_ms,
+    500,
+    "Upper bound for the idle backoff of the server-side lane-generation "
+    "check. Each quiet check doubles the interval from "
+    "--rdma_lane_rebuild_poll_ms up to this value; a rebuild resets it. Bounds "
+    "the GetMeta load of an idle deployment while keeping the handshake inside "
+    "--rdma_lane_rebuild_wait_ms");
+DEFINE_int32(
+    rdma_lane_rebuild_poll_timeout_ms,
+    100,
+    "Deadline for the GetMeta call issued by the server-side lane rebuild "
+    "poll. The poll runs on a data-plane polling thread, so it must not "
+    "inherit the 30s control-plane timeout");
+DEFINE_int32(
     rdma_lane_rebuild_cooldown_ms,
     1000,
     "Minimum interval between rebuild attempts on the same lane, so a "

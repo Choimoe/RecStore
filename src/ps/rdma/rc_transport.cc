@@ -702,7 +702,10 @@ bool RcShardClientTransport::RebuildLane(int qp_index) {
   // peer rebuilt at least once since we took this snapshot", not "the peer
   // caught up to our counter".
   const std::uint64_t server_baseline =
-      lane.verbs->RefreshPeerMeta(server_node).lane_generation;
+      lane.verbs
+          ->RefreshPeerMeta(
+              server_node, std::max(1, FLAGS_rdma_lane_rebuild_wait_ms))
+          .lane_generation;
   // Bring both ends down before any new traffic: reset our QP, then publish a
   // bumped generation so the server knows to rebuild its side too.
   lane.verbs->RebuildQp(server_node);
@@ -722,10 +725,20 @@ bool RcShardClientTransport::RebuildLane(int qp_index) {
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
   while (true) {
+    const auto remaining_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now())
+            .count();
+    if (remaining_ms <= 0) {
+      break;
+    }
     try {
       // The server republishes once it has rebuilt, so an ack is "the peer
-      // rebuilt after our baseline snapshot".
-      const RawVerbsNodeMeta meta = lane.verbs->RefreshPeerMeta(server_node);
+      // rebuilt after our baseline snapshot". Keep the RPC inside the handshake
+      // budget: the default control-plane deadline is much longer than
+      // --rdma_lane_rebuild_wait_ms.
+      const RawVerbsNodeMeta meta = lane.verbs->RefreshPeerMeta(
+          server_node, static_cast<int>(remaining_ms));
       if (meta.lane_generation > server_baseline) {
         LOG(WARNING) << "component=rdma_rc_client event=lane_rebuilt"
                      << " shard=" << config_.shard_id << " qp=" << qp_index
@@ -1144,8 +1157,11 @@ bool RcShardServerTransport::RebuildClientLaneIfStale(
       config_.num_servers + OsClientIndexForLogicalClient(config_, client_id);
   RawVerbsNodeMeta meta;
   try {
-    meta =
-        lane.verbs->RefreshPeerMeta(static_cast<std::uint16_t>(client_node_id));
+    // Don't inherit the 30s control-plane deadline: this runs on a data-plane
+    // polling thread, and a sick control plane must not stall request service.
+    meta = lane.verbs->RefreshPeerMeta(
+        static_cast<std::uint16_t>(client_node_id),
+        FLAGS_rdma_lane_rebuild_poll_timeout_ms);
   } catch (const std::exception&) {
     return false;
   }

@@ -102,10 +102,14 @@ inline bool IsShardUnreachable(const RdmaServerHealthSnapshot& snapshot) {
 }
 
 // Throttles slow-path probes: at most one in-flight query, and at most one
-// query per `ttl_ms`. A caller that cannot get the gate skips its own probe
-// instead of blocking (the verdict is re-read after the TTL); the probe
-// timestamp is taken before the RPC so a slow or failing control plane is
-// throttled as well.
+// query per `ttl_ms`. A caller that cannot get the gate reads the cached
+// verdict instead of blocking (or skips its own probe when no verdict exists
+// yet); the probe timestamp is taken before the RPC so a slow or failing
+// control plane is throttled as well.
+//
+// The verdict is per shard, and a client owns one shard, so every lane can
+// share it: without the cache each lane would have to burn its own probe slot
+// and a dead shard could keep sibling lanes serving for N-1 extra intervals.
 class RdmaSlowPathProbeGate {
 public:
   // Returns true when the caller owns the probe and must call EndProbe().
@@ -128,10 +132,44 @@ public:
     probing_ = false;
   }
 
+  // Returns true when a verdict newer than `ttl_ms` is cached. A ttl of 0
+  // disables the freshness window.
+  bool TryReadVerdict(std::chrono::steady_clock::time_point now,
+                      int ttl_ms,
+                      RdmaServerHealthSnapshot* verdict) const {
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!has_verdict_) {
+      return false;
+    }
+    if (ttl_ms > 0 && now - verdict_at_ >= std::chrono::milliseconds(ttl_ms)) {
+      return false;
+    }
+    *verdict = verdict_;
+    return true;
+  }
+
+  void StoreVerdict(std::chrono::steady_clock::time_point now,
+                    const RdmaServerHealthSnapshot& verdict) {
+    std::lock_guard<std::mutex> guard(mu_);
+    verdict_     = verdict;
+    verdict_at_  = now;
+    has_verdict_ = true;
+  }
+
+  // Drops the cached verdict. Called when a lane rebuild proves the shard is
+  // reachable again, so a cached `dead` cannot re-retire the fresh lane.
+  void InvalidateVerdict() {
+    std::lock_guard<std::mutex> guard(mu_);
+    has_verdict_ = false;
+  }
+
 private:
   mutable std::mutex mu_;
   bool probing_ = false;
   std::chrono::steady_clock::time_point last_probe_{};
+  RdmaServerHealthSnapshot verdict_{};
+  std::chrono::steady_clock::time_point verdict_at_{};
+  bool has_verdict_ = false;
 };
 
 std::string EncodeRawVerbsNodeMeta(const RawVerbsNodeMeta& meta);

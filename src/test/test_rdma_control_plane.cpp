@@ -441,6 +441,36 @@ TEST(RdmaControlPlaneTest, SlowPathProbeGateThrottlesAndCoalesces) {
   gate.EndProbe();
 }
 
+TEST(RdmaControlPlaneTest, SlowPathProbeGateSharesFreshVerdict) {
+  RdmaSlowPathProbeGate gate;
+  const auto start = std::chrono::steady_clock::now();
+  RdmaServerHealthSnapshot verdict;
+  EXPECT_FALSE(gate.TryReadVerdict(start, 100, &verdict));
+
+  RdmaServerHealthSnapshot dead;
+  dead.known            = true;
+  dead.health           = RdmaServerHealth::kDead;
+  dead.last_seen_age_ms = 12000;
+  gate.StoreVerdict(start, dead);
+
+  // Every lane of the shard reads the same verdict instead of waiting for its
+  // own probe slot.
+  EXPECT_TRUE(gate.TryReadVerdict(
+      start + std::chrono::milliseconds(99), 100, &verdict));
+  EXPECT_TRUE(IsShardUnreachable(verdict));
+  EXPECT_TRUE(gate.TryReadVerdict(
+      start + std::chrono::milliseconds(99), 100, &verdict));
+
+  // Once the TTL expires the next caller has to query the control plane again.
+  EXPECT_FALSE(gate.TryReadVerdict(
+      start + std::chrono::milliseconds(100), 100, &verdict));
+  // A ttl of 0 disables the freshness window.
+  EXPECT_TRUE(gate.TryReadVerdict(start + std::chrono::hours(1), 0, &verdict));
+  // A successful rebuild drops the verdict even before the TTL expires.
+  gate.InvalidateVerdict();
+  EXPECT_FALSE(gate.TryReadVerdict(start, 100, &verdict));
+}
+
 TEST(RdmaControlPlaneTest, HeartbeatIdentityIsValidated) {
   RdmaControlPlaneEndpoint endpoint =
       MakeHealthEndpoint(500, /*num_servers=*/1);

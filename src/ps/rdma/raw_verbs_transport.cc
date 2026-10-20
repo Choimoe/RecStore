@@ -616,13 +616,14 @@ MakeControlPlaneEndpoint(const RawVerbsConfig& config) {
 RawVerbsNodeMeta FetchPeerMetaFromControlPlane(
     RdmaControlPlaneClient& control_plane,
     const RawVerbsConfig& config,
-    int node) {
+    int node,
+    int timeout_ms) {
   const RawVerbsNodeMeta meta = control_plane.GetMeta(
       node,
       config.remote_lane,
       config.global_id,
       config.local_lane,
-      config.control_plane_timeout_ms);
+      timeout_ms > 0 ? timeout_ms : config.control_plane_timeout_ms);
   ValidateRawVerbsPeerMeta(config, node, meta);
   return meta;
 }
@@ -678,7 +679,7 @@ void RawVerbsTransport::Connect() {
       continue;
     }
     const RawVerbsNodeMeta meta =
-        FetchPeerMetaFromControlPlane(ControlPlane(), impl_->config, node);
+        FetchPeerMetaFromControlPlane(ControlPlane(), impl_->config, node, -1);
     impl_->metas[static_cast<std::size_t>(node)]   = meta;
     impl_->remotes[static_cast<std::size_t>(node)] = RawVerbsRemoteMemory{
         meta.node_id,
@@ -791,13 +792,14 @@ std::uint64_t RawVerbsTransport::AdvanceLaneGeneration(std::uint16_t node_id) {
   return next;
 }
 
-RawVerbsNodeMeta RawVerbsTransport::RefreshPeerMeta(std::uint16_t node_id) {
+RawVerbsNodeMeta
+RawVerbsTransport::RefreshPeerMeta(std::uint16_t node_id, int timeout_ms) {
   if (node_id >= impl_->qps.size() ||
       !ShouldRawVerbsConnectToNode(impl_->config, node_id)) {
     throw std::runtime_error("raw verbs peer meta: node is not connected");
   }
-  const RawVerbsNodeMeta meta =
-      FetchPeerMetaFromControlPlane(ControlPlane(), impl_->config, node_id);
+  const RawVerbsNodeMeta meta = FetchPeerMetaFromControlPlane(
+      ControlPlane(), impl_->config, node_id, timeout_ms);
   impl_->metas[static_cast<std::size_t>(node_id)]   = meta;
   impl_->remotes[static_cast<std::size_t>(node_id)] = RawVerbsRemoteMemory{
       meta.node_id,

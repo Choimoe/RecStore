@@ -204,6 +204,8 @@ public:
         static_cast<std::size_t>(std::max(1, thread_count_)));
     next_rebuild_check_ns_.assign(
         static_cast<std::size_t>(std::max(1, thread_count_)), 0);
+    rebuild_poll_backoff_ms_.assign(
+        static_cast<std::size_t>(std::max(1, thread_count_)), 0);
   }
 
   void Run() {
@@ -1411,17 +1413,15 @@ private:
       return;
     }
     const std::uint64_t now = NowNs();
-    const std::uint64_t interval =
-        static_cast<std::uint64_t>(
-            std::max(1, FLAGS_rdma_lane_rebuild_poll_ms)) *
-        1000000ULL;
     std::uint64_t& next =
         next_rebuild_check_ns_.at(static_cast<std::size_t>(thread_id));
     if (now < next) {
       return;
     }
-    next               = now + interval;
+    const int base_ms  = std::max(1, FLAGS_rdma_lane_rebuild_poll_ms);
+    const int max_ms   = std::max(base_ms, FLAGS_rdma_lane_rebuild_poll_max_ms);
     const int qp_count = transport_->config().qps_per_client_per_shard;
+    int rebuilt_total  = 0;
     for (int qp_index = thread_id; qp_index < qp_count;
          qp_index += thread_count_) {
       try {
@@ -1432,6 +1432,7 @@ private:
               << " shard=" << shard_id_ << " qp=" << qp_index
               << " count=" << rebuilt;
         }
+        rebuilt_total += rebuilt;
       } catch (const std::exception& error) {
         LOG(WARNING)
             << "component=rdma_rc_server event=client_lane_rebuild_error"
@@ -1439,6 +1440,19 @@ private:
             << error.what() << "\"";
       }
     }
+    // Each quiet round doubles the next interval: an idle deployment should not
+    // pay one GetMeta per client-lane every 50ms. A rebuild resets the backoff
+    // so the next attempt is caught at the base interval.
+    int& backoff_ms =
+        rebuild_poll_backoff_ms_.at(static_cast<std::size_t>(thread_id));
+    if (rebuilt_total > 0) {
+      backoff_ms = 0;
+    } else {
+      const int current = backoff_ms > 0 ? backoff_ms : base_ms;
+      backoff_ms        = std::min(max_ms, current * 2);
+    }
+    const int next_ms = backoff_ms > 0 ? backoff_ms : base_ms;
+    next              = now + static_cast<std::uint64_t>(next_ms) * 1000000ULL;
   }
 
   void ScanAssignedSlots(
@@ -1549,6 +1563,7 @@ private:
   int get_payload_worker_count_ = 0;
   std::vector<std::thread> get_payload_workers_;
   std::vector<std::uint64_t> next_rebuild_check_ns_;
+  std::vector<int> rebuild_poll_backoff_ms_;
   std::mutex get_payload_mu_;
   std::condition_variable get_payload_cv_;
   std::deque<GetPayloadTask> get_payload_tasks_;
