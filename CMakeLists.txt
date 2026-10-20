@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING
+    "Minimum policy version accepted from third-party CMake projects")
 
 option(ENABLE_CUDA "Build with CUDA support" ON)
 option(USE_BRPC_CPU_PROFILER "Enable bRPC builtin CPU profiler" OFF)
@@ -323,7 +324,10 @@ set(glog_DIR "${RECSTORE_GLOG_INSTALL_DIR}")
 if(EXISTS "${RECSTORE_GLOG_INSTALL_DIR}/glog-config.cmake")
   find_package(glog CONFIG REQUIRED)
 elseif(EXISTS "${PROJECT_SOURCE_DIR}/third_party/glog/CMakeLists.txt")
-  add_subdirectory(third_party/glog EXCLUDE_FROM_ALL)
+  # glog registers its unit tests with CTest. Keep them in the default build:
+  # otherwise `ctest` reports six "Not Run" entries for binaries that are
+  # excluded from `all`.
+  add_subdirectory(third_party/glog)
 else()
   find_package(glog CONFIG REQUIRED)
 endif()
