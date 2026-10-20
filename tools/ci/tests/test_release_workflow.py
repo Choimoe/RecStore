@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_pytorch_framework_build_is_not_gated_by_cuda() -> None:
