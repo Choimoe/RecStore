@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _weekly_cron(workflow: str) -> tuple[int, int, int]:
