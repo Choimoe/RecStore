@@ -57,6 +57,7 @@ from launch_config import (
     extract_explicit_config_keys,
 )
 from python.pytorch.torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection
+from python.pytorch.recstore.gradient_compression import warmup_topk
 
 try:
     from data.custom_dataloader import get_dataloader
@@ -220,6 +221,12 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         type=int,
         default=None,
         help="random seed for reproducibility",
+    )
+    parser.add_argument(
+        "--sparse-grad-keep-ratio",
+        type=float,
+        default=1.0,
+        help="Fraction of sparse gradient rows to keep; 1.0 disables Top-K.",
     )
     parser.add_argument(
         "--pin_memory",
@@ -586,7 +593,20 @@ def main(argv: List[str]) -> None:
     # Create optimizers
     from python.pytorch.recstore.optimizer import SparseSGD
     
-    sparse_optimizer = SparseSGD(sparse_modules, lr=args.learning_rate)
+    sparse_optimizer = SparseSGD(
+        sparse_modules,
+        lr=args.learning_rate,
+        keep_ratio=args.sparse_grad_keep_ratio,
+    )
+    sparse_optimizer.validate_config()
+    if args.sparse_grad_keep_ratio < 1.0 and torch.device(device).type == "cuda":
+        with torch.no_grad():
+            warmup_topk(
+                device=device,
+                embedding_dim=args.embedding_dim,
+                num_rows=1200,
+                keep_ratio=args.sparse_grad_keep_ratio,
+            )
     
     if dense_params:
         if args.adagrad:
@@ -721,6 +741,8 @@ def main(argv: List[str]) -> None:
                 sparse_opt_ms = 0.0
                 raw_model = model.module if hasattr(model, "module") else model
 
+                # Recheck after forward/backward, before either optimizer updates.
+                sparse_optimizer.validate_config()
                 if use_cuda_timing:
                     torch.cuda.synchronize()
                     t_dense_opt_start = time.time()
