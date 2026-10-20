@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Derived from vLLM's vllm/collect_env.py (Apache-2.0), which in turn borrows
+# from PyTorch's torch/utils/collect_env.py (BSD-3-Clause). Modified for
+# RecStore: RDMA/NIC, GID table, NCCL/GDRCopy, build-tree, and env-var
+# collection plus --redact masking; several helpers (run, run_and_read_all,
+# run_and_parse_first_match, pretty_str internals) are taken near-verbatim.
 """Collect environment information for RecStore bug reports and benchmark
-reproduction. Modeled after vLLM's collect_env.py (which in turn borrows from
-torch.utils.collect_env).
+reproduction.
 
 Usage:
     python tools/env/collect.py            # print to stdout
     python tools/env/collect.py > env.txt  # save alongside a report
+    python tools/env/collect.py --redact   # mask host-identifying values
 
 The script is stdlib-only and never crashes on missing tools: any value it
 cannot collect is reported as "Could not collect".
@@ -735,9 +741,96 @@ def get_pretty_env_info():
     return pretty_str(get_env_info())
 
 
+# ---------------------------------------------------------------------------
+# Redaction
+# ---------------------------------------------------------------------------
+
+# Internal-only path prefixes that should not appear in a public report.
+INTERNAL_PATH_PREFIXES = (
+    "/opt/meituan",
+)
+
+
+def _mask_gid_value(value):
+    """Mask the host-specific half of a GID, keeping the type-distinguishing
+    prefix recognizable: link-local (fe80::/64, whose lower half is MAC-derived,
+    so mask all of it) vs IPv4-mapped RoCE v2 (::ffff:x.x.x.x) vs global IB
+    subnets (mask only the host part)."""
+    parts = value.split(":")
+    if len(parts) != 8:
+        return value
+    keep = 4 if parts[0].lower() == "fe80" else 6
+    return ":".join(parts[:keep] + ["xxxx"] * (8 - keep))
+
+
+def _mask_ipv4(m):
+    """Keep the first two octets (subnet still diagnosable), mask the rest."""
+    return "{}.x.x".format(m.group(1))
+
+
+def redact_text(text):
+    """Mask host- and site-identifying values while keeping the output useful
+    for debugging: GID/IP/MAC/GUID addresses, home directory, internal paths."""
+    # GID table entries in `ibv_devinfo -v` output
+    text = re.sub(
+        r"(GID\[\s*\d+\]:\s*)([0-9a-fA-F:]+)",
+        lambda m: m.group(1) + _mask_gid_value(m.group(2)),
+        text,
+    )
+    # node_guid / sys_image_guid in `ibv_devinfo -v` output
+    text = re.sub(
+        r"((?:node_guid|sys_image_guid):\s*)([0-9a-fA-F:]+)",
+        lambda m: m.group(1) + ":".join(m.group(2).split(":")[:2]) + ":xx:xx:xx:xx",
+        text,
+    )
+    # Dotted IPv4 addresses anywhere (env vars included). `==` lookbehind
+    # keeps pip package versions like `nvidia-curand-cu12==10.3.0.727` intact.
+    text = re.sub(
+        r"(?<!==)\b(\d{1,3}\.\d{1,3})\.\d{1,3}\.\d{1,3}\b", _mask_ipv4, text
+    )
+    # Colon-separated MAC addresses, keeping the OUI (vendor) bytes
+    text = re.sub(
+        r"\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\b",
+        lambda m: ":".join(m.group(0).split(":")[:3] + ["xx", "xx", "xx"]),
+        text,
+    )
+    # ibv_devices rows: "<device>    <16-hex-digit node GUID>" (no colons)
+    text = re.sub(
+        r"^(\s*\S+\s+)([0-9a-fA-F]{16})\s*$",
+        lambda m: m.group(1) + m.group(2)[:8] + "xxxxxxxx",
+        text,
+        flags=re.MULTILINE,
+    )
+    # Home directory paths -> /home/<user>
+    home = os.path.expanduser("~")
+    if home and home != "~":
+        text = text.replace(home, "/home/<user>")
+    # Internal-only path prefixes
+    for prefix in INTERNAL_PATH_PREFIXES:
+        text = text.replace(prefix, os.path.dirname(prefix) + "/<internal>")
+    return text
+
+
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Collect RecStore environment information for bug reports."
+    )
+    parser.add_argument(
+        "--redact",
+        action="store_true",
+        help="mask host-identifying values (IPs, MACs, GIDs, GUIDs, home "
+        "directory, internal paths) before printing, for public reports",
+    )
+    args = parser.parse_args()
+
     print("Collecting environment information...")
-    print(get_pretty_env_info())
+    output = get_pretty_env_info()
+    if args.redact:
+        print("(redaction enabled: IPs/MACs/GIDs masked, home dir anonymized)")
+        output = redact_text(output)
+    print(output)
 
 
 if __name__ == "__main__":
