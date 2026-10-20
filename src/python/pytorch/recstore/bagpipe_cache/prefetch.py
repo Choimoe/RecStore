@@ -384,8 +384,8 @@ class BagPipePrefetchMixin:
             logger.warning("[BagPipe] GPU cache prefill failed: %s", exc)
             return False
 
-        # Only rows that the no-evict kernel actually inserted are resident.
-        # This is the authoritative transition into the flat mirror.
+        # The no-evict result is authoritative post-fill residency.  Existing
+        # rows also return true, but their values were not overwritten.
         compact = self._to_compact(ids_cuda)
         in_range = compact < self._latest_dev.numel()
         compact = compact[in_range]

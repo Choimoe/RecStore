@@ -297,11 +297,11 @@ class BagPipeEvictionMixin:
         return int(cleared_ids.numel())
 
     # ------------------------------------------------------------------
-    #  Background cleanup thread (opt 5)
+    #  Compatibility worker for already queued writebacks
     # ------------------------------------------------------------------
 
     def _cleanup_loop(self) -> None:
-        """Background thread for asynchronous PS value writeback (opt 5)."""
+        """Drain legacy queued writebacks; current eviction writes inline."""
         while True:
             try:
                 task = self._cleanup_queue.get(block=True, timeout=1.0)
