@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -53,6 +55,25 @@ struct RcClientQpView {
   StatusWord* status     = nullptr; // Status word at end of response slot.
 };
 
+// Raised when a tracked completion (a submit-commit or response-status CQE) did
+// not arrive within the wait budget: the slot's memory may still be referenced
+// by the peer, so the caller must retire the lane instead of reusing the slot.
+class RcTrackedCompletionTimeout : public std::runtime_error {
+public:
+  explicit RcTrackedCompletionTimeout(const std::string& message)
+      : std::runtime_error(message) {}
+};
+
+// Raised when a response payload must not be posted because its lane was
+// rebuilt after the request was accepted. The client slot now belongs to a new
+// generation, so writing it would corrupt that generation's response; the
+// caller must drop the response instead of completing it.
+class RcLaneRebuiltDuringResponse : public std::runtime_error {
+public:
+  explicit RcLaneRebuiltDuringResponse(const std::string& message)
+      : std::runtime_error(message) {}
+};
+
 class RcShardClientTransport {
 public:
   explicit RcShardClientTransport(const RcTransportConfig& config);
@@ -68,6 +89,23 @@ public:
                      const void* payload,
                      std::size_t payload_bytes);
   void ClearRequestSlot(const RcClientQpView& view);
+  // Drains at most one completion from a lane CQ without blocking. Successful
+  // completions are folded into the lane's tracked-completion bookkeeping so a
+  // later SubmitRequest() drain still finds them; a completion error is copied
+  // into `error` and reported as true so the caller can classify and retire the
+  // lane. Callers must serialize with the client submit path (PetPSClient holds
+  // its mutex around both).
+  bool HarvestLaneCompletion(int qp_index, RawVerbsCompletionError* error);
+  // Rebuilds one lane QP after a peer-side failure and completes the bilateral
+  // handshake: publish the bumped lane generation, then wait until the peer
+  // rebuilds and republishes too. Returns true once the peer acknowledged
+  // within --rdma_lane_rebuild_wait_ms. Callers must serialize this with the
+  // submit path and the CQ harvest (PetPSClient holds its mutex). Requires a
+  // single OS client per shard (num_os_clients == 1): the server side cannot
+  // reset a QP that shares its CQ, so a multi-client deployment returns false
+  // and keeps the terminal-dirty behaviour.
+  bool RebuildLane(int qp_index);
+  std::uint64_t LaneGeneration(int qp_index) const;
   std::size_t request_slot_bytes() const { return config_.request_slot_bytes; }
   std::size_t response_slot_bytes() const {
     return config_.response_slot_bytes;
@@ -82,6 +120,9 @@ private:
         nullptr; // Local registered region for all slots in this lane.
     std::vector<std::uint8_t> submit_completion_pending;
     std::vector<std::uint8_t> submit_completion_ready;
+    // Number of times this lane's QP was rebuilt; the value published in the
+    // lane metadata so the server can observe the bump.
+    std::uint64_t generation = 0;
   };
 
   Lane& LaneAt(int qp_index);
@@ -122,10 +163,27 @@ public:
                         int slot_in_qp,
                         const ResponseView& response,
                         std::uint64_t seq);
+  // Current response epoch of a lane. It changes on every server-side lane
+  // rebuild, so a caller that captured it before posting can tell whether the
+  // slot it is about to write still belongs to the same client generation.
+  std::uint64_t ResponseEpoch(int client_id, int qp_index) const;
+  // Number of response payload posts refused because the lane was rebuilt after
+  // the request was accepted (RcLaneRebuiltDuringResponse). A non-zero value is
+  // direct evidence that the rebuild fence fired instead of merely that no bad
+  // response reached the client.
+  std::uint64_t ResponseRejectedEpochCount() const {
+    return response_rejected_epoch_count_.load(std::memory_order_relaxed);
+  }
+  // Posts response payload rows from `sges`. Throws RcLaneRebuiltDuringResponse
+  // when the lane was rebuilt after `expected_epoch` was captured: the payload
+  // would land in a slot the client already released (and whose pool may have
+  // handed it to a new request). Get-payload workers pass the epoch they
+  // captured when the request was accepted.
   void WriteResponsePayloadSg(
       int client_id,
       int qp_index,
       int slot_in_qp,
+      std::uint64_t expected_epoch,
       base::ConstArray<RawVerbsSge> sges,
       std::uint64_t response_offset,
       std::uint64_t bytes);
@@ -135,6 +193,13 @@ public:
       int slot_in_qp,
       const ResponseView& response,
       std::uint64_t seq);
+  // For each client served by `qp_index`, rebuild the server-side QP when the
+  // client published a new lane generation (i.e. the client rebuilt its side).
+  // Must be called from a thread that owns those lanes (the polling thread that
+  // scans `qp_index`). Rebuilding requires the lane CQ to carry a single client
+  // QP (num_os_clients == 1); otherwise it is skipped, because a shared CQ
+  // cannot be drained safely. Returns the number of lanes rebuilt.
+  int PollClientRebuildRequests(int qp_index);
   const RcTransportConfig& config() const { return config_; }
 
 private:
@@ -146,13 +211,27 @@ private:
                                          // response staging slots.
     std::vector<std::uint8_t> response_completion_pending;
     std::vector<std::uint8_t> response_completion_ready;
+    // Last client lane generation observed per logical client id. A change
+    // means the client rebuilt its side, so this side must rebuild too.
+    std::vector<std::uint64_t> observed_client_generation;
+    // Serializes QP reset/rebuild against payload posts from the get-payload
+    // workers. A post either completes before the rebuild (its WR is flushed by
+    // the reset) or observes the bumped epoch afterwards and refuses.
+    std::mutex rebuild_mu;
+    // Bumped on every server-side rebuild. Payload posts carry the value they
+    // captured when the request was accepted.
+    std::atomic<std::uint64_t> response_epoch{0};
   };
 
   Lane& LaneAt(int client_id, int qp_index);
   const Lane& LaneAt(int client_id, int qp_index) const;
+  bool RebuildClientLaneIfStale(int client_id, int qp_index);
 
   RcTransportConfig config_; // Transport sizing and namespace config.
   std::vector<Lane> lanes_;  // One verbs RC lane per qp_index.
+  // Fence observability: incremented by WriteResponsePayloadSg() when it
+  // refuses to post into a rebuilt lane.
+  std::atomic<std::uint64_t> response_rejected_epoch_count_{0};
 };
 
 } // namespace petps

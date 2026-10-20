@@ -3,6 +3,7 @@
 import os
 import queue
 import re
+import shlex
 import socket
 import subprocess
 import threading
@@ -65,6 +66,8 @@ class PetPSClusterRunner:
         rdma_rc_profile_interval_ms=None,
         rdma_rc_server_coroutines_per_thread=None,
         rdma_rc_server_get_workers=None,
+        rdma_rc_server_get_worker_hold_us=None,
+        rdma_rc_server_fence_stats_interval_ms=None,
         logical_clients_per_process=1,
         rdma_rc_inline_bytes=None,
         rdma_rc_client_numa_id=None,
@@ -74,6 +77,7 @@ class PetPSClusterRunner:
         rdma_qps_per_client_per_shard=None,
         rdma_slots_per_qp=None,
         rdma_wait_timeout_ms=None,
+        rdma_lane_rebuild_enabled=None,
         rdma_control_plane_timeout_ms=None,
         rdma_profile_interval_ms=None,
         rdma_server_coroutines_per_thread=None,
@@ -89,6 +93,8 @@ class PetPSClusterRunner:
         rdma_skip_client_copy=None,
         validate_routing=False,
         server_command_wrapper=None,
+        client_ssh=None,
+        client_ssh_port=22222,
     ):
         self.server_path = Path(server_path)
         if not self.server_path.is_absolute():
@@ -137,6 +143,7 @@ class PetPSClusterRunner:
             rdma_rc_qps_per_client_per_shard,
         )
         self.rdma_wait_timeout_ms = rdma_wait_timeout_ms
+        self.rdma_lane_rebuild_enabled = rdma_lane_rebuild_enabled
         self.rdma_control_plane_timeout_ms = rdma_control_plane_timeout_ms
         self.rdma_slots_per_qp = self._coalesce_optional_values(
             "rdma_slots_per_qp",
@@ -210,6 +217,10 @@ class PetPSClusterRunner:
             self.rdma_server_coroutines_per_thread
         )
         self.rdma_rc_server_get_workers = self.rdma_server_get_workers
+        self.rdma_rc_server_get_worker_hold_us = rdma_rc_server_get_worker_hold_us
+        self.rdma_rc_server_fence_stats_interval_ms = (
+            rdma_rc_server_fence_stats_interval_ms
+        )
         self.rdma_rc_inline_bytes = self.rdma_inline_bytes
         self.rdma_rc_client_numa_id = self.rdma_client_numa_id
         self.rdma_rc_client_numa_ids = self.rdma_client_numa_ids
@@ -218,6 +229,8 @@ class PetPSClusterRunner:
         self.rdma_rc_skip_client_copy = self.rdma_skip_client_copy
         self.validate_routing = validate_routing
         self.server_command_wrapper = server_command_wrapper
+        self.client_ssh = client_ssh
+        self.client_ssh_port = client_ssh_port
         self.server_shutdown_timeout = 30
         self.processes = []
         self.process_logs = {}
@@ -356,8 +369,22 @@ class PetPSClusterRunner:
                 "--rdma_rc_server_get_workers="
                 f"{self.rdma_server_get_workers}"
             )
+        if self.rdma_rc_server_get_worker_hold_us is not None:
+            cmd.append(
+                "--rdma_rc_server_get_worker_hold_us="
+                f"{self.rdma_rc_server_get_worker_hold_us}"
+            )
         if self.rdma_wait_timeout_ms is not None:
             cmd.append(f"--rdma_wait_timeout_ms={self.rdma_wait_timeout_ms}")
+        if self.rdma_lane_rebuild_enabled:
+            cmd.append("--rdma_lane_rebuild_enabled=true")
+            if self.rdma_rc_server_fence_stats_interval_ms is not None:
+                # Opt-in: production leaves the fence report off (default 0),
+                # so the periodic stderr line only appears in test runs.
+                cmd.append(
+                    "--rdma_rc_server_fence_stats_interval_ms="
+                    f"{self.rdma_rc_server_fence_stats_interval_ms}"
+                )
         if self.rdma_control_plane_timeout_ms is not None:
             cmd.append(
                 "--rdma_control_plane_timeout_ms="
@@ -434,6 +461,8 @@ class PetPSClusterRunner:
             cmd.append(f"--rdma_rc_slots_per_qp={self.rdma_slots_per_qp}")
         if self.rdma_wait_timeout_ms is not None:
             cmd.append(f"--rdma_wait_timeout_ms={self.rdma_wait_timeout_ms}")
+        if self.rdma_lane_rebuild_enabled:
+            cmd.append("--rdma_lane_rebuild_enabled=true")
         if self.rdma_control_plane_timeout_ms is not None:
             cmd.append(
                 "--rdma_control_plane_timeout_ms="
@@ -605,9 +634,80 @@ class PetPSClusterRunner:
                 next_refresh = time.time() + self.status_refresh_interval
             time.sleep(0.2)
 
-    def run_client(self, argv, client_index=0, stream_output=True, timeout=None):
+    def _wrap_client_ssh(self, cmd, env):
+        """Prefix a local client command so it runs on the remote host.
+
+        Only ``RECSTORE_*`` variables are forwarded; the remote client needs
+        ``RECSTORE_CONFIG`` to point at a path both hosts can read (the shared
+        runtime directory handed to the driver). ``sshpass`` reads the password
+        from ``SSHPASS`` in the caller's environment, so it is not forwarded.
+        """
+        remote_env = {
+            key: value
+            for key, value in env.items()
+            if key.startswith("RECSTORE_")
+        }
+        env_prefix = " ".join(
+            f"{key}={shlex.quote(str(value))}"
+            for key, value in sorted(remote_env.items())
+        )
+        remote_cmd = " ".join(shlex.quote(str(arg)) for arg in cmd)
+        if env_prefix:
+            remote_cmd = f"env {env_prefix} {remote_cmd}"
+        remote_cmd = f"cd {shlex.quote(str(REPO_ROOT))} && {remote_cmd}"
+        return [
+            "sshpass",
+            "-e",
+            "ssh",
+            "-p",
+            str(self.client_ssh_port),
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            self.client_ssh,
+            remote_cmd,
+        ]
+
+    def cleanup_remote_client(self, client_binary):
+        """Kill a client left running on the remote host after a timeout."""
+        if not self.client_ssh or not client_binary:
+            return
+        remote_cmd = f"pkill -f {shlex.quote(str(client_binary))} || true"
+        subprocess.run(
+            [
+                "sshpass",
+                "-e",
+                "ssh",
+                "-p",
+                str(self.client_ssh_port),
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                self.client_ssh,
+                remote_cmd,
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+
+    def build_client_launch(self, argv, client_index=0, env_extra=None):
+        """Client argv + env for a local or SSH launch, without running it.
+
+        Callers that drive the client themselves (for example the fault
+        injection driver, which has to watch the client's stdout and fault the
+        servers at a precise moment) use this instead of `run_client`.
+        """
         cmd = self.build_client_cmd(argv, client_index=client_index)
         env = self.build_client_env(client_index)
+        if env_extra:
+            env.update(env_extra)
+        if self.client_ssh:
+            cmd = self._wrap_client_ssh(cmd, env)
+        return cmd, env
+
+    def run_client(self, argv, client_index=0, stream_output=True, timeout=None):
+        client_binary = str(argv[0]) if argv else ""
+        cmd, env = self.build_client_launch(argv, client_index=client_index)
         if self.show_control_plane_logs:
             print(
                 "[petps-control-plane] client "
@@ -636,6 +736,7 @@ class PetPSClusterRunner:
                 timeout_text = (
                     f"\n[petps-client] timed out after {timeout} seconds\n"
                 )
+                self.cleanup_remote_client(client_binary)
                 stdout = _to_text(exc.stdout) + timeout_text
                 stderr = _to_text(exc.stderr)
                 return Completed(stdout, stderr)
@@ -706,6 +807,7 @@ class PetPSClusterRunner:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+            self.cleanup_remote_client(client_binary)
             timeout_line = f"[petps-client] timed out after {timeout} seconds\n"
             output_lines.append(timeout_line)
             print(timeout_line, end="")
