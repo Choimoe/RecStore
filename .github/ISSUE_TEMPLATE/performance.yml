@@ -1,0 +1,69 @@
+name: ⚡️ Performance request
+description: Suggest performance issue, idea, or enhancement.
+title: "[Performance]: "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        📖 Before submitting a Feature request, please ensure the following:
+        ⚠️ The issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/RecStore/RecStore/issues?q=is%3Aissue+sort%3Acreated-desc+).
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Layer
+      options:
+        - Calculation
+        - Parameter Server
+        - Storage
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 📚 Description
+      description: |
+        💡 How do you plan to improve RecStore's performance?
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: ⚙️ Report
+      description: |
+        Please provide detailed description of performance comparison to confirm the regression. You may want to run the benchmark script from https://recstore.github.io/RecStore/dev/performance/ .
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 🛠️ Environment (if necessary)
+      description: |
+        💡 Please run the following and paste the output below.
+        ```sh
+        wget https://raw.githubusercontent.com/RecStore/RecStore/main/tools/env/collect.py
+        # For security purposes, please feel free to check the contents of collect.py before running it.
+        python collect.py --redact
+        ```
+      value: |
+        <details>
+        <summary>The output of <code>python collect.py --redact</code></summary>
+
+        ```text
+        Your output of `python collect.py --redact` here
+        ==============================
+                System Info
+        ==============================
+        ...
+        ```
+
+        </details>
+
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing 🎉!
