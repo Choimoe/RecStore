@@ -227,6 +227,23 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
         )
         self.assertFalse(bool(again.any().item()))
 
+    def test_value_writeback_persists_before_invalidating(self) -> None:
+        table_name = f"gpu_cache_writeback_{time.time_ns()}"
+        self.client.init_data(
+            name=table_name, shape=(256, 4), dtype=torch.float32
+        )
+        keys = torch.tensor([1, 3], dtype=torch.int64, device="cuda")
+        old_values = torch.zeros((2, 4), dtype=torch.float32, device="cuda")
+        new_values = torch.full((2, 4), 7.0, dtype=torch.float32, device="cuda")
+        self.client.prefill_gpu_cache_no_evict(table_name, keys, old_values)
+
+        self.client.emb_write_values(table_name, keys, new_values)
+
+        self.assertFalse(bool(self.client.contains_gpu_cache(keys).any().item()))
+        self.assertTrue(
+            torch.equal(self.client.local_lookup_flat(table_name, keys), new_values)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

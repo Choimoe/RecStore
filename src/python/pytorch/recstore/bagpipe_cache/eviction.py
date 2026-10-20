@@ -1,7 +1,7 @@
 """Cache eviction, writeback, and dynamic lookahead for BagPipe controller.
 
-Handles TTL-based eviction, value writeback to PS, async background thread,
-and dynamic lookahead adjustment (opt 4, 5, 6, 7, 9).
+Handles TTL-based eviction, value writeback to PS, and dynamic lookahead
+adjustment (opt 4, 6, 7, 9).
 
 Eviction decisions are a vectorized full-space mask scan over the flat
 tensors (~5.2M elements, ~0.1ms), isomorphic to the original BagPipe's
@@ -54,7 +54,9 @@ class BagPipeEvictionMixin:
             self._cleanup_scan_ttl = self._cleanup_scan_ttl or ttl_due
             self._cleanup_batch = max(self._cleanup_batch, current_batch)
 
-    def _run_scheduled_cleanup(self) -> None:
+    def _run_scheduled_cleanup(
+        self, protected_ids: torch.Tensor | None = None
+    ) -> None:
         """Apply scheduled eviction after deferred gradients are visible."""
         if not self._cleanup_pending or self._cached_dev is None:
             return
@@ -62,9 +64,17 @@ class BagPipeEvictionMixin:
         scan_ttl = self._cleanup_scan_ttl
         self._cleanup_pending = False
         self._cleanup_scan_ttl = False
-        self._run_cleanup(current_batch, scan_ttl=scan_ttl)
+        self._run_cleanup(
+            current_batch, scan_ttl=scan_ttl, protected_ids=protected_ids
+        )
 
-    def _run_cleanup(self, current_batch: int, *, scan_ttl: bool) -> None:
+    def _run_cleanup(
+        self,
+        current_batch: int,
+        *,
+        scan_ttl: bool,
+        protected_ids: torch.Tensor | None = None,
+    ) -> None:
         """Reclaim at most one shared eviction budget from all causes."""
         t_start = time.perf_counter()
         budget = self._max_evict_per_cleanup
@@ -80,11 +90,12 @@ class BagPipeEvictionMixin:
                 order = self._ttl_dev[expired].argsort()
                 expired = expired[order[:budget]]
             expired = expired.contiguous()
-            evicted = int(expired.numel())
-            if evicted:
-                self._evict_entries(expired)
-                budget -= evicted
-                exact_count -= evicted
+            requested = int(expired.numel())
+            if requested:
+                removed = self._evict_entries(expired)
+                budget -= requested
+                exact_count -= removed
+                ttl_backlog = ttl_backlog or removed < requested
 
         failures = int(self._insert_failures)
         high_water = int(self.cache_capacity * self._capacity_watermark)
@@ -92,17 +103,21 @@ class BagPipeEvictionMixin:
         failure_reclaim = max(failures * 2, 1024) if failures else 0
         reclaim = min(max(overflow, failure_reclaim), budget, exact_count)
         if reclaim > 0:
-            ttl_eff = torch.where(
-                self._cached_dev,
-                self._ttl_dev,
-                torch.iinfo(torch.int32).max,
-            )
+            eligible = self._cached_dev.nonzero(as_tuple=False).squeeze(1)
+            if protected_ids is not None and protected_ids.numel() > 0:
+                protected = self._compact_in_range(
+                    self._to_compact(protected_ids)
+                )
+                eligible = eligible[~torch.isin(eligible, protected)]
+            reclaim = min(reclaim, int(eligible.numel()))
+        if reclaim > 0:
             pressure_ids = torch.topk(
-                ttl_eff, k=reclaim, largest=False
-            ).indices.contiguous()
-            self._evict_entries(pressure_ids)
+                self._ttl_dev[eligible], k=reclaim, largest=False
+            ).indices
+            pressure_ids = eligible[pressure_ids].contiguous()
+            removed = self._evict_entries(pressure_ids)
             budget -= reclaim
-            exact_count -= reclaim
+            exact_count -= removed
 
         if failures:
             self._insert_failures = 0
@@ -171,7 +186,7 @@ class BagPipeEvictionMixin:
             logger.warning("[BagPipe] value read for writeback failed: %s", exc)
             return ids_cuda, None, None
 
-    def _evict_entries(self, expired_ids: torch.Tensor) -> None:
+    def _evict_entries(self, expired_ids: torch.Tensor) -> int:
         """Evict expired entries: write back values + invalidate (opt 4, 6).
 
         ``expired_ids`` are compact indices (from the bookkeeping tensors'
@@ -185,26 +200,61 @@ class BagPipeEvictionMixin:
         so last-writer-wins loses at most one increment (the same bound the
         official BagPipe accepts).
 
-        Values are read before invalidation (the cache still holds them), but
-        only rows the C++ cache actually reports as removed are written back:
-        a row the mirror claims but the cache no longer holds reads back
-        undefined bytes, and persisting those would corrupt the PS.
+        Dirty values are persisted synchronously before invalidation.  A
+        failed read or write leaves the row resident and dirty so a later
+        cleanup can retry without losing the only authoritative value.
         """
         if expired_ids.numel() == 0:
-            return
+            return 0
 
         requested_evictions = expired_ids
-
-        dirty_m = self._dirty_dev[expired_ids]
-        wb_mask = dirty_m
-        wb_ids = expired_ids[wb_mask]
-        dirty_cleared = int(wb_ids.numel())
-        wb_vals = None
-        wb_event = None
-        if wb_ids.numel() > 0:
-            wb_ids, wb_vals, wb_event = self._read_cache_values(
-                self._to_fused(wb_ids)
+        fused_requested = self._to_fused(requested_evictions)
+        contains = getattr(self.kv_client, "contains_gpu_cache", None)
+        if not callable(contains):
+            raise RuntimeError(
+                "BagPipe requires contains_gpu_cache before writeback"
             )
+        resident = contains(fused_requested)
+        stale_ids = requested_evictions[~resident]
+        resident_ids = requested_evictions[resident]
+        resident_dirty = self._dirty_dev[resident_ids]
+        dirty_ids = resident_ids[resident_dirty]
+
+        persisted_dirty = dirty_ids[:0]
+        if dirty_ids.numel() > 0:
+            wb_ids, wb_vals, wb_event = self._read_cache_values(
+                self._to_fused(dirty_ids)
+            )
+            if wb_vals is not None:
+                if wb_event is not None:
+                    wb_event.synchronize()
+                try:
+                    self.kv_client.emb_write_values(
+                        self.master_table_name, wb_ids, wb_vals
+                    )
+                    persisted_dirty = dirty_ids
+                    self._stats["bagpipe_writeback_ids"] += float(
+                        dirty_ids.numel()
+                    )
+                except Exception as exc:
+                    # A sharded client may have completed earlier shards
+                    # before a later shard failed.  Successful shard writes
+                    # already invalidated their rows; reconcile those rows
+                    # instead of leaving stale dirty mirror bits behind.
+                    still_resident = contains(self._to_fused(dirty_ids))
+                    persisted_dirty = dirty_ids[~still_resident]
+                    if persisted_dirty.numel() > 0:
+                        self._stats["bagpipe_writeback_ids"] += float(
+                            persisted_dirty.numel()
+                        )
+                    logger.warning(
+                        "[BagPipe] value writeback failed; retaining %d "
+                        "resident dirty rows: %s",
+                        int(still_resident.sum().item()),
+                        exc,
+                    )
+
+        clean_ids = resident_ids[~resident_dirty]
 
         invalidator = getattr(
             self.kv_client, "invalidate_gpu_cache_with_mask", None
@@ -214,36 +264,37 @@ class BagPipeEvictionMixin:
                 "BagPipe requires invalidate_gpu_cache_with_mask to keep its "
                 "residency mirror authoritative"
             )
-        removed = invalidator(
-            self.master_table_name, self._to_fused(requested_evictions)
-        )
-        expired_ids = requested_evictions[removed]
-        self._stats["bagpipe_evicted_ids"] += float(expired_ids.numel())
-
-        # Enqueue only the rows that were genuinely resident.
-        if wb_vals is not None and wb_ids.numel() > 0:
-            wb_removed = removed[wb_mask]
-            wb_ids = wb_ids[wb_removed]
-            wb_vals = wb_vals[wb_removed]
-            if wb_ids.numel() > 0:
-                self._cleanup_queue.put((wb_ids, wb_vals, wb_event))
-                self._stats["bagpipe_writeback_ids"] += float(wb_ids.numel())
+        removed_clean_ids = clean_ids[:0]
+        if clean_ids.numel() > 0:
+            removed = invalidator(
+                self.master_table_name, self._to_fused(clean_ids)
+            )
+            removed_clean_ids = clean_ids[removed]
+        # emb_write_values invalidates the successfully persisted keys as
+        # part of its contract, so they leave the mirror without a second
+        # invalidation call.
+        evicted_ids = torch.cat((persisted_dirty, removed_clean_ids))
+        self._stats["bagpipe_evicted_ids"] += float(evicted_ids.numel())
 
         # Reconcile the mirror with the authoritative result.  Rows the mirror
         # listed as resident but the cache does not hold have to be dropped
         # too, otherwise they stay expired and are re-picked every cleanup.
         self._stats["bagpipe_evict_stale_mirror_ids"] += float(
-            int(requested_evictions.numel()) - int(expired_ids.numel())
+            stale_ids.numel()
         )
+        cleared_ids = torch.cat((stale_ids, evicted_ids))
         record_removals = getattr(self, "_record_cache_removals", None)
         if callable(record_removals):
-            record_removals(int(requested_evictions.numel()))
+            record_removals(int(cleared_ids.numel()))
         record_dirty_clears = getattr(self, "_record_dirty_clears", None)
         if callable(record_dirty_clears):
-            record_dirty_clears(dirty_cleared)
-        self._cached_dev[requested_evictions] = False
-        self._dirty_dev[requested_evictions] = False
-        self._ttl_dev[requested_evictions] = 0
+            stale_dirty = int(self._dirty_dev[stale_ids].sum().item())
+            record_dirty_clears(stale_dirty + int(persisted_dirty.numel()))
+        self._cached_dev[cleared_ids] = False
+        self._dirty_dev[stale_ids] = False
+        self._dirty_dev[persisted_dirty] = False
+        self._ttl_dev[cleared_ids] = 0
+        return int(cleared_ids.numel())
 
     # ------------------------------------------------------------------
     #  Background cleanup thread (opt 5)

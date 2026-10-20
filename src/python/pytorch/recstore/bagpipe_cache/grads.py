@@ -288,23 +288,28 @@ class BagPipeGradMixin:
         all_compact = self._to_compact(ids_cuda)
         in_range = all_compact < self._latest_dev.numel()
         current_compact = all_compact[in_range]
-        if all_resident or residency_mask is not None:
-            record_inserts = getattr(self, "_record_cache_insert_attempts", None)
-            if callable(record_inserts):
-                # The no-evict lookup may have filled any queried row.  Count
-                # all rows as attempts: duplicates only make the pressure
-                # estimate conservative until the next exact cleanup sample.
-                record_inserts(int(ids_cuda.numel()))
         if all_resident:
+            renew = (
+                ~self._cached_dev[current_compact]
+                | (self._ttl_dev[current_compact] >= batch_num)
+            )
             self._cached_dev[current_compact] = True
-            self._ttl_dev[current_compact] = batch_num + self._ttl_margin
+            self._ttl_dev[current_compact[renew]] = (
+                batch_num + self._ttl_margin
+            )
         elif residency_mask is not None:
             residency_mask = residency_mask[in_range]
             failed_mask = ~residency_mask
             self._cached_dev[current_compact[failed_mask]] = False
             resident_compact = current_compact[residency_mask]
+            renew = (
+                ~self._cached_dev[resident_compact]
+                | (self._ttl_dev[resident_compact] >= batch_num)
+            )
             self._cached_dev[resident_compact] = True
-            self._ttl_dev[resident_compact] = batch_num + self._ttl_margin
+            self._ttl_dev[resident_compact[renew]] = (
+                batch_num + self._ttl_margin
+            )
             # Backfill no-evict insert failures must feed the eviction
             # backstop too; otherwise a full cache is only noticed via the
             # prefill path.
