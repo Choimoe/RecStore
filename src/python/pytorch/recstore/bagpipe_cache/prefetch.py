@@ -152,9 +152,8 @@ class BagPipePrefetchMixin:
         """Fill GPU cache from the pre-issued prefetch handle with TTL tracking.
 
         First consumes the deferred aggregated-gradient barrier (the previous
-        step's dense all_reduce: reduced shared-ID gradients are applied in
-        place to the local cache on every rank, and rank0 issues the PS
-        persistence push), then fills the cache from the handle pre-issued at
+        step's dense all_reduce applies reduced shared-ID gradients in place
+        on every rank), then fills the cache from the handle pre-issued at
         enqueue time.  Because the PS had ``lookahead`` steps to respond,
         ``wait_and_get`` is near-instant.
 
@@ -166,6 +165,7 @@ class BagPipePrefetchMixin:
         self._check_gpu_cache_generation()
 
         if not self._lookahead_ids:
+            self._run_scheduled_cleanup()
             return
         batch_num, unique_ids = self._lookahead_ids.popleft()
         self._current_batch = batch_num
@@ -180,9 +180,16 @@ class BagPipePrefetchMixin:
         all_hits = bool(self._prefetch_all_hits.pop(batch_num, False))
         if slot is not None:
             all_hits = self._fill_from_preissued(slot, compute_device)
-        elif all_hits and unique_ids.numel() > 0:
+
+        # Consume the pre-issued values while expired dirty rows are still
+        # resident.  The no-evict fill cannot overwrite those local updates.
+        # Cleanup may then persist and invalidate them, after which the
+        # forward lookup refetches the newly persisted value from the PS.
+        self._run_scheduled_cleanup(unique_ids)
+
+        if all_hits and unique_ids.numel() > 0:
             # The all-hit decision was taken at enqueue time, but TTL/capacity
-            # eviction, anti-entropy, and the writeback thread can invalidate
+            # eviction and anti-entropy cleanup can invalidate
             # these ids before they are consumed.  Re-validate immediately
             # ahead of the lock-free hit-only lookup; a stale flag would make
             # the lookup read rows that are no longer resident.
@@ -245,7 +252,11 @@ class BagPipePrefetchMixin:
             )
             return
 
-        # Vectorized hit test: resident and not expired (compact-indexed).
+        # Expiry is also the anti-entropy refresh trigger.  The prefetch may
+        # read an older PS value, but prefill_gpu_cache_no_evict cannot replace
+        # an expired row while it is still resident.  Cleanup persists dirty
+        # rows before invalidating them, and the forward miss then refetches
+        # the persisted value.
         # Control flow only uses numel metadata; counters go through the
         # GPU hot accumulators -- no .item() synchronization anywhere.
         hit = self._cached_dev[compact] & (self._ttl_dev[compact] >= batch_num)
@@ -286,6 +297,11 @@ class BagPipePrefetchMixin:
             if targets.numel() == 0:
                 return
         self._prefetch_all_hits[batch_num] = False
+
+        # Each target can increase residency by at most one.  Record that
+        # upper-bound transition once here, regardless of whether prefetch or
+        # the synchronous lookup performs the actual no-evict insertion.
+        self._record_cache_insert_attempts(int(targets.numel()))
 
         outstanding = sum(
             1 for h in self._prefetch_handles.values() if h is not None
@@ -368,22 +384,26 @@ class BagPipePrefetchMixin:
             logger.warning("[BagPipe] GPU cache prefill failed: %s", exc)
             return False
 
-        # Only rows that the no-evict kernel actually inserted are resident.
-        # This is the authoritative transition into the flat mirror.
+        # The no-evict result is authoritative post-fill residency.  Existing
+        # rows also return true, but their values were not overwritten.
         compact = self._to_compact(ids_cuda)
         in_range = compact < self._latest_dev.numel()
         compact = compact[in_range]
-        inserted = inserted[in_range]
-        compact = compact[inserted]
-        self._ttl_dev[compact] = slot.ttl
-        self._cached_dev[compact] = True
-        inserted_count = int(inserted.sum().item())
-        if inserted_count < int(inserted.numel()):
-            self._insert_failures += int(inserted.numel()) - inserted_count
+        resident = inserted[in_range]
+        was_cached = self._cached_dev[compact]
+        newly_resident = resident & ~was_cached
+        self._ttl_dev[compact[newly_resident]] = slot.ttl
+        self._cached_dev[compact[resident]] = True
+        resident_count = int(resident.sum().item())
+        failed_count = int(resident.numel()) - resident_count
+        if failed_count:
+            self._insert_failures += failed_count
             self._stats["bagpipe_insert_failures"] = float(
                 self._insert_failures
             )
+        refresh_pending = bool((resident & was_cached).any().item())
         return (
-            inserted_count == int(inserted.numel())
-            and int(inserted.numel()) == int(slot.num_ids)
+            not refresh_pending
+            and resident_count == int(resident.numel())
+            and int(resident.numel()) == int(slot.num_ids)
         )

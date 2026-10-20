@@ -440,8 +440,8 @@ class TestBagPipeSharedIdSetBuild(unittest.TestCase):
 
 
 class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
-    def test_cleanup_builds_the_set_at_the_step_boundary(self):
-        """The build point is cleanup (reached by every rank every step),
+    def test_scheduler_builds_the_set_at_the_step_boundary(self):
+        """The build point is scheduling (reached by every rank every step),
         not each rank's own batch counter."""
         from ..bagpipe_cache.eviction import BagPipeEvictionMixin
 
@@ -451,6 +451,12 @@ class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
             def __init__(self):
                 self._cached_dev = None
                 self.cache_capacity = 0
+                self._capacity_watermark = 0.9
+                self.cleanup_interval = 8
+                self._cleanup_pending = False
+                self._cleanup_scan_ttl = False
+                self._cleanup_batch = 0
+                self._insert_failures = 0
                 self._stats = {"bagpipe_cleanup_ms": 0.0}
 
             def _maybe_build_shared_id_set(self, current_step):
@@ -459,8 +465,135 @@ class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
             def _maybe_adjust_lookahead(self, current_batch):
                 return None
 
-        _Harness().cleanup(7)
+            def _cached_count_upper_bound(self):
+                return 0
+
+        _Harness().schedule_cleanup(7)
         self.assertEqual(seen, [7])
+
+
+class TestCleanupScheduling(unittest.TestCase):
+    def _controller(self, *, cache_capacity=10):
+        from ..bagpipe_cache.controller import BagPipeCacheController
+
+        class KV:
+            def contains_gpu_cache(self, ids):
+                return torch.ones_like(ids, dtype=torch.bool)
+
+            def invalidate_gpu_cache_with_mask(self, name, ids):
+                return torch.ones_like(ids, dtype=torch.bool)
+
+        return BagPipeCacheController(
+            embedding_module=None,
+            kv_client=KV(),
+            lookahead_value=4,
+            cleanup_batch_proportion=0.25,
+            cache_capacity=cache_capacity,
+            embedding_dim=4,
+            fuse_k=6,
+            table_offsets={"a": 0},
+            master_table_name="t",
+            device=torch.device("cpu"),
+            id_extractor=lambda sf: sf,
+            table_sizes={"a": 100},
+        )
+
+    def test_ttl_scan_is_scheduled_every_eight_steps(self):
+        ctrl = self._controller()
+        try:
+            for step in range(7):
+                ctrl.schedule_cleanup(step)
+                self.assertFalse(ctrl._cleanup_pending)
+            ctrl.schedule_cleanup(7)
+            self.assertTrue(ctrl._cleanup_pending)
+            self.assertTrue(ctrl._cleanup_scan_ttl)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_pressure_decision_uses_host_upper_bound(self):
+        ctrl = self._controller(cache_capacity=1)
+        try:
+            ctrl._cached_count_exact = 58  # high watermark is 57/64 entries
+            with mock.patch.object(
+                ctrl, "_cached_count", side_effect=AssertionError("full scan")
+            ):
+                ctrl.schedule_cleanup(0)
+            self.assertTrue(ctrl._cleanup_pending)
+            self.assertFalse(ctrl._cleanup_scan_ttl)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_ttl_and_insert_failure_share_one_budget(self):
+        ctrl = self._controller(cache_capacity=0)
+        try:
+            ids = torch.arange(20)
+            ctrl._cached_dev[ids] = True
+            ctrl._ttl_dev[ids] = 100
+            ctrl._ttl_dev[:4] = 0
+            ctrl._insert_failures = 10
+            ctrl._max_evict_per_cleanup = 6
+
+            ctrl._run_cleanup(8, scan_ttl=True)
+
+            self.assertEqual(int(ctrl._cached_dev.sum().item()), 14)
+            self.assertEqual(ctrl._stats["bagpipe_evicted_ids"], 6.0)
+            self.assertTrue(ctrl._cleanup_pending)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_pressure_cleanup_does_not_evict_current_batch_hits(self):
+        ctrl = self._controller(cache_capacity=1)
+        try:
+            ids = torch.arange(60)
+            protected = ids[:5]
+            ctrl._cached_dev[ids] = True
+            ctrl._ttl_dev[ids] = 10
+            ctrl._ttl_dev[protected] = 1
+
+            ctrl._run_cleanup(
+                8, scan_ttl=False, protected_ids=protected
+            )
+
+            self.assertTrue(bool(ctrl._cached_dev[protected].all().item()))
+            self.assertEqual(int(ctrl._cached_dev.sum().item()), 57)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_prefill_waits_for_gradients_before_cleanup(self):
+        ctrl = self._controller()
+        try:
+            order = []
+            ctrl._wait_pending_sync_now = lambda: order.append("gradients")
+            ctrl._run_scheduled_cleanup = lambda: order.append("cleanup")
+
+            ctrl.prefill_cache(None, torch.device("cpu"))
+
+            self.assertEqual(order, ["gradients", "cleanup"])
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_prefill_consumes_handle_before_cleanup(self):
+        ctrl = self._controller()
+        try:
+            order = []
+            ctrl.embedding_module = type("EmbeddingModule", (), {})()
+            ctrl._lookahead_ids.append((0, torch.tensor([1])))
+            ctrl._prepared_ids[0] = None
+            ctrl._prefetch_handles[0] = mock.sentinel.slot
+            ctrl._prefetch_all_hits[0] = False
+            ctrl._wait_pending_sync_now = lambda: order.append("gradients")
+            ctrl._fill_from_preissued = (
+                lambda slot, device: order.append("prefill") or False
+            )
+            ctrl._run_scheduled_cleanup = (
+                lambda protected_ids=None: order.append("cleanup")
+            )
+
+            ctrl.prefill_cache(None, torch.device("cpu"))
+
+            self.assertEqual(order, ["gradients", "prefill", "cleanup"])
+        finally:
+            ctrl._cleanup_queue.put(None)
 
 
 class TestBagPipeUnknownIdAggregation(unittest.TestCase):
@@ -681,6 +814,20 @@ class TestBagPipeAggregatedApply(unittest.TestCase):
         self.assertIsNone(
             harness.embedding_module._bagpipe_last_lookup_resident
         )
+
+    def test_lookup_does_not_renew_expired_resident_before_cleanup(self):
+        harness = _GradHarness(rank=0)
+        ids = torch.tensor([10], dtype=torch.int64)
+        grads = torch.tensor([[1.0, 1.0]])
+        harness._ttl_dev[10] = 1
+        harness.embedding_module._bagpipe_last_lookup_resident = (
+            ids,
+            torch.tensor([True]),
+        )
+
+        harness.update_grads("table", ids, grads, lr=0.1, batch_num=5)
+
+        self.assertEqual(int(harness._ttl_dev[10].item()), 1)
 
     def test_backfill_insert_failure_feeds_eviction_backstop(self):
         """A no-evict insert that fails on the lookup-backfill path must reach
@@ -993,6 +1140,87 @@ class TestPrefetchResidencyValidation(unittest.TestCase):
         finally:
             ctrl._cleanup_queue.put(None)
 
+    def test_expired_dirty_resident_row_is_prefetched_for_anti_entropy(self):
+        class KV:
+            def contains_gpu_cache(self, keys):
+                return torch.ones_like(keys, dtype=torch.bool)
+
+            def prefetch(self, ids):
+                return 123
+
+        ctrl = self._controller(KV())
+        try:
+            ids = torch.tensor([10], dtype=torch.int64)
+            compact = ctrl._to_compact(ids)
+            ctrl._latest_dev[compact] = 7
+            ctrl._ttl_dev[compact] = 1
+            ctrl._cached_dev[compact] = True
+            ctrl._dirty_dev[compact] = True
+
+            ctrl._preissue_prefetch(7, ids, compact)
+
+            self.assertEqual(ctrl._prefetch_handles[7].handle, 123)
+            self.assertFalse(ctrl._prefetch_all_hits[7])
+            self.assertEqual(ctrl._prefetch_handles[7].ids_cpu.tolist(), [10])
+            self.assertEqual(int(ctrl._ttl_dev[compact].item()), 1)
+            self.assertTrue(bool(ctrl._dirty_dev[compact].item()))
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_insert_upper_bound_counts_prefetch_targets_once(self):
+        class KV:
+            def prefetch(self, ids):
+                return 123
+
+        ctrl = self._controller(KV())
+        try:
+            ids = torch.tensor([10, 20], dtype=torch.int64)
+            compact = ctrl._to_compact(ids)
+            ctrl._latest_dev[compact] = 7
+            ctrl._ttl_dev[10] = 100
+            ctrl._cached_dev[10] = True
+
+            ctrl._preissue_prefetch(7, ids, compact)
+
+            self.assertEqual(ctrl._cached_insert_attempts, 1)
+            self.assertEqual(ctrl._prefetch_handles[7].ids_cpu.tolist(), [20])
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_expired_resident_prefill_preserves_value_and_expiry(self):
+        class KV:
+            def wait_and_get(self, handle, embedding_dim, device):
+                return torch.full((1, embedding_dim), -1.0)
+
+            def prefill_gpu_cache_no_evict(self, name, ids, values):
+                # The C++ contract reports post-fill residency.  A resident
+                # row returns true even though its value was not replaced.
+                return torch.ones_like(ids, dtype=torch.bool)
+
+        from ..bagpipe_cache.types import PrefetchSlot
+
+        ctrl = self._controller(KV())
+        try:
+            ctrl._cached_dev[10] = True
+            ctrl._dirty_dev[10] = True
+            ctrl._ttl_dev[10] = 1
+            slot = PrefetchSlot(
+                handle=123,
+                ids_cpu=torch.tensor([10]),
+                ttl=263,
+                issue_ts=0.0,
+                num_ids=1,
+            )
+
+            all_hits = ctrl._fill_from_preissued(slot, torch.device("cpu"))
+
+            self.assertFalse(all_hits)
+            self.assertEqual(int(ctrl._ttl_dev[10].item()), 1)
+            self.assertTrue(bool(ctrl._dirty_dev[10].item()))
+            self.assertEqual(ctrl._insert_failures, 0)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
     def test_external_cache_reset_fails_loudly(self):
         class KV:
             def __init__(self):
@@ -1115,6 +1343,9 @@ class TestAuthoritativeInvalidation(unittest.TestCase):
         m._cleanup_queue = queue.Queue()
 
         class KV:
+            def contains_gpu_cache(self, ids):
+                return torch.tensor([True, False, True])
+
             def gpu_cache_lookup_flat(self, keys, embedding_dim):
                 n = int(keys.numel())
                 return torch.arange(
@@ -1124,16 +1355,18 @@ class TestAuthoritativeInvalidation(unittest.TestCase):
             def invalidate_gpu_cache_with_mask(self, name, ids):
                 self.ids = ids.clone()
                 self.name = name
-                return torch.tensor([True, False, True])
+                return torch.ones_like(ids, dtype=torch.bool)
+
+            def emb_write_values(self, name, ids, vals):
+                m.written.append((name, ids.clone()))
 
         m.kv_client = KV()
         m.master_table_name = "t"
         m._evict_entries(torch.tensor([5, 10, 20]))
 
         # 10 only ever existed in the mirror, so there is nothing to write
-        # back for it; only the genuinely resident 5 and 20 are enqueued.
-        wb_ids, _, _ = m._cleanup_queue.get_nowait()
-        self.assertEqual(wb_ids.tolist(), [5, 20])
+        # back for it; the genuinely resident rows are persisted first.
+        self.assertEqual(m.written[0][1].tolist(), [5, 20])
         self.assertEqual(m._stats["bagpipe_writeback_ids"], 2.0)
         self.assertFalse(bool(m._cached_dev[5].item()))
         self.assertFalse(bool(m._cached_dev[10].item()))
@@ -1165,6 +1398,9 @@ class TestAuthoritativeInvalidation(unittest.TestCase):
         m._cleanup_queue = queue.Queue()
 
         class KV:
+            def contains_gpu_cache(self, ids):
+                return torch.tensor([True, False, True])
+
             def gpu_cache_lookup_flat(self, keys, embedding_dim):
                 n = int(keys.numel())
                 return torch.arange(
@@ -1173,14 +1409,16 @@ class TestAuthoritativeInvalidation(unittest.TestCase):
 
             def invalidate_gpu_cache_with_mask(self, name, ids):
                 # 10 is gone from the cache; only the mirror still lists it.
-                return torch.tensor([True, False, True])
+                return torch.ones_like(ids, dtype=torch.bool)
+
+            def emb_write_values(self, name, ids, vals):
+                m.written.append((name, ids.clone()))
 
         m.kv_client = KV()
         m.master_table_name = "t"
         m._evict_entries(torch.tensor([5, 10, 20]))
 
-        wb_ids, _, _ = m._cleanup_queue.get_nowait()
-        self.assertEqual(wb_ids.tolist(), [5, 20])
+        self.assertEqual(m.written[0][1].tolist(), [5, 20])
 
         expired_again = (m._cached_dev & (m._ttl_dev < 101)).nonzero()
         self.assertEqual(expired_again.tolist(), [])
@@ -1410,11 +1648,17 @@ class TestSharedRowEvictionWriteback(unittest.TestCase):
         m._cleanup_queue = queue.Queue()
 
         class KV:
+            def contains_gpu_cache(self, ids):
+                return torch.ones_like(ids, dtype=torch.bool)
+
             def gpu_cache_lookup_flat(self, keys, embedding_dim):
                 n = int(keys.numel())
                 return torch.arange(
                     n * embedding_dim, dtype=torch.float32
                 ).reshape(n, embedding_dim)
+
+            def emb_write_values(self, name, ids, vals):
+                m.written.append((name, ids.clone()))
 
             def invalidate_gpu_cache_with_mask(self, name, ids):
                 return torch.ones_like(ids, dtype=torch.bool)
@@ -1432,13 +1676,55 @@ class TestSharedRowEvictionWriteback(unittest.TestCase):
 
         m._evict_entries(torch.tensor([5, 10, 20]))
 
-        wb_ids, _, _ = m._cleanup_queue.get_nowait()
-        self.assertEqual(wb_ids.tolist(), [5, 10])
+        self.assertEqual(m.written[0][1].tolist(), [5, 10])
+        self.assertFalse(bool(m._dirty_dev[5].item()))
+        self.assertFalse(bool(m._dirty_dev[10].item()))
 
     def test_clean_rows_skip_writeback(self):
         m = self._harness()
         m._evict_entries(torch.tensor([5, 10, 20]))
-        self.assertTrue(m._cleanup_queue.empty())
+        self.assertEqual(m.written, [])
+
+    def test_writeback_failure_keeps_dirty_row_resident(self):
+        m = self._harness()
+        m._dirty_dev[5] = True
+
+        def fail_write(name, ids, vals):
+            raise RuntimeError("PS unavailable")
+
+        m.kv_client.emb_write_values = fail_write
+        removed = m._evict_entries(torch.tensor([5]))
+
+        self.assertEqual(removed, 0)
+        self.assertTrue(bool(m._cached_dev[5].item()))
+        self.assertTrue(bool(m._dirty_dev[5].item()))
+        self.assertEqual(int(m._ttl_dev[5].item()), 100)
+
+    def test_partial_shard_failure_reconciles_completed_rows(self):
+        m = self._harness()
+        m._dirty_dev[torch.tensor([5, 10])] = True
+        calls = 0
+
+        def contains(ids):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return torch.ones_like(ids, dtype=torch.bool)
+            return torch.tensor([False, True])
+
+        m.kv_client.contains_gpu_cache = contains
+
+        def fail_after_first_shard(name, ids, vals):
+            raise RuntimeError("second shard unavailable")
+
+        m.kv_client.emb_write_values = fail_after_first_shard
+        removed = m._evict_entries(torch.tensor([5, 10]))
+
+        self.assertEqual(removed, 1)
+        self.assertFalse(bool(m._cached_dev[5].item()))
+        self.assertFalse(bool(m._dirty_dev[5].item()))
+        self.assertTrue(bool(m._cached_dev[10].item()))
+        self.assertTrue(bool(m._dirty_dev[10].item()))
 
 
 if __name__ == "__main__":

@@ -73,6 +73,21 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
         self.assertTrue(torch.equal(hit_values, values[inserted]))
         self.assertFalse(bool(miss.any().item()))
 
+        # Reinserting a resident key only refreshes recency; it must not
+        # overwrite a locally updated/dirty value with a stale PS result.
+        resident_keys = keys[inserted][:1]
+        resident_values = values[inserted][:1]
+        stale_values = torch.full_like(resident_values, -1)
+        reinserted = self.client.prefill_gpu_cache_no_evict(
+            table_name, resident_keys, stale_values
+        )
+        self.assertTrue(bool(reinserted.all().item()))
+        preserved, miss = self.client.gpu_cache_lookup_flat_assuming_hits(
+            resident_keys, 4
+        )
+        self.assertTrue(torch.equal(preserved, resident_values))
+        self.assertFalse(bool(miss.any().item()))
+
         # A no-evict insert must never remove an already resident row.
         old_keys = keys[inserted]
         old_values = values[inserted]
@@ -211,6 +226,23 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
             table_name, keys[[1, 3]]
         )
         self.assertFalse(bool(again.any().item()))
+
+    def test_value_writeback_persists_before_invalidating(self) -> None:
+        table_name = f"gpu_cache_writeback_{time.time_ns()}"
+        self.client.init_data(
+            name=table_name, shape=(256, 4), dtype=torch.float32
+        )
+        keys = torch.tensor([1, 3], dtype=torch.int64, device="cuda")
+        old_values = torch.zeros((2, 4), dtype=torch.float32, device="cuda")
+        new_values = torch.full((2, 4), 7.0, dtype=torch.float32, device="cuda")
+        self.client.prefill_gpu_cache_no_evict(table_name, keys, old_values)
+
+        self.client.emb_write_values(table_name, keys, new_values)
+
+        self.assertFalse(bool(self.client.contains_gpu_cache(keys).any().item()))
+        self.assertTrue(
+            torch.equal(self.client.local_lookup_flat(table_name, keys), new_values)
+        )
 
 
 if __name__ == "__main__":

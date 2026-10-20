@@ -69,7 +69,11 @@ class BagPipeCacheController(
         self._pressure_high = 0.90
         self._lookahead_adjust_interval = 10
         self.cleanup_batch_proportion = float(cleanup_batch_proportion)
-        self.cleanup_interval = max(1, int(self.cleanup_batch_proportion * self._dynamic_lookahead))
+        # TTL reclamation is intentionally decoupled from lookahead.  The
+        # former controls cache residency while the latter controls prefetch
+        # lead time; tying them together made the full bookkeeping scan run
+        # every step for the default lookahead=4, cleanup_proportion=0.25.
+        self.cleanup_interval = 8
         # The C++ gpu cache's capacity unit is a slab set; each set holds
         # SET_ASSOCIATIVITY(2) x SLAB_SIZE(32) = 64 entry slots
         # (nv_gpu_cache.hpp / nv_gpu_cache.cu num_slot_ computation). The
@@ -116,6 +120,18 @@ class BagPipeCacheController(
         self._cached_dev: Optional[torch.Tensor] = None
         self._dirty_dev: Optional[torch.Tensor] = None
         self._alloc_bookkeeping(num_tables << self._bk_shift)
+        # Host-side conservative occupancy.  Inserts are counted as attempts,
+        # so this can overestimate but never underestimate pressure between
+        # the exact snapshots taken by real cleanup runs.
+        self._cached_count_exact = 0
+        self._cached_insert_attempts = 0
+        self._cached_removed = 0
+        self._dirty_count_snapshot = 0
+        self._dirty_mark_attempts = 0
+        self._dirty_cleared = 0
+        self._cleanup_pending = False
+        self._cleanup_scan_ttl = False
+        self._cleanup_batch = 0
 
         # ---- Lookahead buffer (future batch unique ID sets) ----
         self._lookahead_ids: Deque[Tuple[int, torch.Tensor]] = deque()
@@ -301,10 +317,9 @@ class BagPipeCacheController(
     def consume_stats(self, *, reset: bool = True) -> Dict[str, float]:
         """Merge current stats into a snapshot.
 
-        Hot counters are drained here; the host readbacks (hot-accumulator
-        .item()s plus the cached/dirty sums) force device work to complete,
-        so the caller MUST invoke this after its device-drain point (the
-        runner's ``timer.finish()``) -- calling it earlier silently moves
+        Hot counters are drained here; their host readbacks force device work
+        to complete, so the caller MUST invoke this after its device-drain
+        point (the runner's ``timer.finish()``) -- calling it earlier silently moves
         device-wait time into the enclosing phase's timer.  The GPU hot
         accumulators are zeroed regardless of ``reset``: the accumulated
         value has already been merged into ``_stats``, and leaving it on
@@ -324,8 +339,12 @@ class BagPipeCacheController(
         for key, acc in self._hot_stats_dev.items():
             self._stats[key] = self._stats.get(key, 0.0) + float(acc.item())
             acc.zero_()
-        self._stats["bagpipe_cache_entries"] = float(self._cached_count())
-        self._stats["bagpipe_dirty_entries"] = float(self._dirty_count())
+        self._stats["bagpipe_cache_entries"] = float(
+            self._cached_count_upper_bound()
+        )
+        self._stats["bagpipe_dirty_entries"] = float(
+            self._dirty_count_upper_bound()
+        )
         self._stats["bagpipe_lookahead"] = float(self.lookahead_value)
         self._stats["bagpipe_cleanup_interval"] = float(self.cleanup_interval)
         shared = self._shared_ids
@@ -391,6 +410,44 @@ class BagPipeCacheController(
         if self._dirty_dev is None:
             return 0
         return int(self._dirty_dev.sum().item())
+
+    def _cached_count_upper_bound(self) -> int:
+        return max(
+            0,
+            self._cached_count_exact
+            + self._cached_insert_attempts
+            - self._cached_removed,
+        )
+
+    def _record_cache_insert_attempts(self, count: int) -> None:
+        self._cached_insert_attempts += max(0, int(count))
+
+    def _record_cache_removals(self, count: int) -> None:
+        self._cached_removed += max(0, int(count))
+
+    def _dirty_count_upper_bound(self) -> int:
+        return max(
+            0,
+            self._dirty_count_snapshot
+            + self._dirty_mark_attempts
+            - self._dirty_cleared,
+        )
+
+    def _record_dirty_marks(self, count: int) -> None:
+        self._dirty_mark_attempts += max(0, int(count))
+
+    def _record_dirty_clears(self, count: int) -> None:
+        self._dirty_cleared += max(0, int(count))
+
+    def _refresh_count_snapshots(self) -> int:
+        """Refresh exact counts during a cleanup run, never on skipped steps."""
+        self._cached_count_exact = self._cached_count()
+        self._cached_insert_attempts = 0
+        self._cached_removed = 0
+        self._dirty_count_snapshot = self._dirty_count()
+        self._dirty_mark_attempts = 0
+        self._dirty_cleared = 0
+        return self._cached_count_exact
 
     def _check_gpu_cache_generation(self) -> None:
         """Fail loudly if another component reset the owned C++ cache."""

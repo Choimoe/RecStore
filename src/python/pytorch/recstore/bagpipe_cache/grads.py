@@ -137,6 +137,9 @@ class BagPipeGradMixin:
         agg_compact = self._compact_in_range(self._to_compact(agg_ids))
         resident = agg_compact[self._cached_dev[agg_compact]]
         self._dirty_dev[resident] = True
+        record_dirty = getattr(self, "_record_dirty_marks", None)
+        if callable(record_dirty):
+            record_dirty(int(resident.numel()))
 
     # ------------------------------------------------------------------
     #  Overlap barrier (aggregated all_reduce of the previous step)
@@ -286,31 +289,40 @@ class BagPipeGradMixin:
         in_range = all_compact < self._latest_dev.numel()
         current_compact = all_compact[in_range]
         if all_resident:
+            renew = (
+                ~self._cached_dev[current_compact]
+                | (self._ttl_dev[current_compact] >= batch_num)
+            )
             self._cached_dev[current_compact] = True
-            self._ttl_dev[current_compact] = batch_num + self._ttl_margin
+            self._ttl_dev[current_compact[renew]] = (
+                batch_num + self._ttl_margin
+            )
         elif residency_mask is not None:
             residency_mask = residency_mask[in_range]
             failed_mask = ~residency_mask
             self._cached_dev[current_compact[failed_mask]] = False
             resident_compact = current_compact[residency_mask]
+            renew = (
+                ~self._cached_dev[resident_compact]
+                | (self._ttl_dev[resident_compact] >= batch_num)
+            )
             self._cached_dev[resident_compact] = True
-            self._ttl_dev[resident_compact] = batch_num + self._ttl_margin
+            self._ttl_dev[resident_compact[renew]] = (
+                batch_num + self._ttl_margin
+            )
             # Backfill no-evict insert failures must feed the eviction
             # backstop too; otherwise a full cache is only noticed via the
             # prefill path.
             self._insert_failures += int(failed_mask.sum().item())
             self._stats["bagpipe_insert_failures"] = float(self._insert_failures)
         else:
-            # No authoritative residency info for this batch: the production
-            # lookup path records none (``_bagpipe_last_lookup_resident`` has
-            # no production writer).  Leave the mirror untouched.  Clearing
-            # here dropped every shared row from the mirror each step -- the
-            # fill marks them, this path unmarked them, and the deferred
-            # aggregated apply then skipped their dirty mark, so their
-            # increments never reached the PS (no per-step push, no
-            # anti-entropy repair exists to recover them).
+            # A fallback lookup supplied no authoritative residency info for
+            # this batch.  Leave the mirror untouched.  Clearing it here can
+            # drop shared rows before the deferred aggregated apply marks them
+            # dirty, losing their increments because there is no per-step PS
+            # push.
             # Stale bits are tolerated downstream: the eviction writeback
-            # keeps only rows the invalidator actually removed, and the
+            # reconciles against authoritative cache state, and the
             # all-hits lookup revalidates residency via contains_gpu_cache.
             pass
 
@@ -331,6 +343,9 @@ class BagPipeGradMixin:
             # the dirty mark agree.
             local_compact = self._compact_in_range(self._to_compact(local_ids))
             self._dirty_dev[local_compact] = True
+            record_dirty = getattr(self, "_record_dirty_marks", None)
+            if callable(record_dirty):
+                record_dirty(int(local_compact.numel()))
             self._cached_dev[local_compact] = True
             self._ttl_dev[local_compact] = batch_num + self._ttl_margin
 
