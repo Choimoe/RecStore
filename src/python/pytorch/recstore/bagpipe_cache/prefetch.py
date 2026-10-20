@@ -163,6 +163,9 @@ class BagPipePrefetchMixin:
         """
         t_start = time.perf_counter()
         self._wait_pending_sync_now()
+        # Eviction is safe only after the previous step's aggregated
+        # gradients have landed in the cache and marked their rows dirty.
+        self._run_scheduled_cleanup()
         self._check_gpu_cache_generation()
 
         if not self._lookahead_ids:
@@ -245,10 +248,12 @@ class BagPipePrefetchMixin:
             )
             return
 
-        # Vectorized hit test: resident and not expired (compact-indexed).
+        # TTL is eviction eligibility, not read validity.  An expired row
+        # that is still resident may contain dirty updates newer than the PS;
+        # reuse and renew it instead of fetching a stale value over it.
         # Control flow only uses numel metadata; counters go through the
         # GPU hot accumulators -- no .item() synchronization anywhere.
-        hit = self._cached_dev[compact] & (self._ttl_dev[compact] >= batch_num)
+        hit = self._cached_dev[compact]
         hit_compact = compact[hit]
         if hit_compact.numel() > 0:
             self._hot_add("bagpipe_prefetch_skip_cached", hit.sum())
@@ -374,6 +379,7 @@ class BagPipePrefetchMixin:
         in_range = compact < self._latest_dev.numel()
         compact = compact[in_range]
         inserted = inserted[in_range]
+        self._record_cache_insert_attempts(int(inserted.numel()))
         compact = compact[inserted]
         self._ttl_dev[compact] = slot.ttl
         self._cached_dev[compact] = True

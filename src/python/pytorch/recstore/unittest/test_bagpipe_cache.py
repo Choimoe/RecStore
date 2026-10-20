@@ -440,8 +440,8 @@ class TestBagPipeSharedIdSetBuild(unittest.TestCase):
 
 
 class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
-    def test_cleanup_builds_the_set_at_the_step_boundary(self):
-        """The build point is cleanup (reached by every rank every step),
+    def test_scheduler_builds_the_set_at_the_step_boundary(self):
+        """The build point is scheduling (reached by every rank every step),
         not each rank's own batch counter."""
         from ..bagpipe_cache.eviction import BagPipeEvictionMixin
 
@@ -451,6 +451,12 @@ class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
             def __init__(self):
                 self._cached_dev = None
                 self.cache_capacity = 0
+                self._capacity_watermark = 0.9
+                self.cleanup_interval = 8
+                self._cleanup_pending = False
+                self._cleanup_scan_ttl = False
+                self._cleanup_batch = 0
+                self._insert_failures = 0
                 self._stats = {"bagpipe_cleanup_ms": 0.0}
 
             def _maybe_build_shared_id_set(self, current_step):
@@ -459,8 +465,91 @@ class TestCleanupTriggersSharedIdBuild(unittest.TestCase):
             def _maybe_adjust_lookahead(self, current_batch):
                 return None
 
-        _Harness().cleanup(7)
+            def _cached_count_upper_bound(self):
+                return 0
+
+        _Harness().schedule_cleanup(7)
         self.assertEqual(seen, [7])
+
+
+class TestCleanupScheduling(unittest.TestCase):
+    def _controller(self, *, cache_capacity=10):
+        from ..bagpipe_cache.controller import BagPipeCacheController
+
+        class KV:
+            def invalidate_gpu_cache_with_mask(self, name, ids):
+                return torch.ones_like(ids, dtype=torch.bool)
+
+        return BagPipeCacheController(
+            embedding_module=None,
+            kv_client=KV(),
+            lookahead_value=4,
+            cleanup_batch_proportion=0.25,
+            cache_capacity=cache_capacity,
+            embedding_dim=4,
+            fuse_k=6,
+            table_offsets={"a": 0},
+            master_table_name="t",
+            device=torch.device("cpu"),
+            id_extractor=lambda sf: sf,
+            table_sizes={"a": 100},
+        )
+
+    def test_ttl_scan_is_scheduled_every_eight_steps(self):
+        ctrl = self._controller()
+        try:
+            for step in range(7):
+                ctrl.schedule_cleanup(step)
+                self.assertFalse(ctrl._cleanup_pending)
+            ctrl.schedule_cleanup(7)
+            self.assertTrue(ctrl._cleanup_pending)
+            self.assertTrue(ctrl._cleanup_scan_ttl)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_pressure_decision_uses_host_upper_bound(self):
+        ctrl = self._controller(cache_capacity=1)
+        try:
+            ctrl._cached_count_exact = 58  # high watermark is 57/64 entries
+            with mock.patch.object(
+                ctrl, "_cached_count", side_effect=AssertionError("full scan")
+            ):
+                ctrl.schedule_cleanup(0)
+            self.assertTrue(ctrl._cleanup_pending)
+            self.assertFalse(ctrl._cleanup_scan_ttl)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_ttl_and_insert_failure_share_one_budget(self):
+        ctrl = self._controller(cache_capacity=0)
+        try:
+            ids = torch.arange(20)
+            ctrl._cached_dev[ids] = True
+            ctrl._ttl_dev[ids] = 100
+            ctrl._ttl_dev[:4] = 0
+            ctrl._insert_failures = 10
+            ctrl._max_evict_per_cleanup = 6
+
+            ctrl._run_cleanup(8, scan_ttl=True)
+
+            self.assertEqual(int(ctrl._cached_dev.sum().item()), 14)
+            self.assertEqual(ctrl._stats["bagpipe_evicted_ids"], 6.0)
+            self.assertTrue(ctrl._cleanup_pending)
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_prefill_waits_for_gradients_before_cleanup(self):
+        ctrl = self._controller()
+        try:
+            order = []
+            ctrl._wait_pending_sync_now = lambda: order.append("gradients")
+            ctrl._run_scheduled_cleanup = lambda: order.append("cleanup")
+
+            ctrl.prefill_cache(None, torch.device("cpu"))
+
+            self.assertEqual(order, ["gradients", "cleanup"])
+        finally:
+            ctrl._cleanup_queue.put(None)
 
 
 class TestBagPipeUnknownIdAggregation(unittest.TestCase):
@@ -990,6 +1079,32 @@ class TestPrefetchResidencyValidation(unittest.TestCase):
 
             self.assertIsNone(ctrl._prefetch_handles[7])
             self.assertTrue(ctrl._prefetch_all_hits[7])
+        finally:
+            ctrl._cleanup_queue.put(None)
+
+    def test_expired_dirty_resident_row_is_renewed_without_prefetch(self):
+        class KV:
+            def contains_gpu_cache(self, keys):
+                return torch.ones_like(keys, dtype=torch.bool)
+
+            def prefetch(self, ids):
+                raise AssertionError("resident dirty row must not refetch")
+
+        ctrl = self._controller(KV())
+        try:
+            ids = torch.tensor([10], dtype=torch.int64)
+            compact = ctrl._to_compact(ids)
+            ctrl._latest_dev[compact] = 7
+            ctrl._ttl_dev[compact] = 1
+            ctrl._cached_dev[compact] = True
+            ctrl._dirty_dev[compact] = True
+
+            ctrl._preissue_prefetch(7, ids, compact)
+
+            self.assertIsNone(ctrl._prefetch_handles[7])
+            self.assertTrue(ctrl._prefetch_all_hits[7])
+            self.assertEqual(int(ctrl._ttl_dev[compact].item()), 7 + 256)
+            self.assertTrue(bool(ctrl._dirty_dev[compact].item()))
         finally:
             ctrl._cleanup_queue.put(None)
 

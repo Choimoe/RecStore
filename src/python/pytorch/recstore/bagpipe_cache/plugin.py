@@ -218,7 +218,7 @@ class BagPipePlugin(OptimizationPlugin):
             self._controller.finalize_prescan()
 
     def on_step_end(self, step: int, row: Dict[str, Any]) -> None:
-        """Step-end hook: TTL eviction + writeback.
+        """Step-end hook: schedule eviction for the next safe prefill point.
 
         Called after ``sparse_optimizer.step()`` and ``flush()``.  Stats
         draining deliberately does NOT happen here: the readbacks belong
@@ -227,7 +227,7 @@ class BagPipePlugin(OptimizationPlugin):
         """
         if self._controller is not None:
             cleanup_start = time.perf_counter()
-            self._controller.cleanup(step)
+            self._controller.schedule_cleanup(step)
             row["bagpipe_cleanup_step_ms"] = (
                 time.perf_counter() - cleanup_start
             ) * 1e3

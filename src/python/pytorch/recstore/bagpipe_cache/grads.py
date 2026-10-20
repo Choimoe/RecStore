@@ -137,6 +137,9 @@ class BagPipeGradMixin:
         agg_compact = self._compact_in_range(self._to_compact(agg_ids))
         resident = agg_compact[self._cached_dev[agg_compact]]
         self._dirty_dev[resident] = True
+        record_dirty = getattr(self, "_record_dirty_marks", None)
+        if callable(record_dirty):
+            record_dirty(int(resident.numel()))
 
     # ------------------------------------------------------------------
     #  Overlap barrier (aggregated all_reduce of the previous step)
@@ -285,6 +288,13 @@ class BagPipeGradMixin:
         all_compact = self._to_compact(ids_cuda)
         in_range = all_compact < self._latest_dev.numel()
         current_compact = all_compact[in_range]
+        if all_resident or residency_mask is not None:
+            record_inserts = getattr(self, "_record_cache_insert_attempts", None)
+            if callable(record_inserts):
+                # The no-evict lookup may have filled any queried row.  Count
+                # all rows as attempts: duplicates only make the pressure
+                # estimate conservative until the next exact cleanup sample.
+                record_inserts(int(ids_cuda.numel()))
         if all_resident:
             self._cached_dev[current_compact] = True
             self._ttl_dev[current_compact] = batch_num + self._ttl_margin
@@ -331,6 +341,9 @@ class BagPipeGradMixin:
             # the dirty mark agree.
             local_compact = self._compact_in_range(self._to_compact(local_ids))
             self._dirty_dev[local_compact] = True
+            record_dirty = getattr(self, "_record_dirty_marks", None)
+            if callable(record_dirty):
+                record_dirty(int(local_compact.numel()))
             self._cached_dev[local_compact] = True
             self._ttl_dev[local_compact] = batch_num + self._ttl_margin
 

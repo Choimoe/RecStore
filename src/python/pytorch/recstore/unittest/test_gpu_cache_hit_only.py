@@ -73,6 +73,21 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
         self.assertTrue(torch.equal(hit_values, values[inserted]))
         self.assertFalse(bool(miss.any().item()))
 
+        # Reinserting a resident key only refreshes recency; it must not
+        # overwrite a locally updated/dirty value with a stale PS result.
+        resident_keys = keys[inserted][:1]
+        resident_values = values[inserted][:1]
+        stale_values = torch.full_like(resident_values, -1)
+        reinserted = self.client.prefill_gpu_cache_no_evict(
+            table_name, resident_keys, stale_values
+        )
+        self.assertTrue(bool(reinserted.all().item()))
+        preserved, miss = self.client.gpu_cache_lookup_flat_assuming_hits(
+            resident_keys, 4
+        )
+        self.assertTrue(torch.equal(preserved, resident_values))
+        self.assertFalse(bool(miss.any().item()))
+
         # A no-evict insert must never remove an already resident row.
         old_keys = keys[inserted]
         old_values = values[inserted]
