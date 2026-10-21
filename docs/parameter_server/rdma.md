@@ -134,7 +134,7 @@ server 通过它交换 `RawVerbsNodeMeta` 并等待 ready。控制面额外承�
 | `--rdma-health-probe-timeout-ms` | 慢路径健康查询 RPC 超时；默认 `1000` |
 | `--rdma-cq-harvest-interval-ms` | 等待期 CQ 收割间隔；默认 `50`，`0` 关闭（旧行为） |
 | `--rdma-lane-rebuild-enabled` | 置脏 lane 的 QP 重建自愈；默认关闭，需 server 与 client 同时开启 |
-| `--rdma-lane-rebuild-max-attempts` | 每条 lane 的重建次数上限，超过进入终态 `dead`；默认 `3` |
+| `--rdma-lane-rebuild-max-attempts` | 每条 lane **进程生命周期内累计**的重建次数上限，超过进入终态 `dead`；成功恢复不重置计数；默认 `3` |
 | `--rdma-lane-rebuild-wait-ms` | 双边重建握手等待 peer ack 的期限；默认 `2000` |
 | `--rdma-lane-rebuild-poll-ms` | server 轮询 client `lane_generation` 的间隔；默认 `50` |
 | `--rdma-lane-rebuild-cooldown-ms` | 同一 lane 两次重建尝试的最小间隔；默认 `1000` |
