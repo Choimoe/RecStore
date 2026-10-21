@@ -57,7 +57,6 @@ from launch_config import (
     extract_explicit_config_keys,
 )
 from python.pytorch.torchrec_kv.EmbeddingBag import RecStoreEmbeddingBagCollection
-from python.pytorch.recstore.gradient_compression import warmup_topk
 
 try:
     from data.custom_dataloader import get_dataloader
@@ -599,14 +598,6 @@ def main(argv: List[str]) -> None:
         keep_ratio=args.sparse_grad_keep_ratio,
     )
     sparse_optimizer.validate_config()
-    if args.sparse_grad_keep_ratio < 1.0 and torch.device(device).type == "cuda":
-        with torch.no_grad():
-            warmup_topk(
-                device=device,
-                embedding_dim=args.embedding_dim,
-                num_rows=1200,
-                keep_ratio=args.sparse_grad_keep_ratio,
-            )
     
     if dense_params:
         if args.adagrad:

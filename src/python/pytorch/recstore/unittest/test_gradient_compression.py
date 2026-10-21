@@ -4,8 +4,6 @@ import torch
 
 from recstore.gradient_compression import select_topk_rows
 
-import recstore.gradient_compression as compression
-
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_topk_low_precision_energy_uses_float32(dtype):
@@ -127,94 +125,4 @@ def test_topk_rejects_invalid_dimensions():
     with pytest.raises(ValueError):
         select_topk_rows(
             ids, grads.flatten(), keep_ratio=0.5
-        )
-
-def test_warmup_topk_cpu(monkeypatch):
-    """CPU warmup uses the expected tensor shapes and dtypes."""
-    calls = []
-    original_select = compression.select_topk_rows
-
-    def record_select(ids, grads, keep_ratio):
-        calls.append((
-            tuple(ids.shape),
-            ids.dtype,
-            tuple(grads.shape),
-            grads.dtype,
-            ids.device.type,
-            keep_ratio,
-        ))
-        return original_select(ids, grads, keep_ratio)
-
-    monkeypatch.setattr(
-        compression, "select_topk_rows", record_select
-    )
-
-    def forbid_cuda_sync(*args, **kwargs):
-        pytest.fail("CPU warmup must not synchronize CUDA")
-
-    monkeypatch.setattr(
-        torch.cuda, "synchronize", forbid_cuda_sync
-    )
-
-    result = compression.warmup_topk(
-        device=torch.device("cpu"),
-        embedding_dim=4,
-        num_rows=8,
-        keep_ratio=0.25,
-    )
-
-    assert result is None
-    assert calls == [
-        ((8,), torch.int64, (8, 4), torch.float32, "cpu", 0.25)
-    ]
-
-
-def test_warmup_topk_disabled(monkeypatch):
-    """Disabled warmup neither allocates tensors nor invokes Top-K."""
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("Disabled warmup must not execute Top-K")
-
-    monkeypatch.setattr(
-        compression, "select_topk_rows", forbidden
-    )
-    monkeypatch.setattr(torch, "arange", forbidden)
-
-    result = compression.warmup_topk(
-        device="cpu",
-        embedding_dim=4,
-        num_rows=8,
-        keep_ratio=1.0,
-    )
-
-    assert result is None
-
-
-@pytest.mark.parametrize(
-    "embedding_dim,num_rows,keep_ratio",
-    [
-        (0, 8, 0.25),
-        (-1, 8, 0.25),
-        (4, 0, 0.25),
-        (4, -1, 0.25),
-        (4, 2.5, 0.25),
-        (True, 8, 0.25),
-        (4, 8, 0.0),
-        (4, 8, -0.1),
-        (4, 8, 1.5),
-        (4, 8, float("nan")),
-        (0, 8, 1.0),
-    ],
-)
-def test_warmup_topk_invalid_parameters(
-    embedding_dim, num_rows, keep_ratio
-):
-    """Reject invalid parameters even when compression is disabled."""
-
-    with pytest.raises(ValueError):
-        compression.warmup_topk(
-            device="cpu",
-            embedding_dim=embedding_dim,
-            num_rows=num_rows,
-            keep_ratio=keep_ratio,
         )

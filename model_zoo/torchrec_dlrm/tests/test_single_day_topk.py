@@ -1,10 +1,7 @@
-"""Exercise the standalone import bootstrap and optimizer ordering without training."""
+"""Exercise optimizer ordering without training."""
 
 import ast
-import os
 from pathlib import Path
-import subprocess
-import sys
 from types import SimpleNamespace
 import unittest
 
@@ -17,37 +14,6 @@ SCRIPT = Path(__file__).with_name("dlrm_main_single_day.py")
 
 
 class SingleDayTopKTest(unittest.TestCase):
-    def test_compression_import_works_after_standalone_path_bootstrap(self):
-        # Execute the real bootstrap/import statements in their original order.
-        tree = ast.parse(SCRIPT.read_text())
-        names = {"REPO_ROOT", "RECSTORE_PATH", "DLRM_PATH"}
-        nodes = []
-        for node in tree.body:
-            if isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id in names
-                for target in node.targets
-            ):
-                nodes.append(node)
-            elif isinstance(node, ast.If) and isinstance(node.test, ast.Compare):
-                if isinstance(node.test.left, ast.Name) and node.test.left.id in names:
-                    nodes.append(node)
-            elif isinstance(node, ast.ImportFrom) and node.module == (
-                "python.pytorch.recstore.gradient_compression"
-            ):
-                nodes.append(node)
-        code = "import os, sys\n__file__ = " + repr(str(SCRIPT.resolve())) + "\n"
-        code += ast.unparse(ast.Module(body=nodes, type_ignores=[]))
-        code += "\nassert callable(warmup_topk)\n"
-        env = dict(os.environ, RECSTORE_DEFER_OPS_LOAD="1", PYTHONDONTWRITEBYTECODE="1")
-        result = subprocess.run(
-            [sys.executable, "-B", "-I", "-c", code],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-
     def test_rejected_topk_does_not_change_dense_weights_or_optimizer_state(self):
         tree = ast.parse(SCRIPT.read_text())
         main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
