@@ -66,8 +66,9 @@ public:
     }
     timespec now{};
     clock_gettime(CLOCK_MONOTONIC, &now);
-    const auto stamp = static_cast<unsigned long long>(now.tv_sec) * 1000000000ull +
-                       static_cast<unsigned long long>(now.tv_nsec);
+    const auto stamp =
+        static_cast<unsigned long long>(now.tv_sec) * 1000000000ull +
+        static_cast<unsigned long long>(now.tv_nsec);
     char line[224];
     const int written = std::snprintf(
         line,
@@ -139,7 +140,7 @@ private:
   static constexpr std::size_t kFlushBytes = 256 * 1024;
   // 100ms worth of posts is negligible to lose at process kill time.
   static constexpr unsigned long long kFlushIntervalNs = 100ull * 1000 * 1000;
-  std::FILE* file_                         = nullptr;
+  std::FILE* file_                                     = nullptr;
   std::string tag_;
   std::string buffer_;
   unsigned long long last_flush_ns_ = 0;
@@ -844,7 +845,8 @@ void RawVerbsTransport::Write(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send write failed");
   }
-  RdmaWireTrace::Instance().Record("write", impl_->config.global_id, remote.nodeID, bytes);
+  RdmaWireTrace::Instance().Record(
+      "write", impl_->config.global_id, remote.nodeID, bytes);
 }
 
 void RawVerbsTransport::WriteSg(
@@ -898,7 +900,8 @@ void RawVerbsTransport::WriteSg(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send write-sg failed");
   }
-  RdmaWireTrace::Instance().Record("write_sg", impl_->config.global_id, remote.nodeID, total_sg_bytes);
+  RdmaWireTrace::Instance().Record(
+      "write_sg", impl_->config.global_id, remote.nodeID, total_sg_bytes);
 }
 
 void RawVerbsTransport::WriteWithImm(
@@ -935,7 +938,8 @@ void RawVerbsTransport::WriteWithImm(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send write-with-imm failed");
   }
-  RdmaWireTrace::Instance().Record("write_imm", impl_->config.global_id, remote.nodeID, bytes);
+  RdmaWireTrace::Instance().Record(
+      "write_imm", impl_->config.global_id, remote.nodeID, bytes);
 }
 
 void RawVerbsTransport::Read(
@@ -964,7 +968,8 @@ void RawVerbsTransport::Read(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send read failed");
   }
-  RdmaWireTrace::Instance().Record("read", impl_->config.global_id, remote.nodeID, bytes);
+  RdmaWireTrace::Instance().Record(
+      "read", impl_->config.global_id, remote.nodeID, bytes);
 }
 
 void RawVerbsTransport::SendDoorbell(
