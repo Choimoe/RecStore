@@ -83,7 +83,121 @@ server 通过它交换 `RawVerbsNodeMeta` 并等待 ready。控制面额外承�
 | `--rdma-control-plane-host` | shard 0 控制面地址 |
 | `--rdma-control-plane-port` | shard 0 控制面端口；跨主机运行时应为每次运行选择唯一端口 |
 
-## 3. 运行时约束
+## 3. 生命周期、错误处理与重试
+
+本节回答三个问题：一条 lane 从启动到报废经过哪些阶段；失败在什么时刻被谁发现；发现之后
+会不会自动重试。
+
+### 3.1 一条 lane 的生命周期
+
+| 阶段 | 做什么 | 失败后果 |
+| --- | --- | --- |
+| 配置解析 | 解析 `ResolvedRdmaDeployment`（deployment id / epoch / digests）与本机 fabric（设备、port、GID、IB 或 RoCE v1/v2） | 进程启动失败 |
+| 资源创建 | **每条 lane 独立**：设备 → PD → CQ（深度 4096）→ 注册内存（默认 128 MiB）→ RC QP（`max_send_wr=1024`） | 进程启动失败 |
+| 元数据交换 | `Publish()` 发布本端每个 QP 的 QPN 与 `lane_generation`；`Connect()` 拉取对端元数据并校验 | 启动失败（默认 30 s deadline） |
+| QP 建连 | `RESET → INIT → RTR → RTS`，并挂满 1024 个 receive WR | 启动失败 |
+| 稳态 | slot 提交、服务端扫描、响应回写 | 见 3.2 |
+| 退化与恢复 | lane 置脏 → 懒重建 → 恢复为 `Active` 或进入终态 `dead` | 见 3.3 |
+| 关闭 | client 析构时 drain 未收割的 signaled WR；server `Stop()` 停 payload worker、join 全部轮询与心跳线程，**不发 draining** | — |
+
+启动路径全部是"快速失败"：任何一步失败都直接抛异常、进程起不来。运行路径才是
+"降级 + 有限自愈"。读代码时看到启动期的 `throw` 不必意外，那是设计。
+
+单条 lane 的运行时状态只有四个：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active: 建连成功
+    Active --> Dirty: 检测到故障
+    Dirty --> Rebuilding: 下一次取 slot 且可重建且冷却已过
+    Rebuilding --> Active: 双边握手成功
+    Rebuilding --> Dirty: 握手超时或异常
+    Dirty --> Dead: 重建预算耗尽
+    Dead --> [*]: 只能重建 client 进程
+```
+
+四个标志位都在 `PetPSClient::QpContext` 上：`dirty`（当前不可用）、`rebuildable`
+（这个原因能否靠重建治）、`dead`（终态）、`epoch`（每次重建 +1，让等待旧 slot 的请求立刻失败）。
+
+### 3.2 错误分七层
+
+| 层 | 检测点 | 信号 | lane 是否置脏 | 可恢复 |
+| --- | --- | --- | --- | --- |
+| 本地用法 | 参数与容量校验 | `std::runtime_error` | 否 | 改参数 |
+| verbs post | `ibv_post_send` 返回值 | `std::runtime_error` | **否（已知缺口）** | 通常不能 |
+| 设备层 | CQE `status != SUCCESS` | `RawVerbsCompletionException` | 是 | 仅 peer 侧可重建 |
+| tracked write 超时 | 等不到 signaled WR 的 CQE | `RcTrackedCompletionTimeout` | 是 | 仅 peer 侧可重建 |
+| 等待超时 | 等 status word 超过 `--rdma-wait-timeout-ms` | 普通 `runtime_error` | 是 | 可重建 |
+| 节点层裁决 | 控制面 `GetServerHealth` 返回 `dead` | `ShardUnreachableError` | 是 | 可重建 |
+| 服务端业务 | status word 里的 `RpcStatus` | 正常响应（0 / -1..-6） | 否 | 由调用方决定 |
+
+三条规则把上表串起来：
+
+1. **只有 peer 侧故障可重建。** CQE 错误按 `peer_unreachable`（retry 用尽）、`flushed`、
+   `peer_rejected`、`local_error`、`other` 分类，只有前两类说明"对端不说话了"，
+   重建才有意义；本地错和对端拒绝重建治不了。
+2. **只要 slot 内存可能仍被对端引用，就报废整条 lane。** 等待超时、drain 超时、CQE 错误
+   都属此类。代价是丢一条 lane，收益是绝不出现"两个请求的 payload 混在一起"这种静默错误。
+3. **服务端业务错误不涉及 lane。** `RpcStatus` 走 status word，是正常响应；
+   重试一次大概率还是同一个错误码，所以传输层不做任何重试。
+
+#### 三种没有设备层信号的失败
+
+RDMA RC 只在**有 WR 在飞**时才通过 ACK 超时暴露链路问题。因此：
+
+- **对端进程被杀死、但 WRITE 已被 ACK**：这次 WRITE 的 CQE 是成功；下一次 WRITE 才会撞
+  `RETRY_EXC_ERR`。杀死瞬间在飞的请求没有设备层信号。
+- **对端重启但链路空闲**：QP 空闲不发包，本地看不到任何异常，旧 QPN 的 QP 看起来正常。
+- **控制面本身不可达**：`GetServerHealth` 返回 `known=false`，这**不是**"不健康"，
+  请求退回自己的等待预算，不会误判。
+
+前两种只能靠节点层心跳（`dead` 阈值默认 9 s）或等待超时兜住——这是"设备层 + 节点层"
+两条检测通道必须同时在的原因。
+
+### 3.3 重试：四层，只有一层是真重试
+
+| 层 | 机制 | 重试对象 | 应用可见 | 默认 |
+| --- | --- | --- | --- | --- |
+| 硬件 | verbs RC 重试（`timeout=14`、`retry_cnt=7`、`rnr_retry=7`） | 单个 WQE | 不可见 | 恒开 |
+| 传输 | tracked-write 重等：复用 slot 前先等上一个 CQE | 完成事件（不是请求） | 不可见 | 恒开 |
+| lane | QP 重建（reset → drain → 重配 → 双边 generation 握手） | 整条 lane | 可见 | `--rdma-lane-rebuild-enabled`，默认关 |
+| 请求 | **不存在** | — | 可见（异常） | — |
+
+lane 重建的几个稳定语义：
+
+- **触发点是取 slot，不是后台线程。** 没有流量就不会重建；一条 lane 能服务时，其余降级
+  lane 不会被主动修（无 sweep），容量会持续偏低直到流量落到那条 lane。
+- **预算是进程生命周期累计。** `rebuild_attempts` 只增不减，成功恢复也不清零：默认 3 次是
+  "这条 lane 一生能救几次"，不是"每次中断的配额"。
+- **握手成功的判据是对端 generation 变大**，不是"我 reset 完就算成功"。两侧独立计数，
+  所以一次失败的握手把 generation 推高，也不会让下一次误判成功。
+- **重建成功后，被打断的请求是失败，不是重放。** 重建时无法判断该请求是否已被服务端执行
+  （`UPDATE` 走 optimizer 应用梯度，重复执行会改变结果），所以在"可能重复执行"和"一定失败"
+  之间选择后者，由上层决定是否整批重来。
+- **`num_os_clients > 1` 拒绝重建。** 服务端一条 lane 的 CQ 上挂着多个 client 进程的 QP，
+  reset 后无法安全 drain，两端都保持终态置脏并记一次 warning。
+
+请求级重试当前不存在：`ShardUnreachableError` 会一路冒到调用方，多 shard batch 里任一 shard
+失败即整批失败，由上层整批重试。异常里只有拼好的文本，没有结构化的 shard / lane 字段，
+因此上层还不能只重试失败的那个 shard。
+
+### 3.4 故障时延与恢复包线
+
+| 量 | 值 | 说明 |
+| --- | --- | --- |
+| 硬件 ACK 超时 | ≈67 ms / 次，7 次重试 | `timeout=14`、`retry_cnt=7` |
+| 设备层发现"对端不回 ACK" | 实测 4.2–4.4 s | 理论 ≈0.5 s，差距原因未定位 |
+| 慢路径健康查询起始 | 1 s | `--rdma-health-probe-after-ms` |
+| 等待期 CQ 收割间隔 | 50 ms | `--rdma-cq-harvest-interval-ms` |
+| 心跳 / `suspect` / `dead` | 1 s / 3 s / 9 s | `--rdma-heartbeat-interval-ms` 等 |
+| 单次重建尝试最坏 | ≈4 s | `--rdma-lane-rebuild-wait-ms` × 2（取 meta + 等 ack） |
+| 默认恢复包线 | ≈13.3 s，之后终态 `dead` | 实测"首个 `lane_dirty` → 最后一个 `lane_rebuild_exhausted`" |
+| 重建预算 | 3 次，进程生命周期累计 | `--rdma-lane-rebuild-max-attempts` |
+
+排障时按报错时延就能大致定位通道：**1 s 内**报错通常是慢路径健康裁决；**4 s 左右**是设备层
+CQE；**等到接近等待超时**说明收割与慢路径都被关了（对应 flag 设 0），或控制面不可达。
+
+### 3.5 运行时约束
 
 - `async_stream` 要求 `qps-per-client-per-shard * slots-per-qp >= async-depth`。
 - QP 资源不足时，`RawVerbsTransport` 会在初始化阶段失败；常见错误是
@@ -95,23 +209,8 @@ server 通过它交换 `RawVerbsNodeMeta` 并等待 ready。控制面额外承�
 - Debug/O0 适合调试，不应作为吞吐结果；benchmark 报告使用 Release 构建。
 - 源码修改后必须重编对应的 `petps_server`、benchmark、integration 或 op-layer target，
   否则旧 binary 可能掩盖修改结果。
-- RDMA RC QP **不提供**空闲时的"远端进程存活"信号：只有在有 WR 在飞时，链路层才靠 ACK
-  超时把"对端不可达"暴露成 CQ error。因此 client 的失败快速通道分两层——节点层（shard
-  心跳判 `dead`）与设备层（等待期对 lane CQ 收割并按 completion status 分类）；两者都把
-  故障 lane **整条置脏**（其 slot 不再交给新请求）并抛 `ShardUnreachableError`，不做应用层
-  重试。默认（重建关闭）下这个退化行为是终态的，在测试中被固定为断言。
-- 开启 `--rdma-lane-rebuild-enabled`（默认关闭，需 server 与 client 同时开启）后，置脏 lane
-  可以自愈。只有 peer-side 原因（`wait_timeout` / `health_dead` / `drain_timeout` /
-  `cq_peer_unreachable` / `cq_flushed`）会被标记为可重建；client 在下一次 slot acquire 时
-  按冷却间隔懒重建 lane QP，并通过控制面 metadata 的 `lane_generation` 与 server 做双边
-  握手（server 在轮询线程观察到 generation 变化后重建自己一侧）。重建 QP 时会先 reset 冲刷
-  未完成 WR，再 drain 清除这些 completion、清空该 lane 的 slot，并递增 lane epoch，使仍
-  在等待旧响应的请求快速失败，而不是静默读到被复用的 slot。重建次数默认上限 3，耗尽后 lane
-  进入终态 `dead`。
-- lane 重建要求 `num_os_clients == 1`：`num_os_clients > 1` 时 server 的一条 lane CQ 被多个
-  client 进程的 QP 共享，reset 后无法安全 drain（会丢失其他 client 的 completion），因此两端
-  都会拒绝重建并保持终态置脏，只记录一次 warning。
-- 热点路径零开销：正常请求（µs 级完成）既不查控制面（1s 后才查）也不收割 CQ（50ms 后才收割）。
+- 热点路径零开销：正常请求（µs 级完成）既不查控制面（1 s 后才查）也不收割 CQ
+  （50 ms 后才收割）；lane 重建检查在开关关闭时直接返回。
 
 ## 4. 关键参数
 
@@ -125,7 +224,7 @@ server 通过它交换 `RawVerbsNodeMeta` 并等待 ready。控制面额外承�
 | `--async-depth` | `async_stream` 单 client 的在途请求深度 |
 | `--rdma-put-protocol-version` | PUT 协议版本；`2` 是当前主路径 |
 | `--rdma-put-v2-transfer-mode` | PUT-v2 payload 方式：`read` 或 `push` |
-| `--rdma-wait-timeout-ms` | RDMA 请求等待超时 |
+| `--rdma-wait-timeout-ms` | RDMA 请求等待超时；默认 `60000`。实际报错通常更早，由慢路径或 CQ 收割先命中（见 3.4） |
 | `--rdma-heartbeat-interval-ms` | shard 心跳上报周期；默认 `1000` |
 | `--rdma-health-stale-ms` | 无心跳判 `suspect` 的空闲阈值；默认 `3000` |
 | `--rdma-health-dead-ms` | 无心跳判 `dead` 的空闲阈值；默认 `9000` |
@@ -137,6 +236,8 @@ server 通过它交换 `RawVerbsNodeMeta` 并等待 ready。控制面额外承�
 | `--rdma-lane-rebuild-max-attempts` | 每条 lane **进程生命周期内累计**的重建次数上限，超过进入终态 `dead`；成功恢复不重置计数；默认 `3` |
 | `--rdma-lane-rebuild-wait-ms` | 双边重建握手等待 peer ack 的期限；默认 `2000` |
 | `--rdma-lane-rebuild-poll-ms` | server 轮询 client `lane_generation` 的间隔；默认 `50` |
+| `--rdma-lane-rebuild-poll-max-ms` | 空闲退避上限：每轮未重建则间隔翻倍，最高到此值；默认 `500` |
+| `--rdma-lane-rebuild-poll-timeout-ms` | server 侧重建轮询里 `GetMeta` 的超时；默认 `100`，避免控制面拖住数据面线程 |
 | `--rdma-lane-rebuild-cooldown-ms` | 同一 lane 两次重建尝试的最小间隔；默认 `1000` |
 | `--rdma-get-response-mode` | GET response 路径：`auto`、`direct_sg` 或 `staging_copy` |
 | `--server-rdma-threads` | generic PS runner 的 server polling thread 数 |
@@ -187,6 +288,19 @@ row copy 和 response completion 可分别定位查找、清零、搬运和回�
    `--use-local-memcached`，优先检查是否运行了旧 binary 或旧 runner。
 6. 若请求卡住，检查 MR 注册、QP metadata 的 shard/lane 匹配、CQ 消费线程以及
    client/server transport mode。
+7. 若已知是故障场景，直接用日志事件定位到 3.2 的层：
+
+| 日志事件 | 层 | 含义 |
+| --- | --- | --- |
+| `event=lane_dirty` | 设备层 / 等待超时 / 节点层 | 某条 lane 被判死；`reason=` 指明触发点，`verdict=` 是当时的心跳裁决 |
+| `event=lane_recovered` | 恢复 | 重建成功；`attempts` 是生命周期累计值 |
+| `event=lane_rebuild_timeout` | 恢复 | 握手 2 s 内未收到对端新 generation；先确认对端是否也开了重建 |
+| `event=lane_rebuild_failed` | 恢复 | 握手抛异常；`error=` 区分控制面还是 verbs |
+| `event=lane_rebuild_exhausted` | 恢复 | 预算耗尽，该 lane 进入终态 `dead` |
+| `event=lane_rebuild_skipped` | 恢复 | `reason=shared_server_cq`，即 `num_os_clients>1`，属部署形态而非缺陷 |
+| `event=handler_exception` | 服务端业务 | handler 抛异常，客户端会收到 `-6`（`kInternalError`），进程不退出 |
+| `event=get_payload_dropped_stale` | 服务端 fence | payload 因重建作废、不再写 status；这是"防住了"，不是故障 |
+
 
 构建、RDMA verbs 检查、PetPS integration、op-layer 测试、脚本单测和最小真实 RDMA
 闭环命令见 `rs-benchmark-ps` skill。
