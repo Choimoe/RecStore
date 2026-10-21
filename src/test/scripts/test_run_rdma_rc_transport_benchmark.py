@@ -83,6 +83,7 @@ class TestRunRDMARCTransportBenchmark(unittest.TestCase):
 
         cmd = build_benchmark_cmd(args)
 
+        self.assertNotIn("--config_path", " ".join(cmd))
         self.assertIn("--rdma_rc_qps_per_client_per_shard=32", cmd)
         self.assertIn("--rdma_rc_slots_per_qp=4", cmd)
         self.assertIn("--rdma_rc_profile_interval_ms=250", cmd)
