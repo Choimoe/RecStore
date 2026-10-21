@@ -36,11 +36,15 @@ struct RawVerbsConfig {
   std::uint32_t protocol_version = recstore::kRdmaDeploymentProtocolVersion;
   std::string configuration_digest;
   std::string fabric_digest;
-  std::uint32_t max_inline_data         = 0;
-  bool connect_to_servers               = true;
-  bool connect_to_clients               = true;
-  std::size_t local_region_bytes        = 128 * 1024 * 1024;
-  std::uint64_t local_base_addr         = 0;
+  std::uint32_t max_inline_data  = 0;
+  bool connect_to_servers        = true;
+  bool connect_to_clients        = true;
+  std::size_t local_region_bytes = 128 * 1024 * 1024;
+  std::uint64_t local_base_addr  = 0;
+  // Global offset of local_base_addr inside this lane's logical address
+  // window. A lane may allocate only its own slice while still publishing
+  // globally-addressed offsets to peers, which subtracts this origin again.
+  std::uint64_t region_origin_offset    = 0;
   std::string control_plane_host        = "127.0.0.1";
   int control_plane_port                = 25100;
   int control_plane_timeout_ms          = 30000;

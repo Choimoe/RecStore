@@ -460,18 +460,19 @@ RcShardClientTransport::RcShardClientTransport(const RcTransportConfig& config)
     Lane lane;
     const int raw_lane =
         RawLaneForLogicalClient(config_, config_.client_id, qp);
-    const std::size_t local_bytes =
-        static_cast<std::size_t>(config_.num_servers) *
-        static_cast<std::size_t>(RawLanesPerOsClient(config_)) *
-        ClientLaneBytes(config_);
-    RawVerbsConfig raw =
-        MakeRawConfig(config_, raw_lane, local_bytes, true, server_node_id_);
-    raw.reserved_region_offset = ClientShardLaneOffset(config_, raw_lane);
+    // Each lane owns only its own slot slice; peers keep addressing it with
+    // global offsets, which region_origin_offset maps back into the slice.
+    const std::uint64_t lane_origin = ClientShardLaneOffset(config_, raw_lane);
+    RawVerbsConfig raw              = MakeRawConfig(
+        config_, raw_lane, ClientLaneBytes(config_), true, server_node_id_);
+    raw.region_origin_offset = lane_origin;
+    // The whole slice is reserved for slots; nothing is bump-allocated here.
+    raw.reserved_region_offset = 0;
     raw.reserved_region_bytes  = ClientLaneBytes(config_);
     lane.verbs                 = std::make_unique<RawVerbsTransport>(raw);
     lane.lane_base             = lane.verbs->LocalPointer(GlobalAddress{
         static_cast<std::uint16_t>(config_.node_id),
-        static_cast<std::uint64_t>(ClientShardLaneOffset(config_, raw_lane)),
+        lane_origin,
     });
     std::memset(lane.lane_base, 0, ClientLaneBytes(config_));
     lane.submit_completion_pending.assign(
@@ -481,6 +482,13 @@ RcShardClientTransport::RcShardClientTransport(const RcTransportConfig& config)
     lane.verbs->PublishAndConnect();
     lanes_.push_back(std::move(lane));
   }
+  // Each lane registers only its own slot slice, so the total is
+  // lanes * ClientLaneBytes regardless of the shard count.
+  LOG(INFO) << "component=rdma_verbs event=client_region_lanes"
+            << " shard=" << server_node_id_
+            << " client_id=" << config_.client_id << " lanes=" << lanes_.size()
+            << " lane_bytes=" << ClientLaneBytes(config_)
+            << " total_bytes=" << lanes_.size() * ClientLaneBytes(config_);
 }
 
 RcShardClientTransport::~RcShardClientTransport() {
