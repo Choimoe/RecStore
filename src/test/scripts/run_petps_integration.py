@@ -112,6 +112,13 @@ def main():
         ),
     )
     parser.add_argument(
+        "--rdma-fake-get-mode",
+        help=(
+            "test-only: server-side GET fault injection "
+            "(none/status_only/index_only/payload_memset/throw)"
+        ),
+    )
+    parser.add_argument(
         "--rdma-lane-rebuild",
         action="store_true",
         help="enable lane/QP rebuild on both server and client",
@@ -216,6 +223,7 @@ def main():
                 args.rdma_rc_server_get_worker_hold_us
             ),
             rdma_lane_rebuild_enabled=args.rdma_lane_rebuild or None,
+            rdma_rc_fake_get_mode=args.rdma_fake_get_mode,
             rdma_rc_server_fence_stats_interval_ms=(
                 args.fence_stats_interval_ms if args.rdma_lane_rebuild else None
             ),

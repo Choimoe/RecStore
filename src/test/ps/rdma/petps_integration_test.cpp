@@ -185,6 +185,12 @@ TEST(PetPSIntegrationTest, PutGetRoundTripSingleShard) {
       false);
   client.WaitRPCFinish(rpc_id);
 
+  // The response must report success, not just carry the right bytes: a handler
+  // failure completes the RPC with an error status and leaves the payload
+  // empty.
+  const auto* status_word =
+      petps::FixedSlotStatusWord(recv_buffer, keys.size(), FLAGS_value_size);
+  EXPECT_EQ(*status_word, static_cast<std::int32_t>(petps::RpcStatus::kOk));
   ExpectFlatSlots(static_cast<float*>(recv_buffer), values, embedding_dim);
   client.RevokeRPCResource(rpc_id);
 }

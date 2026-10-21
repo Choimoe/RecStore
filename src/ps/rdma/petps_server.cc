@@ -929,6 +929,12 @@ private:
                  int thread_id,
                  int slot_in_qp,
                  std::uint64_t response_epoch) {
+    if (FLAGS_rdma_rc_fake_get_mode == "throw") {
+      // Test-only fault injection for the ProcessSlot handler guard: proves a
+      // throwing handler cannot terminate the shard and still completes the
+      // request with kInternalError instead of leaving the client to time out.
+      throw std::runtime_error("injected handler failure");
+    }
     if (FLAGS_rdma_rc_fake_get_mode == "status_only") {
       response->status->status =
           static_cast<std::int32_t>(petps::RpcStatus::kOk);
@@ -1302,102 +1308,123 @@ private:
         static_cast<std::int32_t>(petps::RpcStatus::kInvalidPayload);
     response.status->response_bytes = 0;
 
-    if (descriptor->shard_id != static_cast<std::uint32_t>(shard_id_)) {
-      LOG(ERROR) << "component=rdma_rc_server event=wrong_shard"
-                 << " expected_shard=" << shard_id_
-                 << " actual_shard=" << descriptor->shard_id << " slot=" << slot
-                 << " client_id=" << descriptor->client_id
-                 << " qp=" << descriptor->qp_index << " seq=" << seq << " op="
-                 << descriptor->op << " key_count=" << descriptor->key_count;
-      if (profile_enabled) {
-        profile_.wrong_shard.fetch_add(1, std::memory_order_relaxed);
-      }
+    // A handler exception must not escape this thread: std::thread's entry
+    // point terminates the process, so one malformed request would take the
+    // whole shard down. The guard sits around the dispatch rather than around
+    // the poll loop because the completion below also advances last_seq_; if
+    // the slot were left unconsumed, the next scan would find the same ready
+    // seq and throw again at polling rate.
+    auto fail_request = [&](const char* what) {
+      LOG(ERROR) << "component=rdma_rc_server event=handler_exception"
+                 << " shard=" << shard_id_ << " slot=" << slot << " client_id="
+                 << client_id << " qp=" << qp_index << " seq=" << seq
+                 << " op=" << descriptor->op << " error=\"" << what << "\"";
       response.status->status =
-          static_cast<std::int32_t>(petps::RpcStatus::kWrongShard);
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kGet)) {
-      if (GetPayloadOffloadEnabled()) {
-        const GetPayloadTask task{
-            slot,
-            client_id,
-            qp_index,
-            slot_in_qp,
-            thread_id,
-            seq,
-            transport_->ResponseEpoch(client_id, qp_index),
-            *descriptor,
-            payload,
-            response,
-        };
-        if (!EnqueueGetPayloadTask(task)) {
-          return false;
-        }
-        inflight_seq_[static_cast<std::size_t>(slot)] = seq;
-        return true;
-      } else {
-        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-        const bool payload_written_direct   = HandleGet(
-            *descriptor,
-            payload,
-            &response,
-            thread_id,
-            slot_in_qp,
-            transport_->ResponseEpoch(client_id, qp_index));
+          static_cast<std::int32_t>(petps::RpcStatus::kInternalError);
+      response.status->response_bytes = 0;
+    };
+    try {
+      if (descriptor->shard_id != static_cast<std::uint32_t>(shard_id_)) {
+        LOG(ERROR) << "component=rdma_rc_server event=wrong_shard"
+                   << " expected_shard=" << shard_id_
+                   << " actual_shard=" << descriptor->shard_id
+                   << " slot=" << slot << " client_id=" << descriptor->client_id
+                   << " qp=" << descriptor->qp_index << " seq=" << seq << " op="
+                   << descriptor->op << " key_count=" << descriptor->key_count;
         if (profile_enabled) {
-          profile_.handled_get.fetch_add(1, std::memory_order_relaxed);
-          profile_.handle_get_ns.fetch_add(
-              NowNs() - handle_start_ns, std::memory_order_relaxed);
-          poller_profiles_.at(static_cast<std::size_t>(thread_id))
-              ->handled_get.fetch_add(1, std::memory_order_relaxed);
+          profile_.wrong_shard.fetch_add(1, std::memory_order_relaxed);
         }
-        if (payload_written_direct) {
-          CompleteResponseStatusOnlyForSlot(
+        response.status->status =
+            static_cast<std::int32_t>(petps::RpcStatus::kWrongShard);
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kGet)) {
+        if (GetPayloadOffloadEnabled()) {
+          const GetPayloadTask task{
               slot,
               client_id,
               qp_index,
               slot_in_qp,
-              response,
+              thread_id,
               seq,
-              profile_enabled);
+              transport_->ResponseEpoch(client_id, qp_index),
+              *descriptor,
+              payload,
+              response,
+          };
+          if (!EnqueueGetPayloadTask(task)) {
+            return false;
+          }
+          inflight_seq_[static_cast<std::size_t>(slot)] = seq;
           return true;
+        } else {
+          const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+          const bool payload_written_direct   = HandleGet(
+              *descriptor,
+              payload,
+              &response,
+              thread_id,
+              slot_in_qp,
+              transport_->ResponseEpoch(client_id, qp_index));
+          if (profile_enabled) {
+            profile_.handled_get.fetch_add(1, std::memory_order_relaxed);
+            profile_.handle_get_ns.fetch_add(
+                NowNs() - handle_start_ns, std::memory_order_relaxed);
+            poller_profiles_.at(static_cast<std::size_t>(thread_id))
+                ->handled_get.fetch_add(1, std::memory_order_relaxed);
+          }
+          if (payload_written_direct) {
+            CompleteResponseStatusOnlyForSlot(
+                slot,
+                client_id,
+                qp_index,
+                slot_in_qp,
+                response,
+                seq,
+                profile_enabled);
+            return true;
+          }
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kPut)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandlePut(*descriptor, payload, &response, thread_id);
+        if (profile_enabled) {
+          profile_.handled_put.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_put_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kUpdate)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandleUpdate(*descriptor, payload, &response, thread_id);
+        if (profile_enabled) {
+          profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_update_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kUpdateFlat)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandleUpdateFlat(*descriptor, payload, &response, thread_id);
+        if (profile_enabled) {
+          profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_update_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kInitTable)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandleInitTable(*descriptor, payload, &response);
+        if (profile_enabled) {
+          profile_.handled_init.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_init_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
         }
       }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kPut)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandlePut(*descriptor, payload, &response, thread_id);
-      if (profile_enabled) {
-        profile_.handled_put.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_put_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kUpdate)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandleUpdate(*descriptor, payload, &response, thread_id);
-      if (profile_enabled) {
-        profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_update_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kUpdateFlat)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandleUpdateFlat(*descriptor, payload, &response, thread_id);
-      if (profile_enabled) {
-        profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_update_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kInitTable)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandleInitTable(*descriptor, payload, &response);
-      if (profile_enabled) {
-        profile_.handled_init.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_init_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
+    } catch (const std::exception& error) {
+      fail_request(error.what());
+    } catch (...) {
+      fail_request("unknown exception");
     }
 
     CompleteResponseForSlot(
