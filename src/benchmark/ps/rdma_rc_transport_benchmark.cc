@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <numeric>
@@ -418,6 +420,31 @@ class BenchmarkClient {
 public:
   explicit BenchmarkClient(int num_shards) {
     CHECK_GT(num_shards, 0);
+    json config = LoadConfig(num_shards);
+    adapter_    = std::make_unique<recstore::RDMAPSClientAdapter>(config);
+    raw_        = std::make_unique<recstore::RdmaRawAccess>(adapter_.get());
+  }
+
+  recstore::RDMAPSClientAdapter* get() const { return adapter_.get(); }
+  recstore::RdmaRawAccess* raw() const { return raw_.get(); }
+
+private:
+  // The RDMA adapter needs the resolved deployment, so prefer the runtime
+  // config the benchmark runner exports (it matches the launched mesh) and
+  // only fall back to the embedded loopback defaults for standalone runs.
+  static json LoadConfig(int num_shards) {
+    if (const char* path = std::getenv("RECSTORE_CONFIG");
+        path != nullptr && *path != '\0') {
+      std::ifstream in(path);
+      CHECK(in.is_open()) << "cannot open RECSTORE_CONFIG: " << path;
+      json config;
+      in >> config;
+      const auto& distributed = config.at("distributed_client");
+      CHECK_EQ(distributed.at("num_shards").get<int>(), num_shards)
+          << "RECSTORE_CONFIG shard count does not match --num_shards";
+      return config;
+    }
+
     json config      = json::object();
     config["client"] = {{"host", "127.0.0.1"}, {"port", 1234}, {"shard", 0}};
     json servers     = json::array();
@@ -430,14 +457,9 @@ public:
         {"hash_method", "city_hash"},
         {"servers", servers},
     };
-    adapter_ = std::make_unique<recstore::RDMAPSClientAdapter>(config);
-    raw_     = std::make_unique<recstore::RdmaRawAccess>(adapter_.get());
+    return config;
   }
 
-  recstore::RDMAPSClientAdapter* get() const { return adapter_.get(); }
-  recstore::RdmaRawAccess* raw() const { return raw_.get(); }
-
-private:
   std::unique_ptr<recstore::RDMAPSClientAdapter> adapter_;
   std::unique_ptr<recstore::RdmaRawAccess> raw_;
 };
