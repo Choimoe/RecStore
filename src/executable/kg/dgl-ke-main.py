@@ -27,20 +27,11 @@ import json
 import os
 import datetime
 
-# if os.path.exists("/usr/bin/docker"):
-#     os.environ['LD_LIBRARY_PATH'] = f'/home/xieminhui/RecStore/src/framework_adapters/torch/kg/dgl/build-host:{os.environ["LD_LIBRARY_PATH"]}'
-# else:
-#     os.environ['LD_LIBRARY_PATH'] = f'/home/xieminhui/RecStore/src/framework_adapters/torch/kg/dgl/build-docker:{os.environ["LD_LIBRARY_PATH"]}'
-
 import dgl
 import random
 import torch
 import torch as th
 import numpy as np
-
-import sys
-
-sys.path.append("/home/xieminhui/RecStore/src/python/pytorch")  # nopep8
 
 import recstore
 from recstore.cache import CacheShardingPolicy  # nopep8
@@ -489,10 +480,6 @@ def main():
     logging.warning(
         "Total initialize time {:.3f} seconds".format(time.time() - init_time_start)
     )
-
-    # profiler.stop()
-    # profiler.print()
-    # profiler.write_html("/home/xieminhui/RecStore/build/profile.html")
 
     # train
     if args.num_proc > 1:

@@ -1,1 +1,0 @@
-cmd_/data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/Module.symvers := sed 's/\.ko$$/\.o/' /data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/modules.order | scripts/mod/modpost -m -a  -o /data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/Module.symvers -e -i Module.symvers   -T -

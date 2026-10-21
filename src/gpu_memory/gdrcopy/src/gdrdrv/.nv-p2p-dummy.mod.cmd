@@ -1,1 +1,0 @@
-cmd_/data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy.mod := { echo  /data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy.o;  echo; } > /data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy.mod

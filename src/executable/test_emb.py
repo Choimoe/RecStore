@@ -20,9 +20,6 @@ import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-import sys
-sys.path.append("/home/xieminhui/RecStore/src/python/pytorch")  # nopep8
-
 import recstore
 from recstore import KGCacheControllerWrapperBase
 from recstore.cache import CacheEmbFactory, TorchNativeStdEmbDDP

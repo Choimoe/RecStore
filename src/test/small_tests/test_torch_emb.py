@@ -5,8 +5,6 @@ import torch.optim as optim
 
 import sys
 
-sys.path.append("/home/xieminhui/RecStore/src/framework_adapters/torch")
-
 from cache_common import KGExternelEmbedding
 
 from torch.profiler import profile, record_function, ProfilerActivity

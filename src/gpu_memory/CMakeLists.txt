@@ -6,7 +6,7 @@ target_link_libraries(
   gpu_memory 
   PUBLIC
   rmm::rmm
-  /data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/libgdrapi.so
+  ${CMAKE_CURRENT_SOURCE_DIR}/gdrcopy/src/libgdrapi.so
 )
 
 add_executable(test_gdr_size

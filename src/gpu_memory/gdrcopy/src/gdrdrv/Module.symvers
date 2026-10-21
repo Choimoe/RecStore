@@ -1,5 +1,0 @@
-0x5b3f3e79	nvidia_p2p_get_pages	/data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy	EXPORT_SYMBOL	
-0x45bb0ad7	nvidia_p2p_init_mapping	/data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy	EXPORT_SYMBOL	
-0x180f4b6a	nvidia_p2p_destroy_mapping	/data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy	EXPORT_SYMBOL	
-0x642487ac	nvidia_p2p_put_pages	/data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy	EXPORT_SYMBOL	
-0xf42ca687	nvidia_p2p_free_page_table	/data/project/HugeCTR/HugeCTR/src/inference/gpu_memory/gdrcopy/src/gdrdrv/nv-p2p-dummy	EXPORT_SYMBOL	
