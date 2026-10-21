@@ -175,6 +175,12 @@ private:
   // interval; when the verdict is Dead the lane is retired and
   // ShardUnreachableError is thrown.
   void MaybeProbeShardHealth(int qp_index, std::int64_t waited_ms);
+  // Applies a shard health verdict to one lane. Dead retires the lane and
+  // throws; any other verdict only logs.
+  void ApplyShardHealthVerdict(int qp_index,
+                               const RdmaServerHealthSnapshot& snapshot,
+                               std::int64_t waited_ms,
+                               bool cached);
   // Marks the lane as unusable for its waiters: its slots are not reused and
   // its waiters fail fast. `reason` is wait_timeout, health_dead, drain_timeout
   // or cq_<class>. `rebuildable` tells the lazy-rebuild path whether a QP

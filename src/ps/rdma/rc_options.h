@@ -14,6 +14,8 @@ DECLARE_bool(rdma_lane_rebuild_enabled);
 DECLARE_int32(rdma_lane_rebuild_max_attempts);
 DECLARE_int32(rdma_lane_rebuild_wait_ms);
 DECLARE_int32(rdma_lane_rebuild_poll_ms);
+DECLARE_int32(rdma_lane_rebuild_poll_max_ms);
+DECLARE_int32(rdma_lane_rebuild_poll_timeout_ms);
 DECLARE_int32(rdma_lane_rebuild_cooldown_ms);
 DECLARE_int32(rdma_rc_profile_interval_ms);
 DECLARE_int32(rdma_rc_server_coroutines_per_thread);

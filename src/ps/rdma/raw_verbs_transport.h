@@ -393,8 +393,10 @@ public:
   std::uint64_t LaneGeneration(std::uint16_t node_id) const;
   // Re-reads `node_id`'s published metadata (GetMeta), validates it, and stores
   // it for a subsequent RebuildQp(). Used to learn a peer's lane generation and
-  // to pick up addressing changes if the peer process restarted.
-  RawVerbsNodeMeta RefreshPeerMeta(std::uint16_t node_id);
+  // to pick up addressing changes if the peer process restarted. `timeout_ms`
+  // overrides the configured control-plane deadline; callers on a data-plane
+  // thread pass a short bound so a sick control plane cannot stall it.
+  RawVerbsNodeMeta RefreshPeerMeta(std::uint16_t node_id, int timeout_ms = -1);
   std::uint32_t max_inline_data(std::uint16_t node_id) const;
 
 private:

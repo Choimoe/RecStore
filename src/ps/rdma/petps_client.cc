@@ -414,6 +414,9 @@ bool PetPSClient::TryRebuildLaneLocked(int qp_index) {
   lane.dirty.store(false, std::memory_order_relaxed);
   lane.rebuildable.store(false, std::memory_order_relaxed);
   lane.generation = transport_->LaneGeneration(qp_index);
+  // A successful handshake is stronger evidence than the cached health verdict:
+  // drop it so a stale `dead` cannot retire this lane again within the TTL.
+  health_probe_gate_.InvalidateVerdict();
   LOG(WARNING) << "component=rdma_rc_client event=lane_recovered"
                << " shard=" << shard_ << " client_id=" << client_id_
                << " lane=" << qp_index << " generation=" << lane.generation
@@ -422,19 +425,36 @@ bool PetPSClient::TryRebuildLaneLocked(int qp_index) {
 }
 
 void PetPSClient::MaybeProbeShardHealth(int qp_index, std::int64_t waited_ms) {
-  if (!health_probe_gate_.TryBeginProbe(std::chrono::steady_clock::now(),
-                                        FLAGS_rdma_health_probe_interval_ms)) {
+  const int ttl_ms = FLAGS_rdma_health_probe_interval_ms;
+  const auto now   = std::chrono::steady_clock::now();
+  // Sibling lanes share this shard's verdict: reusing it retires every lane of
+  // a dead shard in one interval instead of one lane per interval.
+  RdmaServerHealthSnapshot snapshot;
+  if (health_probe_gate_.TryReadVerdict(now, ttl_ms, &snapshot)) {
+    ApplyShardHealthVerdict(qp_index, snapshot, waited_ms, /*cached=*/true);
     return;
   }
-  const RdmaServerHealthSnapshot snapshot = control_plane_->GetServerHealth(
+  if (!health_probe_gate_.TryBeginProbe(now, ttl_ms)) {
+    return;
+  }
+  snapshot = control_plane_->GetServerHealth(
       shard_, FLAGS_rdma_health_probe_timeout_ms);
   health_probe_gate_.EndProbe();
+  health_probe_gate_.StoreVerdict(std::chrono::steady_clock::now(), snapshot);
+  ApplyShardHealthVerdict(qp_index, snapshot, waited_ms, /*cached=*/false);
+}
+
+void PetPSClient::ApplyShardHealthVerdict(
+    int qp_index,
+    const RdmaServerHealthSnapshot& snapshot,
+    std::int64_t waited_ms,
+    bool cached) {
   if (!IsShardUnreachable(snapshot)) {
     VLOG(1) << "component=rdma_rc_client event=health_probe shard=" << shard_
             << " lane=" << qp_index << " known=" << snapshot.known
             << " health=" << RdmaServerHealthToString(snapshot.health)
             << " last_seen_age_ms=" << snapshot.last_seen_age_ms
-            << " waited_ms=" << waited_ms;
+            << " waited_ms=" << waited_ms << " cached=" << cached;
     return;
   }
   MarkLaneDirty(
