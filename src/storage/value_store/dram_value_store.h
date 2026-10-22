@@ -154,8 +154,8 @@ public:
       return ReadFlatFixedRowsGeneric(
           handles, num_rows, out_buf, row_bytes, missing_rows);
     }
-    uint64_t local_missing = 0;
-    char* dst              = static_cast<char*>(out_buf);
+    uint64_t local_missing   = 0;
+    char* dst                = static_cast<char*>(out_buf);
     const unsigned row_shift = Log2PowerOfTwo(row_bytes);
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + (row << row_shift);
@@ -176,14 +176,15 @@ public:
     return true;
   }
 
-  bool ReadFlatFixedRowSlices(const uint64_t* handles,
-                              size_t num_rows,
-                              void* out_buf,
-                              size_t stored_row_bytes,
-                              size_t source_offset_bytes,
-                              size_t output_row_bytes,
-                              uint64_t* missing_rows,
-                              int64_t* missing_positions = nullptr) const override {
+  bool ReadFlatFixedRowSlices(
+      const uint64_t* handles,
+      size_t num_rows,
+      void* out_buf,
+      size_t stored_row_bytes,
+      size_t source_offset_bytes,
+      size_t output_row_bytes,
+      uint64_t* missing_rows,
+      int64_t* missing_positions = nullptr) const override {
     if (handles == nullptr || out_buf == nullptr || output_row_bytes == 0 ||
         source_offset_bytes > stored_row_bytes ||
         output_row_bytes > stored_row_bytes - source_offset_bytes) {
@@ -191,11 +192,16 @@ public:
     }
     if (!IsPowerOfTwo(output_row_bytes)) {
       return ReadFlatFixedRowSlicesGeneric(
-          handles, num_rows, out_buf, source_offset_bytes, output_row_bytes,
-          missing_rows, missing_positions);
+          handles,
+          num_rows,
+          out_buf,
+          source_offset_bytes,
+          output_row_bytes,
+          missing_rows,
+          missing_positions);
     }
-    uint64_t local_missing = 0;
-    char* dst              = static_cast<char*>(out_buf);
+    uint64_t local_missing   = 0;
+    char* dst                = static_cast<char*>(out_buf);
     const unsigned row_shift = Log2PowerOfTwo(output_row_bytes);
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + (row << row_shift);
@@ -219,14 +225,16 @@ public:
     return true;
   }
 
-  bool ReadIndexedFixedRows(const uint64_t* handles,
-                            size_t num_rows,
-                            int64_t* indices,
-                            void* values,
-                            bool* found,
-                            size_t value_bytes,
-                            uint64_t* missing_rows) const override {
-    if (missing_rows != nullptr) *missing_rows = 0;
+  bool ReadIndexedFixedRows(
+      const uint64_t* handles,
+      size_t num_rows,
+      int64_t* indices,
+      void* values,
+      bool* found,
+      size_t value_bytes,
+      uint64_t* missing_rows) const override {
+    if (missing_rows != nullptr)
+      *missing_rows = 0;
     if (value_bytes == 0 ||
         value_bytes > (std::numeric_limits<size_t>::max)() - sizeof(int64_t) ||
         num_rows > (std::numeric_limits<size_t>::max)() / value_bytes ||
@@ -236,13 +244,13 @@ public:
       return false;
     }
     const size_t row_bytes = sizeof(int64_t) + value_bytes;
-    uint64_t missing = 0;
-    auto* dst = static_cast<char*>(values);
+    uint64_t missing       = 0;
+    auto* dst              = static_cast<char*>(values);
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + row * value_bytes;
       if (handles[row] == kValueHandleNone) {
         indices[row] = -1;
-        found[row] = false;
+        found[row]   = false;
         std::memset(row_dst, 0, value_bytes);
         ++missing;
         continue;
@@ -263,7 +271,8 @@ public:
       std::memcpy(row_dst, src + sizeof(int64_t), value_bytes);
       found[row] = true;
     }
-    if (missing_rows != nullptr) *missing_rows = missing;
+    if (missing_rows != nullptr)
+      *missing_rows = missing;
     return true;
   }
 

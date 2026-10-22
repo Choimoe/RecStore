@@ -130,7 +130,7 @@ public:
       int64_t value_dim,
       unsigned tid,
       BatchGetFlatStats* stats = nullptr,
-      bool collect_profile = true,
+      bool collect_profile     = true,
       // When non-null, the first stats->missing_rows entries contain compact,
       // ascending positions of missing keys. Remaining entries are unspecified.
       int64_t* missing_positions = nullptr) {
@@ -156,7 +156,7 @@ public:
       int64_t value_dim,
       unsigned tid,
       BatchGetFlatStats* stats = nullptr,
-      bool collect_profile = true) {
+      bool collect_profile     = true) {
     return false;
   }
 

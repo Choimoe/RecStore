@@ -361,7 +361,8 @@ public:
       state.active.clear();
     }
     // Invalidate cached chunks on every worker, not just the resetting thread.
-    tls_generation_ = next_tls_generation_.fetch_add(1, std::memory_order_relaxed);
+    tls_generation_ =
+        next_tls_generation_.fetch_add(1, std::memory_order_relaxed);
     PoolTls().hot_by_slab.clear();
     total_malloc_.store(0, std::memory_order_relaxed);
   }

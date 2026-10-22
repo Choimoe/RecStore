@@ -12,7 +12,8 @@ class DramPetHashIndex : public Index {
 public:
   explicit DramPetHashIndex(const BaseKVConfig& config) : Index(config) {
     if (config.json_config_.contains("index")) {
-      prefetch_distance_ = config.json_config_.at("index").value("prefetch_distance", 1);
+      prefetch_distance_ =
+          config.json_config_.at("index").value("prefetch_distance", 1);
     }
     if (prefetch_distance_ < 0 || prefetch_distance_ > 64) {
       throw std::invalid_argument("prefetch_distance must be in [0, 64]");
@@ -76,7 +77,7 @@ public:
   size_t Capacity() override { return impl_->Capacity(); }
 
 private:
-  int prefetch_distance_ = 1;
+  int prefetch_distance_                      = 1;
   base::PetHash<Key_t, Value_t, false>* impl_ = nullptr;
 };
 
