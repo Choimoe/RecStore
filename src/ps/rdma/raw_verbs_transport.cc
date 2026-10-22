@@ -539,7 +539,8 @@ GlobalAddress RawVerbsTransport::LocalAddress(void* ptr) const {
   }
   return GlobalAddress{
       static_cast<std::uint16_t>(impl_->config.global_id),
-      static_cast<std::uint64_t>(addr - base),
+      impl_->config.region_origin_offset +
+          static_cast<std::uint64_t>(addr - base),
   };
 }
 
@@ -548,10 +549,12 @@ void* RawVerbsTransport::LocalPointer(GlobalAddress address) const {
     throw std::runtime_error(
         "raw verbs local pointer requested for remote node");
   }
-  if (address.offset >= impl_->local_bytes) {
+  const std::uint64_t origin = impl_->config.region_origin_offset;
+  if (address.offset < origin ||
+      address.offset - origin >= impl_->local_bytes) {
     throw std::runtime_error("raw verbs local offset outside region");
   }
-  return static_cast<char*>(impl_->local_base) + address.offset;
+  return static_cast<char*>(impl_->local_base) + (address.offset - origin);
 }
 
 RawVerbsNodeMeta RawVerbsTransport::LocalMeta() const {
@@ -571,12 +574,15 @@ RawVerbsNodeMeta RawVerbsTransport::LocalMeta() const {
       impl_->config.global_id < impl_->config.num_servers
           ? impl_->config.global_id
           : impl_->config.global_id - impl_->config.num_servers;
-  meta.lid              = port_attr.lid;
-  meta.psn              = kRawVerbsPsn;
-  meta.rkey             = impl_->local_mr->rkey;
-  meta.base_addr        = reinterpret_cast<std::uint64_t>(impl_->local_base);
-  meta.deployment_id    = impl_->config.deployment_id;
-  meta.deployment_epoch = impl_->config.deployment_epoch;
+  meta.lid  = port_attr.lid;
+  meta.psn  = kRawVerbsPsn;
+  meta.rkey = impl_->local_mr->rkey;
+  // Peers address this lane with global offsets, so publish the base that
+  // makes `base_addr + offset` land inside the locally allocated slice.
+  meta.base_addr = reinterpret_cast<std::uint64_t>(impl_->local_base) -
+                   impl_->config.region_origin_offset;
+  meta.deployment_id        = impl_->config.deployment_id;
+  meta.deployment_epoch     = impl_->config.deployment_epoch;
   meta.configuration_digest = impl_->config.configuration_digest;
   meta.fabric_digest        = impl_->config.fabric_digest;
   meta.protocol_version     = impl_->config.protocol_version;
