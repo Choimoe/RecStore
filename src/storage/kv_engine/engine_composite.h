@@ -334,7 +334,8 @@ public:
                          int64_t value_dim,
                          unsigned tid,
                          BatchGetFlatStats* stats = nullptr,
-                         bool collect_profile = true) override {
+                         bool collect_profile = true,
+                         int64_t* missing_positions = nullptr) override {
     if (values == nullptr || num_rows < 0 || row_dim <= 0 ||
         value_offset < 0 || value_dim <= 0 || value_offset > row_dim ||
         value_dim > row_dim - value_offset ||
@@ -379,7 +380,7 @@ public:
     if (!value_store_->ReadFlatFixedRowSlices(
             handles.data(), static_cast<size_t>(num_rows), values,
             stored_row_bytes, source_offset_bytes, output_row_bytes,
-            &missing_rows)) {
+            &missing_rows, missing_positions)) {
       return false;
     }
     if (stats != nullptr) {
