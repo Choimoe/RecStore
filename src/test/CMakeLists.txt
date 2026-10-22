@@ -81,6 +81,32 @@ target_link_libraries(test_ssd_allocators PUBLIC
 )
 add_test(NAME test_ssd_allocators COMMAND test_ssd_allocators)
 
+add_executable(test_ssd_layout test_ssd_layout.cpp)
+target_link_libraries(test_ssd_layout PUBLIC
+    ssd_layout
+    gtest
+    gtest_main
+    pthread
+)
+add_test(NAME test_ssd_layout COMMAND test_ssd_layout)
+
+add_executable(test_ssd_static_layout_value_store
+    test_ssd_static_layout_value_store.cpp)
+target_link_libraries(test_ssd_static_layout_value_store PUBLIC
+    base
+    base_memory
+    ps_common
+    kv_engine
+    gtest
+    gtest_main
+    boost_context
+    boost_coroutine
+    pthread
+    TBB::tbb
+)
+add_test(NAME test_ssd_static_layout_value_store
+         COMMAND test_ssd_static_layout_value_store)
+
 add_executable(test_r2_allocator test_r2_allocator.cpp)
 target_link_libraries(test_r2_allocator PUBLIC
     base_memory

@@ -135,12 +135,15 @@ public:
       items.push_back(PutItem{keys[i], ValueStore::WriteSpec{data, size}});
     }
 
+    std::vector<uint64_t> batch_keys;
     std::vector<ValueStore::WriteSpec> specs;
+    batch_keys.reserve(items.size());
     specs.reserve(items.size());
     for (const auto& item : items) {
+      batch_keys.push_back(item.key);
       specs.push_back(item.spec);
     }
-    const auto new_handles = value_store_->BatchAllocAndWrite(specs);
+    const auto new_handles = value_store_->BatchAllocAndWrite(batch_keys, specs);
     if (new_handles.size() != items.size()) {
       LOG(FATAL) << "KVEngine::BatchPut allocation result size mismatch";
     }
@@ -153,7 +156,7 @@ public:
 
     for (size_t i = 0; i < items.size(); ++i) {
       Value_t old_handle = index_->Put(items[i].key, new_handles[i], tid);
-      if (old_handle != kValueHandleNone) {
+      if (old_handle != kValueHandleNone && old_handle != new_handles[i]) {
         value_store_->Retire(old_handle);
       }
     }
@@ -474,7 +477,13 @@ public:
     for (int i = 0; i < keys.Size(); ++i) {
       specs.push_back(ValueStore::WriteSpec{data + i * value_size, value_size});
     }
-    std::vector<uint64_t> handles = value_store_->BatchAllocAndWrite(specs);
+    std::vector<uint64_t> bulk_keys;
+    bulk_keys.reserve(static_cast<size_t>(keys.Size()));
+    for (int i = 0; i < keys.Size(); ++i) {
+      bulk_keys.push_back(keys[i]);
+    }
+    std::vector<uint64_t> handles =
+        value_store_->BatchAllocAndWrite(bulk_keys, specs);
     if (handles.size() != static_cast<size_t>(keys.Size())) {
       LOG(FATAL) << "KVEngine::BulkLoad allocation result size mismatch";
     }
@@ -517,11 +526,16 @@ public:
     UpdateChecksumPod(&checksum, kCheckpointVersion);
     UpdateChecksumPod(&checksum, metadata_size);
     UpdateChecksumPod(&checksum, record_count);
+    const ValueStore::LayoutId layout_id = value_store_->GetLayoutId();
+    UpdateChecksumPod(&checksum, layout_id.strategy);
+    UpdateChecksumPod(&checksum, layout_id.checksum);
     UpdateChecksum(&checksum, metadata.data(), metadata.size());
     bool write_ok =
         WriteBytes(output, kCheckpointMagic.data(), kCheckpointMagic.size()) &&
         WritePod(output, kCheckpointVersion) &&
         WritePod(output, metadata_size) && WritePod(output, record_count) &&
+        WritePod(output, layout_id.strategy) &&
+        WritePod(output, layout_id.checksum) &&
         WriteBytes(output, metadata.data(), metadata.size());
     for (const uint64_t key : keys) {
       std::string value;
@@ -597,10 +611,18 @@ public:
         !ReadPod(input, &version, &remaining) ||
         !ReadPod(input, &metadata_size, &remaining) ||
         !ReadPod(input, &record_count, &remaining) ||
-        magic != kCheckpointMagic || version != kCheckpointVersion ||
+        magic != kCheckpointMagic ||
+        (version != kCheckpointVersion && version != 2) ||
         metadata_size > remaining ||
         metadata_size > std::numeric_limits<size_t>::max()) {
       LOG(ERROR) << "Invalid or truncated checkpoint header: " << file;
+      return false;
+    }
+    ValueStore::LayoutId file_layout;
+    if (version == kCheckpointVersion &&
+        (!ReadPod(input, &file_layout.strategy, &remaining) ||
+         !ReadPod(input, &file_layout.checksum, &remaining))) {
+      LOG(ERROR) << "Truncated checkpoint layout identity: " << file;
       return false;
     }
 
@@ -611,6 +633,17 @@ public:
     }
     if (metadata != expected_metadata) {
       LOG(ERROR) << "Checkpoint metadata mismatch: " << file;
+      return false;
+    }
+    const ValueStore::LayoutId layout_id = value_store_->GetLayoutId();
+    if (version == 2) {
+      if (!layout_id.plain()) {
+        LOG(ERROR) << "Checkpoint has no SSD layout identity: " << file;
+        return false;
+      }
+    } else if (file_layout.strategy != layout_id.strategy ||
+               file_layout.checksum != layout_id.checksum) {
+      LOG(ERROR) << "Checkpoint SSD layout identity mismatch: " << file;
       return false;
     }
     if (remaining < sizeof(uint64_t)) {
@@ -629,6 +662,10 @@ public:
     UpdateChecksumPod(&checksum, version);
     UpdateChecksumPod(&checksum, metadata_size);
     UpdateChecksumPod(&checksum, record_count);
+    if (version == kCheckpointVersion) {
+      UpdateChecksumPod(&checksum, file_layout.strategy);
+      UpdateChecksumPod(&checksum, file_layout.checksum);
+    }
     UpdateChecksum(&checksum, metadata.data(), metadata.size());
     std::vector<std::pair<uint64_t, std::string>> records;
     records.reserve(static_cast<size_t>(record_count));
@@ -790,14 +827,14 @@ private:
                    bool emit_fence) {
     (void)tid;
     (void)emit_fence;
-    Value_t new_handle = value_store_->AllocAndWrite(data, size);
+    Value_t new_handle = value_store_->AllocAndWrite(key, data, size);
     if (new_handle == kValueHandleNone) {
       LOG(FATAL) << "KVEngine value allocation failed, key=" << key
                  << " size=" << size;
       return;
     }
     Value_t old_handle = index_->Put(key, new_handle, tid);
-    if (old_handle != kValueHandleNone) {
+    if (old_handle != kValueHandleNone && old_handle != new_handle) {
       value_store_->Retire(old_handle);
     }
     TrackKey(key, tid);
@@ -805,7 +842,7 @@ private:
 
   inline static constexpr std::array<char, 8> kCheckpointMagic = {
       'R', 'S', 'K', 'V', 'C', 'P', '0', '1'};
-  inline static constexpr uint32_t kCheckpointVersion = 2;
+  inline static constexpr uint32_t kCheckpointVersion = 3;
   inline static constexpr uint64_t kCheckpointChecksumSeed =
       0x9e3779b97f4a7c15ULL;
 

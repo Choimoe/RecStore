@@ -104,6 +104,33 @@ public:
     return handles;
   }
 
+  virtual uint64_t AllocAndWrite(uint64_t key, const void* data, size_t size) {
+    (void)key;
+    return AllocAndWrite(data, size);
+  }
+
+  virtual std::vector<uint64_t>
+  BatchAllocAndWrite(const std::vector<uint64_t>& keys,
+                     const std::vector<WriteSpec>& specs) {
+    if (keys.size() != specs.size()) {
+      throw std::invalid_argument("BatchAllocAndWrite size mismatch");
+    }
+    std::vector<uint64_t> handles;
+    handles.reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+      handles.push_back(AllocAndWrite(keys[i], specs[i].data, specs[i].size));
+    }
+    return handles;
+  }
+
+  struct LayoutId {
+    uint32_t strategy = 0;
+    uint64_t checksum = 0;
+    bool plain() const { return strategy == 0; }
+  };
+
+  virtual LayoutId GetLayoutId() const { return {}; }
+
   virtual std::string GetInfo() const { return "(no info)"; }
   virtual std::string ExtraResultFields() const { return ""; }
 };

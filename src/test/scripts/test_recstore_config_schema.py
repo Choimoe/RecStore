@@ -176,6 +176,40 @@ class TestRecstoreConfigSchema(unittest.TestCase):
             }
         )
 
+    def test_accepts_static_ssd_layout(self) -> None:
+        self.validate_config(
+            {
+                "capacity": 1024,
+                "index": {"type": "DRAM_EXTENDIBLE_HASH"},
+                "value": {
+                    "type": "SSD_STATIC_LAYOUT_VALUE_STORE",
+                    "path": "/tmp/recstore_static.db",
+                    "default_value_size_hint": 128,
+                    "ssd_layout": {
+                        "strategy": "maxembed",
+                        "mapping_path": "/tmp/layout.bin",
+                    },
+                },
+            }
+        )
+
+    def test_rejects_unknown_ssd_layout_strategy(self) -> None:
+        self.assert_invalid_config(
+            {
+                "capacity": 1024,
+                "index": {"type": "DRAM_EXTENDIBLE_HASH"},
+                "value": {
+                    "type": "SSD_STATIC_LAYOUT_VALUE_STORE",
+                    "path": "/tmp/recstore_static.db",
+                    "default_value_size_hint": 128,
+                    "ssd_layout": {
+                        "strategy": "unknown",
+                        "mapping_path": "/tmp/layout.bin",
+                    },
+                },
+            }
+        )
+
     def test_rejects_removed_external_engine_type_field(self) -> None:
         self.assert_invalid_config(
             {
