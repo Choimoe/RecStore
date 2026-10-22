@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import torch as th
 
 
-th.ops.load_library(
-    "/home/xieminhui/RecStore/build/lib/librecstore_pytorch_test.so")
+repo_root = Path(__file__).resolve().parents[3]
+th.ops.load_library(str(repo_root / "build/lib/librecstore_pytorch_test.so"))
 
 
 test1_op = th.ops.librecstore_pytorch_test.test1

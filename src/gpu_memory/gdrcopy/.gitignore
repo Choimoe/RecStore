@@ -14,6 +14,12 @@
 *.la
 *.a
 *.lib
+*.ko
+*.mod
+*.cmd
+*.d
+Module.symvers
+modules.order
 
 # Executables
 *.exe
