@@ -70,6 +70,20 @@ void BindLocalIndexedKV(py::module_& m) {
            py::arg("num_rows"),
            py::arg("values_address"),
            py::arg("release_gil") = true)
+      .def("lookup_values_with_misses_into_raw",
+           &LocalIndexedKV::LookupValuesWithMissesIntoRaw,
+           py::arg("ids_address"),
+           py::arg("num_rows"),
+           py::arg("values_address"),
+           py::arg("missing_positions_address"),
+           py::arg("release_gil") = true)
+      .def("lookup_values_with_misses_into_raw_profiled",
+           &LocalIndexedKV::LookupValuesWithMissesIntoRawProfiled,
+           py::arg("ids_address"),
+           py::arg("num_rows"),
+           py::arg("values_address"),
+           py::arg("missing_positions_address"),
+           py::arg("release_gil") = true)
       .def("size", &LocalIndexedKV::Size)
       .def("snapshot_indexed", &LocalIndexedKV::SnapshotIndexed)
       .def("delete_indexed", &LocalIndexedKV::DeleteIndexed)

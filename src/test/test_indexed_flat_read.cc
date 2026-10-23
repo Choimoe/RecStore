@@ -70,6 +70,22 @@ int main(int argc, char** argv) {
     Check(values[i] == i + 9 && values[16 + i] == 0 && values[32 + i] == i + 9,
           "value or missing zero fill changed");
   }
+  std::array<int64_t, 3> missing_positions{-9, -9, -9};
+  Check(engine.BatchGetFlatRange(
+            base::ConstArray<uint64_t>(keys),
+            values.data(),
+            3,
+            18,
+            2,
+            16,
+            0,
+            &stats,
+            false,
+            missing_positions.data()),
+        "value-only read with missing positions failed");
+  Check(stats.missing_rows == 1 && missing_positions[0] == 1 &&
+            missing_positions[1] == -9,
+        "missing positions were not compact and ordered");
   const base::ConstArray<uint64_t> empty(nullptr, 0);
   Check(engine.BatchGetIndexedFlat(
             empty, nullptr, nullptr, nullptr, 0, 16, 0, &stats),

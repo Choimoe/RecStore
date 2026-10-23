@@ -183,7 +183,8 @@ public:
       size_t stored_row_bytes,
       size_t source_offset_bytes,
       size_t output_row_bytes,
-      uint64_t* missing_rows) const override {
+      uint64_t* missing_rows,
+      int64_t* missing_positions = nullptr) const override {
     if (handles == nullptr || out_buf == nullptr || output_row_bytes == 0 ||
         source_offset_bytes > stored_row_bytes ||
         output_row_bytes > stored_row_bytes - source_offset_bytes) {
@@ -196,7 +197,8 @@ public:
           out_buf,
           source_offset_bytes,
           output_row_bytes,
-          missing_rows);
+          missing_rows,
+          missing_positions);
     }
     uint64_t local_missing   = 0;
     char* dst                = static_cast<char*>(out_buf);
@@ -205,6 +207,9 @@ public:
       char* row_dst = dst + (row << row_shift);
       if (handles[row] == kValueHandleNone) {
         std::memset(row_dst, 0, output_row_bytes);
+        if (missing_positions != nullptr) {
+          missing_positions[local_missing] = static_cast<int64_t>(row);
+        }
         ++local_missing;
         continue;
       }
@@ -338,13 +343,17 @@ private:
       void* out_buf,
       size_t source_offset_bytes,
       size_t output_row_bytes,
-      uint64_t* missing_rows) const {
+      uint64_t* missing_rows,
+      int64_t* missing_positions) const {
     uint64_t local_missing = 0;
     char* dst              = static_cast<char*>(out_buf);
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + row * output_row_bytes;
       if (handles[row] == kValueHandleNone) {
         std::memset(row_dst, 0, output_row_bytes);
+        if (missing_positions != nullptr) {
+          missing_positions[local_missing] = static_cast<int64_t>(row);
+        }
         ++local_missing;
         continue;
       }

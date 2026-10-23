@@ -137,7 +137,8 @@ struct LocalIndexedKV {
       int64_t num_rows,
       uintptr_t values_address,
       bool release_gil,
-      py::dict* profile);
+      py::dict* profile,
+      uintptr_t missing_positions_address = 0);
   uint64_t LookupValuesIntoRaw(uintptr_t ids_address,
                                int64_t num_rows,
                                uintptr_t values_address,
@@ -146,6 +147,18 @@ struct LocalIndexedKV {
       uintptr_t ids_address,
       int64_t num_rows,
       uintptr_t values_address,
+      bool release_gil);
+  uint64_t LookupValuesWithMissesIntoRaw(
+      uintptr_t ids_address,
+      int64_t num_rows,
+      uintptr_t values_address,
+      uintptr_t missing_positions_address,
+      bool release_gil);
+  py::dict LookupValuesWithMissesIntoRawProfiled(
+      uintptr_t ids_address,
+      int64_t num_rows,
+      uintptr_t values_address,
+      uintptr_t missing_positions_address,
       bool release_gil);
   int64_t Size();
   py::tuple SnapshotIndexed();

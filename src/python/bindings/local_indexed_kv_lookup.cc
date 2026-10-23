@@ -440,7 +440,8 @@ uint64_t LocalIndexedKV::LookupValuesIntoRawImpl(
     int64_t num_rows,
     uintptr_t values_address,
     bool release_gil,
-    py::dict* profile) {
+    py::dict* profile,
+    uintptr_t missing_positions_address) {
   using clock                = std::chrono::steady_clock;
   const bool collect_profile = profile != nullptr;
   const auto total_start     = clock::now();
@@ -457,6 +458,8 @@ uint64_t LocalIndexedKV::LookupValuesIntoRawImpl(
   const auto keys = Int64KeyView{reinterpret_cast<const uint64_t*>(ids_address),
                                  static_cast<size_t>(num_rows)};
   auto* value_ptr = reinterpret_cast<float*>(values_address);
+  auto* missing_positions =
+      reinterpret_cast<int64_t*>(missing_positions_address);
   const int workers = EffectiveWorkers(keys.size());
   std::vector<BaseKV::BatchGetFlatStats> worker_stats(
       static_cast<size_t>(workers));
@@ -488,7 +491,9 @@ uint64_t LocalIndexedKV::LookupValuesIntoRawImpl(
               dim,
               static_cast<unsigned>(worker),
               &worker_stats[static_cast<size_t>(worker)],
-              collect_profile)
+              collect_profile,
+              missing_positions == nullptr ? nullptr
+                                           : missing_positions + begin)
               ? 1
               : 0;
     }
@@ -506,7 +511,22 @@ uint64_t LocalIndexedKV::LookupValuesIntoRawImpl(
       })) {
     throw std::runtime_error("lookup_values_into_raw: engine lookup failed");
   }
-  const auto total_end = clock::now();
+  const auto compact_start = clock::now();
+  if (missing_positions != nullptr) {
+    size_t write = 0;
+    for (int worker = 0; worker < workers; ++worker) {
+      const size_t begin = keys.size() * static_cast<size_t>(worker) /
+                           static_cast<size_t>(workers);
+      const uint64_t count =
+          worker_stats[static_cast<size_t>(worker)].missing_rows;
+      for (uint64_t local = 0; local < count; ++local) {
+        missing_positions[write++] =
+            static_cast<int64_t>(begin) + missing_positions[begin + local];
+      }
+    }
+  }
+  const auto compact_end = clock::now();
+  const auto total_end   = clock::now();
 
   uint64_t missing_rows        = 0;
   uint64_t index_lookup_cpu_ns = 0;
@@ -539,7 +559,8 @@ uint64_t LocalIndexedKV::LookupValuesIntoRawImpl(
   (*profile)["row_copy_cpu_ns"]      = static_cast<double>(row_copy_cpu_ns);
   (*profile)["row_copy_max_ns"]      = static_cast<double>(row_copy_max_ns);
   (*profile)["engine_get_unpack_ns"] = ns(engine_end - lock_end);
-  (*profile)["total_ns"]             = ns(total_end - total_start);
+  (*profile)["missing_positions_compact_ns"] = ns(compact_end - compact_start);
+  (*profile)["total_ns"]                     = ns(total_end - total_start);
   return missing_rows;
 }
 
@@ -560,6 +581,48 @@ py::dict LocalIndexedKV::LookupValuesIntoRawProfiled(
   py::dict profile;
   LookupValuesIntoRawImpl(
       ids_address, num_rows, values_address, release_gil, &profile);
+  return profile;
+}
+
+uint64_t LocalIndexedKV::LookupValuesWithMissesIntoRaw(
+    uintptr_t ids_address,
+    int64_t num_rows,
+    uintptr_t values_address,
+    uintptr_t missing_positions_address,
+    bool release_gil) {
+  if (num_rows > 0 && missing_positions_address == 0) {
+    throw std::invalid_argument(
+        "lookup_values_with_misses_into_raw: missing positions require a "
+        "valid pointer");
+  }
+  return LookupValuesIntoRawImpl(
+      ids_address,
+      num_rows,
+      values_address,
+      release_gil,
+      nullptr,
+      missing_positions_address);
+}
+
+py::dict LocalIndexedKV::LookupValuesWithMissesIntoRawProfiled(
+    uintptr_t ids_address,
+    int64_t num_rows,
+    uintptr_t values_address,
+    uintptr_t missing_positions_address,
+    bool release_gil) {
+  if (num_rows > 0 && missing_positions_address == 0) {
+    throw std::invalid_argument(
+        "lookup_values_with_misses_into_raw_profiled: missing positions "
+        "require a valid pointer");
+  }
+  py::dict profile;
+  LookupValuesIntoRawImpl(
+      ids_address,
+      num_rows,
+      values_address,
+      release_gil,
+      &profile,
+      missing_positions_address);
   return profile;
 }
 

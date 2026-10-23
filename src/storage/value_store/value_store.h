@@ -87,7 +87,8 @@ public:
       size_t stored_row_bytes,
       size_t source_offset_bytes,
       size_t output_row_bytes,
-      uint64_t* missing_rows) const {
+      uint64_t* missing_rows,
+      int64_t* missing_positions = nullptr) const {
     (void)handles;
     (void)num_rows;
     (void)out_buf;
@@ -95,6 +96,7 @@ public:
     (void)source_offset_bytes;
     (void)output_row_bytes;
     (void)missing_rows;
+    (void)missing_positions;
     return false;
   }
 
