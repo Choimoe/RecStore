@@ -424,6 +424,7 @@ class RecStoreRunner(BenchmarkRunner):
             )
             # -- optimization plugin + read path --------------------------------
             use_bagpipe = cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
+            use_planned_bagpipe = use_bagpipe and cfg.optimization.prescan
 
             if use_bagpipe:
                 fused_id_prefixes = torch.tensor(
@@ -452,7 +453,7 @@ class RecStoreRunner(BenchmarkRunner):
                     or cfg.gpu_cache_capacity
                     or 160_000
                 )
-                if not client.is_gpu_cache_enabled():
+                if not use_planned_bagpipe and not client.is_gpu_cache_enabled():
                     enabled = client.enable_gpu_cache(
                         cache_capacity, cfg.embedding_dim
                     )
@@ -463,7 +464,7 @@ class RecStoreRunner(BenchmarkRunner):
                             "returned False"
                         )
                 print(
-                    "[rs_demo] BagPipe GPU cache enabled: "
+                    "[rs_demo] BagPipe cache configured: "
                     f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
                 )
                 # BagPipe owns its cache policy.  The cold-start lookup must not
@@ -483,6 +484,7 @@ class RecStoreRunner(BenchmarkRunner):
                 master_table_name = eb_configs[0]["name"] if eb_configs else ""
                 plugin = OptimizationPluginRegistry.create(
                     "bagpipe",
+                    prescan=cfg.optimization.prescan,
                     embedding_module=embedding_module,
                     kv_client=client,
                     lookahead=cfg.optimization.lookahead,
@@ -543,43 +545,41 @@ class RecStoreRunner(BenchmarkRunner):
                     dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
                 )
 
-            # -- BagPipe oracle prescan (issue #278) ---------------------------
-            # One pass over this rank's shard before training so the shared-ID
-            # set is complete: IDs provably local-only then skip the per-step
-            # cross-rank aggregation in update_grads.  Without the prescan the
-            # fallback set only covers the first steps and ~73% of IDs take the
-            # sparse path every step.  Meaningful only for data-parallel runs
-            # (world_size == 1 never aggregates, so the scan would be wasted).
+            lifecycle = {"rank": rank}
+            # Precompute the complete training schedule and resident working
+            # set, including epoch transitions, for single- and multi-rank runs.
             if (
-                use_bagpipe
-                and cfg.optimization.prescan
+                use_planned_bagpipe
                 and plugin is not None
                 and plugin.is_enabled
-                and use_dist
             ):
                 prescan_start = time.perf_counter()
                 prescan_batches = 0
-                for dense_b, sparse_b, _labels_b in dataloader:
+                prescan_iter = iter(dataloader)
+                for _ in range(cfg.steps):
+                    try:
+                        dense_b, sparse_b, _labels_b = next(prescan_iter)
+                    except StopIteration:
+                        prescan_iter = iter(dataloader)
+                        dense_b, sparse_b, _labels_b = next(prescan_iter)
                     _, sf = build_kjt_batch_from_dense_sparse_labels(
                         dense_b, sparse_b, _labels_b, device=device
                     )
                     plugin.prescan_batch(prescan_batches, sf)
                     prescan_batches += 1
-                # finalize_prescan is collective (all_gather of the per-rank
-                # ID unions); shard sizes may differ by a batch, and the
-                # all_gather itself blocks until every rank arrives.
                 plugin.finalize_prescan()
+                # Replay the same seeded sampling sequence, including
+                # RandomSampler epoch changes in single-rank training.
+                del prescan_iter
+                dataset, dataloader = _build_train_dataloader_for_mode(repo_root, cfg, rank)
                 _barrier_for_step_alignment(
                     dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
                 )
+                lifecycle["bagpipe_prescan_total_ms"] = (time.perf_counter() - prescan_start) * 1e3
+                lifecycle.update(plugin._controller.consume_stats(reset=False))
                 print(
                     f"[rs_demo] BagPipe oracle prescan: {prescan_batches} batches "
                     f"in {time.perf_counter() - prescan_start:.1f}s"
-                )
-            elif cfg.optimization.prescan and use_bagpipe and not use_dist:
-                print(
-                    "[rs_demo] --optimization-prescan ignored: single-rank runs "
-                    "never aggregate gradients across ranks"
                 )
 
             rows: list[dict[str, Any]] = []
@@ -601,6 +601,7 @@ class RecStoreRunner(BenchmarkRunner):
                     data_iter_state["iter"] = iter(dataloader)
                     dense_batch, sparse_batch, labels_batch = next(data_iter_state["iter"])
                 row["batch_prepare_ms"] = (time.perf_counter() - batch_prepare_start) * 1e3
+                row["batch_size"] = int(dense_batch.shape[0])
 
                 input_pack_start = time.perf_counter()
                 _, sparse_features = build_kjt_batch_from_dense_sparse_labels(
@@ -699,7 +700,9 @@ class RecStoreRunner(BenchmarkRunner):
                 events.emit("consume_start", step=step)
                 with timer.cpu("embed_lookup_ms"):
                     read_path.before_lookup(step, sparse_features, ticket, row)
-                    if callable(record_pooled_grad):
+                    if use_planned_bagpipe:
+                        embeddings = plugin._controller.lookup(sparse_features)
+                    elif callable(record_pooled_grad):
                         with torch.no_grad():
                             embeddings = embedding_module(sparse_features)
                     else:
@@ -795,6 +798,9 @@ class RecStoreRunner(BenchmarkRunner):
                     read_path.after_sparse_update(
                         step, sparse_features, sparse_optimizer, row
                     )
+                    if use_planned_bagpipe and step == cfg.steps - 1:
+                        # Charge the final deferred SGD to training as well.
+                        plugin._controller._wait_pending()
                     sparse_optimizer.zero_grad()
 
                 events.emit("sparse_end", step=step)
@@ -827,10 +833,28 @@ class RecStoreRunner(BenchmarkRunner):
                 )
                 if profiler is not None:
                     profiler.step()
+                rows[-1]["step_wall_ms"] = (time.perf_counter() - step_wall_start) * 1e3
 
             print("[rs_demo] workload finished")
 
             _write_rows(out_csv, rows)
+            if cfg.validation_state:
+                if not use_planned_bagpipe:
+                    raise RuntimeError("RecStore validation-state requires bagpipe with --optimization-prescan")
+                from ..runtime.validation import export_validation_state
+                export_validation_state(
+                    Path(cfg.output_root) / "outputs" / cfg.run_id / f"validation_rank{rank}.pt",
+                    embedding_module, dense_module, planned_controller=plugin._controller,
+                )
+            if plugin is not None:
+                shutdown_start = time.perf_counter()
+                plugin.shutdown()
+                lifecycle["bagpipe_shutdown_ms"] = (time.perf_counter() - shutdown_start) * 1e3
+                plugin = None
+            if use_bagpipe:
+                lifecycle_path = Path(cfg.output_root) / "outputs" / cfg.run_id / f"lifecycle_rank{rank}.json"
+                lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+                lifecycle_path.write_text(json.dumps(lifecycle, indent=2) + "\n")
             if cfg.save_checkpoint:
                 from ..checkpoint import export_checkpoint
                 export_checkpoint(
@@ -855,7 +879,10 @@ class RecStoreRunner(BenchmarkRunner):
             if events is not None:
                 events.close()
             if plugin is not None:
-                plugin.shutdown()
+                if use_planned_bagpipe:
+                    plugin._controller.shutdown(flush=False)
+                else:
+                    plugin.shutdown()
             os.chdir(str(orig_cwd))
 
     def run(self, repo_root: Path, cfg: RunConfig) -> dict:

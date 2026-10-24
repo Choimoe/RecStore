@@ -431,6 +431,7 @@ def _run_single_or_dist_worker(
                 except StopIteration:
                     data_iter = iter(dataloader)
                     dense_batch, sparse_batch, labels_batch = next(data_iter)
+            row["batch_size"] = int(dense_batch.shape[0])
 
             with timer.cpu("input_pack_ms"):
                 dense_batch, sparse_features = build_kjt_batch_from_dense_sparse_labels(
@@ -465,8 +466,6 @@ def _run_single_or_dist_worker(
                     loss, _ = compute_dense_loss(
                         cfg, dense_module, criterion,
                         dense_features, embedded_sparse, labels)
-                row["loss"] = float(loss.detach().float().cpu().item())
-
                 with timer.gpu("backward_ms"):
                     embedded_sparse_grad = run_hybrid_backward(
                         loss=loss,
@@ -474,6 +473,7 @@ def _run_single_or_dist_worker(
                         dense_module=dense_module,
                         torch=torch,
                         device=device,
+                        synchronize=False,
                     )
 
                 with timer.gpu("dense_optimizer_ms"):
@@ -496,6 +496,10 @@ def _run_single_or_dist_worker(
                 sparse_optimizer.step()
                 sparse_optimizer.zero_grad(set_to_none=True)
 
+            if is_trainer_rank:
+                # Match RecStore's readback boundary; stream dependencies and
+                # the final device drain already order the backward/update work.
+                row["loss"] = float(loss.detach().float().cpu().item())
             if profiler is not None:
                 profiler.step()
 
@@ -516,8 +520,15 @@ def _run_single_or_dist_worker(
                 local_rank=local_rank,
                 use_dist=use_dist,
             )
+            rows[-1]["step_wall_ms"] = (time.perf_counter() - step_start) * 1e3
 
     _write_rows(out_csv, rows)
+    if cfg.validation_state:
+        from ..runtime.validation import export_validation_state
+        export_validation_state(
+            Path(cfg.output_root) / "outputs" / cfg.run_id / f"validation_rank{rank}.pt",
+            embedding_module, dense_module,
+        )
     if (is_dist or use_uvm_caching) and dist.is_initialized():
         if is_dist:
             dist.barrier(device_ids=[local_rank] if device.type == "cuda" else None)
