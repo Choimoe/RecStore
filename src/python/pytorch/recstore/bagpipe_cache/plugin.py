@@ -97,6 +97,7 @@ class BagPipePlugin(OptimizationPlugin):
         lr: float = 0.01,
         id_extractor: Callable[[Any], torch.Tensor] | None = None,
         enabled: bool = True,
+        planned: bool = False,
         **_: Any,
     ) -> "BagPipePlugin":
         """Create a BagPipePlugin.
@@ -122,7 +123,11 @@ class BagPipePlugin(OptimizationPlugin):
         else:
             cleanup_batch = 0.25
 
-        controller = BagPipeCacheController(
+        controller_cls = BagPipeCacheController
+        if planned:
+            from .planned import PlannedBagPipeController
+            controller_cls = PlannedBagPipeController
+        controller = controller_cls(
             embedding_module,
             kv_client,
             lookahead_value=lookahead,
