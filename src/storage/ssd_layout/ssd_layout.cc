@@ -46,6 +46,27 @@ uint32_t SlotsPerPage(uint32_t page_size, uint32_t row_size) {
   return page_size / row_size;
 }
 
+void CheckGraph(const Hypergraph& graph) {
+  if (graph.vertex_count > std::numeric_limits<uint32_t>::max()) {
+    Fail("SSD layout vertex count exceeds uint32");
+  }
+  if (graph.xpins.empty() || graph.xpins.front() != 0 ||
+      graph.xpins.back() != graph.pins.size()) {
+    Fail("query log index is invalid");
+  }
+  for (size_t i = 1; i < graph.xpins.size(); ++i) {
+    if (graph.xpins[i] < graph.xpins[i - 1] ||
+        graph.xpins[i] > graph.pins.size()) {
+      Fail("query log edge range is invalid");
+    }
+  }
+  for (uint32_t vertex : graph.pins) {
+    if (vertex >= graph.vertex_count) {
+      Fail("query log vertex is out of range");
+    }
+  }
+}
+
 void ReadAll(const std::string& path, std::vector<unsigned char>* out) {
   std::ifstream input(path, std::ios::binary);
   if (!input) {
@@ -117,6 +138,10 @@ Artifact Finish(Strategy strategy,
                 uint32_t page_size,
                 uint32_t row_size,
                 Rows rows) {
+  if (strategy != Strategy::kPlain && strategy != Strategy::kBandana &&
+      strategy != Strategy::kMaxEmbed) {
+    Fail("unknown SSD layout strategy");
+  }
   const uint32_t slots = SlotsPerPage(page_size, row_size);
   Artifact artifact;
   artifact.strategy   = strategy;
@@ -171,14 +196,8 @@ Artifact Finish(Strategy strategy,
 
 std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
   const uint64_t count = graph.vertex_count;
-  if (count > std::numeric_limits<uint32_t>::max()) {
-    Fail("SSD layout vertex count exceeds uint32");
-  }
   std::vector<char> seen(count, 0);
   for (uint32_t vertex : graph.pins) {
-    if (vertex >= count) {
-      Fail("query log vertex is out of range");
-    }
     seen[vertex] = 1;
   }
   std::vector<uint32_t> hot;
@@ -207,6 +226,15 @@ std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
       longest = std::max(longest, end - begin);
     }
   }
+  if (edges.size() > std::numeric_limits<uint32_t>::max()) {
+    Fail("SSD layout edge count exceeds uint32");
+  }
+  std::vector<std::vector<uint32_t>> incident_edges(count);
+  for (uint32_t edge = 0; edge < edges.size(); ++edge) {
+    for (uint64_t pin = edges[edge].begin; pin < edges[edge].end; ++pin) {
+      incident_edges[graph.pins[pin]].push_back(edge);
+    }
+  }
   std::vector<float> table(longest + 2);
   for (int i = -1; i <= static_cast<int>(longest); ++i) {
     table[static_cast<size_t>(i + 1)] = std::pow(1.f - kBalanceP, i);
@@ -217,29 +245,49 @@ std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
   std::vector<uint32_t> part(count, 0);
   std::vector<char> side(count, 0);
   std::vector<float> gain(count, 0);
-  std::vector<char> in_span(count, 0);
+  std::vector<uint32_t> span_epoch(count, 0);
+  std::vector<uint32_t> edge_epoch(edges.size(), 0);
+  uint32_t next_epoch = 1;
   uint32_t next_part = 0;
 
-  // ponytail: one induced-hypergraph scan per refine pass. Parallelize the
-  // edge loop if a trace no longer fits in the offline time budget.
+  // ponytail: adjacency costs O(vertices + pins) memory. Stream subgraphs if
+  // traces outgrow RAM.
   const auto refine = [&](size_t begin, size_t mid, size_t end) {
-    std::fill(in_span.begin(), in_span.end(), 0);
+    if (next_epoch == 0) {
+      std::fill(span_epoch.begin(), span_epoch.end(), 0);
+      std::fill(edge_epoch.begin(), edge_epoch.end(), 0);
+      next_epoch = 1;
+    }
+    const uint32_t epoch = next_epoch++;
     for (size_t i = begin; i < mid; ++i) {
-      side[idx[i]]    = 0;
-      in_span[idx[i]] = 1;
+      side[idx[i]]       = 0;
+      span_epoch[idx[i]] = epoch;
     }
     for (size_t i = mid; i < end; ++i) {
-      side[idx[i]]    = 1;
-      in_span[idx[i]] = 1;
+      side[idx[i]]       = 1;
+      span_epoch[idx[i]] = epoch;
     }
+    std::vector<uint32_t> relevant_edges;
+    for (size_t i = begin; i < end; ++i) {
+      for (uint32_t edge : incident_edges[idx[i]]) {
+        if (edge_epoch[edge] != epoch) {
+          edge_epoch[edge] = epoch;
+          relevant_edges.push_back(edge);
+        }
+      }
+    }
+    std::sort(relevant_edges.begin(), relevant_edges.end());
     for (int iter = 0; iter < kMaxRefine; ++iter) {
-      std::fill(gain.begin(), gain.end(), 0.f);
-      for (const Edge& edge : edges) {
+      for (size_t i = begin; i < end; ++i) {
+        gain[idx[i]] = 0.f;
+      }
+      for (uint32_t edge_id : relevant_edges) {
+        const Edge& edge = edges[edge_id];
         int left = 0;
         int right = 0;
         for (uint64_t pin = edge.begin; pin < edge.end; ++pin) {
           const uint32_t vertex = graph.pins[pin];
-          if (!in_span[vertex]) {
+          if (span_epoch[vertex] != epoch) {
             continue;
           }
           ++(side[vertex] == 0 ? left : right);
@@ -251,7 +299,7 @@ std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
         const float move_left  = -(at(left) - at(right - 1));
         for (uint64_t pin = edge.begin; pin < edge.end; ++pin) {
           const uint32_t vertex = graph.pins[pin];
-          if (in_span[vertex]) {
+          if (span_epoch[vertex] == epoch) {
             gain[vertex] += side[vertex] == 0 ? move_right : move_left;
           }
         }
@@ -493,6 +541,7 @@ Artifact Partition(const Hypergraph& graph,
                    const std::vector<uint64_t>& keys,
                    uint32_t page_size,
                    uint32_t row_size) {
+  CheckGraph(graph);
   if (keys.size() != graph.vertex_count) {
     Fail("key map size does not match the query log");
   }
@@ -510,9 +559,10 @@ Artifact Replicate(const Artifact& partitioned,
                    const Hypergraph& graph,
                    const std::vector<uint64_t>& keys,
                    double rep_ratio) {
-  if (rep_ratio < 0.0) {
-    Fail("replication ratio must be non-negative");
+  if (!std::isfinite(rep_ratio) || rep_ratio < 0.0) {
+    Fail("replication ratio must be finite and non-negative");
   }
+  CheckGraph(graph);
   if (keys.size() != graph.vertex_count || partitioned.keys.size() != keys.size()) {
     Fail("replication inputs do not describe the same vertices");
   }
@@ -531,10 +581,14 @@ Artifact Replicate(const Artifact& partitioned,
   }
 
   const uint32_t cap = SlotsPerPage(partitioned.page_size, partitioned.row_size);
-  const uint64_t extra =
-      static_cast<uint64_t>(std::ceil(rep_ratio * static_cast<double>(keys.size())));
-  const uint32_t replica_pages =
-      extra == 0 ? 0 : static_cast<uint32_t>((extra + cap - 1) / cap);
+  const long double requested =
+      static_cast<long double>(rep_ratio) * keys.size();
+  if (requested > std::numeric_limits<uint64_t>::max()) {
+    Fail("replication ratio is too large");
+  }
+  const uint64_t extra = static_cast<uint64_t>(std::ceil(requested));
+  const uint64_t replica_pages =
+      extra / cap + static_cast<uint64_t>(extra % cap != 0);
   std::vector<uint64_t> score(keys.size(), 0);
   std::vector<std::vector<uint32_t>> edges;
   for (uint64_t edge = 0; edge + 1 < graph.xpins.size(); ++edge) {
@@ -570,7 +624,9 @@ Artifact Replicate(const Artifact& partitioned,
       node_edges[vertex].push_back(edge);
     }
   }
-  for (uint32_t replica = 0; replica < replica_pages && replica < ranked.size();
+  uint64_t remaining = extra;
+  for (uint64_t replica = 0;
+       replica < replica_pages && replica < ranked.size() && remaining >= 2;
        ++replica) {
     const uint32_t center = ranked[replica];
     std::unordered_map<uint32_t, uint32_t> neighbor_count;
@@ -591,7 +647,7 @@ Artifact Replicate(const Artifact& partitioned,
     });
     std::vector<uint32_t> chosen{center};
     for (const auto& neighbor : neighbors) {
-      if (chosen.size() == cap) {
+      if (chosen.size() == std::min<uint64_t>(cap, remaining)) {
         break;
       }
       chosen.push_back(neighbor.second);
@@ -603,19 +659,25 @@ Artifact Replicate(const Artifact& partitioned,
     for (uint32_t vertex : chosen) {
       pages[vertex].push_back(page);
     }
+    remaining -= chosen.size();
   }
   return Finish(Strategy::kMaxEmbed, partitioned.page_size, partitioned.row_size,
                 RowsFromParts(keys, pages, partitioned.row_size));
 }
 
 Artifact Shrink(const Artifact& replicated, double rep_ratio) {
-  if (rep_ratio < 0.0) {
-    Fail("shrink ratio must be non-negative");
+  if (!std::isfinite(rep_ratio) || rep_ratio < 0.0) {
+    Fail("shrink ratio must be finite and non-negative");
+  }
+  const long double requested =
+      static_cast<long double>(replicated.keys.size()) *
+      (1.0L + static_cast<long double>(rep_ratio));
+  if (requested > std::numeric_limits<uint64_t>::max()) {
+    Fail("shrink ratio is too large");
   }
   const uint64_t target = std::max<uint64_t>(
       replicated.keys.size(),
-      static_cast<uint64_t>(std::ceil(
-          static_cast<double>(replicated.keys.size()) * (1.0 + rep_ratio))));
+      static_cast<uint64_t>(std::ceil(requested)));
   std::vector<char> primary(replicated.pages.size(), 0);
   uint64_t copies = 0;
   for (const auto& row : replicated.copies) {

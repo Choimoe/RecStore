@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -85,6 +87,30 @@ TEST_F(LayoutTest, PartitionIsDeterministicAndBounded) {
                std::invalid_argument);
 }
 
+TEST_F(LayoutTest, PartitionScalesWithCurrentSubgraph) {
+  constexpr uint32_t vertices  = 262144;
+  constexpr uint32_t edge_size = 32;
+  ssd_layout::Hypergraph graph;
+  graph.vertex_count = vertices;
+  graph.xpins.reserve(vertices / edge_size + 1);
+  graph.pins.reserve(vertices);
+  graph.xpins.push_back(0);
+  for (uint32_t vertex = 0; vertex < vertices; ++vertex) {
+    graph.pins.push_back(vertex);
+    if ((vertex + 1) % edge_size == 0) {
+      graph.xpins.push_back(graph.pins.size());
+    }
+  }
+
+  const auto keys    = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto begin   = std::chrono::steady_clock::now();
+  const auto layout  = ssd_layout::Partition(graph, keys, 4096, 128);
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+
+  EXPECT_EQ(layout.keys.size(), vertices);
+  EXPECT_LT(elapsed, std::chrono::seconds(3));
+}
+
 TEST_F(LayoutTest, ReplicationStaysInBudgetAndShrinkKeepsPrimary) {
   const auto graph = WriteLogs();
   const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
@@ -118,6 +144,49 @@ TEST_F(LayoutTest, ReplicationStaysInBudgetAndShrinkKeepsPrimary) {
     ASSERT_EQ(shrunk.copies[i].size(), 1U);
     EXPECT_EQ(shrunk.copies[i].front().page_id, bandana.copies[i].front().page_id);
   }
+}
+
+TEST_F(LayoutTest, ReplicationDoesNotRoundCopyBudgetUpToAFullPage) {
+  const auto graph = WriteLogs();
+  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto bandana = ssd_layout::Partition(graph, keys, 4096, 2048);
+  const auto replicated = ssd_layout::Replicate(bandana, graph, keys, 0.25);
+  uint64_t copies = 0;
+  for (const auto& row : replicated.copies) {
+    copies += row.size();
+  }
+  EXPECT_LE(copies, 5U);
+}
+
+TEST_F(LayoutTest, ReplicationRejectsOutOfRangeVertices) {
+  auto graph = WriteLogs();
+  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto bandana = ssd_layout::Partition(graph, keys, 4096, 2048);
+  graph.pins[0] = static_cast<uint32_t>(graph.vertex_count);
+  EXPECT_THROW(ssd_layout::Replicate(bandana, graph, keys, 1.0),
+               std::invalid_argument);
+}
+
+TEST_F(LayoutTest, RejectsNonFiniteRatios) {
+  const auto graph = WriteLogs();
+  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto bandana = ssd_layout::Partition(graph, keys, 4096, 2048);
+  EXPECT_THROW(ssd_layout::Replicate(
+                   bandana, graph, keys,
+                   std::numeric_limits<double>::quiet_NaN()),
+               std::invalid_argument);
+  EXPECT_THROW(ssd_layout::Shrink(
+                   bandana, std::numeric_limits<double>::infinity()),
+               std::invalid_argument);
+}
+
+TEST_F(LayoutTest, RejectsUnknownArtifactStrategy) {
+  const auto graph = WriteLogs();
+  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  auto artifact = ssd_layout::Partition(graph, keys, 4096, 2048);
+  artifact.strategy = static_cast<ssd_layout::Strategy>(99);
+  EXPECT_THROW(ssd_layout::Normalize(std::move(artifact)),
+               std::invalid_argument);
 }
 
 TEST_F(LayoutTest, RejectsCorruptArtifact) {
