@@ -321,10 +321,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help=(
-            "BagPipe: pre-scan the dataset once before training to build the "
-            "complete shared-ID set (oracle prescan). Without it the fallback "
-            "set only covers the first steps and every ID outside it must "
-            "take the cross-rank sparse aggregation path each step."
+            "BagPipe: pre-scan the configured training steps and precompute "
+            "collective layouts. Requires a repeatable batch sequence, one ID "
+            "per bag, and the complete working set to fit the GPU row limit. "
+            "Without it BagPipe uses dynamic prefetch and eviction."
         ),
     )
     parser.add_argument("--master-addr", type=str, default="127.0.0.1")
@@ -766,8 +766,11 @@ def validate_recstore_config(cfg: RunConfig) -> None:
             cfg.optimization.lookahead = cfg.prefetch_depth or 4
     # Validate OptimizationConfig
     opt = cfg.optimization
-    if opt.plugin == "bagpipe_planned" and not opt.prescan:
-        raise RuntimeError("bagpipe_planned requires --optimization-prescan")
+    if opt.plugin == "bagpipe_planned":
+        raise RuntimeError(
+            "bagpipe_planned has been merged into bagpipe; use "
+            "--read-mode bagpipe --optimization-prescan"
+        )
     if opt.plugin != "none" and opt.lookahead <= 0:
         raise RuntimeError(
             f"--optimization-plugin {opt.plugin!r} requires --optimization-lookahead > 0"

@@ -43,7 +43,7 @@ def export_validation_state(path, embedding_module, dense_module, planned_contro
         )
     else:
         if getattr(embedding_module, "is_recstore_sparse_module", False):
-            raise ValueError("Original BagPipe validation snapshots are unsupported; use the planned controller")
+            raise ValueError("BagPipe validation snapshots require --optimization-prescan")
         tables = {}
         for name, value in embedding_module.state_dict().items():
             if "embedding_bags." not in name or not name.endswith(".weight"):

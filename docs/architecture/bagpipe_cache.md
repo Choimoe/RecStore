@@ -49,3 +49,29 @@ errors, not reasons to fall back to replace-style fills: a fallback could evict
 a key without updating the mirror. An external cache reset is also a hard error
 because dirty local updates cannot be reconstructed safely after the reset.
 
+## Prescanned execution
+
+BagPipe has one public plugin name, `bagpipe`. In the DLRM runner, enable
+precomputed collective layouts with:
+
+```text
+--read-mode bagpipe --optimization-prescan
+```
+
+Without prescan, BagPipe uses the dynamic C++ cache described above. With
+prescan, it scans the configured training steps, loads the complete touched
+working set into a compact FP32 tensor on each rank, and communicates gradients
+using fixed per-step layouts. The internal resident controller shares the
+same plugin, read path, and sparse optimizer. No separate `bagpipe_planned`
+plugin is registered.
+
+This upgrades the earlier shared-ID-only prescan: it requires an exactly
+repeatable batch sequence, one ID per feature per sample, and sufficient
+capacity for the entire working set plus plan metadata. The row limit is
+`cache_capacity * 64`, matching the C++ cache's capacity unit. Capacity or
+schedule violations fail explicitly; they do not silently switch controllers.
+
+Each step applies the mean FP32 gradient across ranks before the next lookup.
+The final update is drained before validation, and rank 0 writes authoritative
+rows back to the PS before shutdown. Prescan, initial loading, and final PS
+writeback costs must be reported separately from steady training throughput.

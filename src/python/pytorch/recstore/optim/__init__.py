@@ -81,9 +81,6 @@ def _register_builtins() -> None:
     try:
         from ..bagpipe_cache.plugin import BagPipePlugin
         OptimizationPluginRegistry.register("bagpipe", BagPipePlugin.create)
-        OptimizationPluginRegistry.register(
-            "bagpipe_planned", lambda **kwargs: BagPipePlugin.create(planned=True, **kwargs)
-        )
     except ImportError:
         pass
 

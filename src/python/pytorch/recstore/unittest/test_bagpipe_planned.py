@@ -3,6 +3,8 @@ import unittest
 import torch
 
 from ..bagpipe_cache.planned import PlannedBagPipeController
+from ..bagpipe_cache.controller import BagPipeCacheController
+from ..optim import OptimizationPluginRegistry
 
 
 class _Features:
@@ -41,6 +43,28 @@ def _controller(ps=None, capacity=1):
 
 
 class TestPlannedBagPipe(unittest.TestCase):
+    def test_single_bagpipe_entry_selects_controller_from_prescan(self):
+        self.assertEqual(
+            [name for name in OptimizationPluginRegistry.available() if name.startswith("bagpipe")],
+            ["bagpipe"],
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown optimization plugin"):
+            OptimizationPluginRegistry.create("bagpipe_planned")
+        for prescan, controller_type in ((False, BagPipeCacheController), (True, PlannedBagPipeController)):
+            with self.subTest(prescan=prescan):
+                plugin = OptimizationPluginRegistry.create(
+                    "bagpipe", prescan=prescan, embedding_module=None, kv_client=_PS(),
+                    cache_capacity=1, embedding_dim=2, lookahead=4,
+                    table_offsets={"f0": 0}, table_sizes={"f0": 100},
+                    master_table_name="table", device=torch.device("cpu"),
+                    id_extractor=lambda sf: sf.ids,
+                )
+                try:
+                    self.assertIsInstance(plugin._controller, controller_type)
+                    self.assertIs(plugin.create_sparse_optimizer([], lr=0.1).controller, plugin._controller)
+                finally:
+                    plugin.shutdown()
+
     def test_feature_order_and_duplicate_id_ticket_preserve_lookup_and_sgd(self):
         controller = PlannedBagPipeController(
             None, _PS(), cache_capacity=1, embedding_dim=2,
