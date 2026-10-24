@@ -130,7 +130,7 @@ public:
       int64_t value_dim,
       unsigned tid,
       BatchGetFlatStats* stats = nullptr,
-      bool collect_profile = true) {
+      bool collect_profile     = true) {
     return false;
   }
 

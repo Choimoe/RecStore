@@ -454,7 +454,7 @@ TEST(KVEngineFlatReadTest, DramRowsSupportNonPowerOfTwoByteWidths) {
   std::vector<float> first(kDim);
   std::vector<float> second(kDim);
   for (int64_t column = 0; column < kDim; ++column) {
-    first[static_cast<size_t>(column)] = static_cast<float>(column + 1);
+    first[static_cast<size_t>(column)]  = static_cast<float>(column + 1);
     second[static_cast<size_t>(column)] = static_cast<float>(100 + column);
   }
   std::vector<base::ConstArray<float>> rows = {
@@ -465,14 +465,18 @@ TEST(KVEngineFlatReadTest, DramRowsSupportNonPowerOfTwoByteWidths) {
   const std::vector<uint64_t> get_keys = {202, 303, 101};
   std::vector<float> output(get_keys.size() * kDim, -1.0F);
   BaseKV::BatchGetFlatStats stats;
-  ASSERT_TRUE(engine->BatchGetFlat(base::ConstArray<uint64_t>(get_keys),
-                                   output.data(), get_keys.size(), kDim, 0,
-                                   &stats));
+  ASSERT_TRUE(engine->BatchGetFlat(
+      base::ConstArray<uint64_t>(get_keys),
+      output.data(),
+      get_keys.size(),
+      kDim,
+      0,
+      &stats));
   EXPECT_EQ(stats.missing_rows, 1);
   EXPECT_EQ(std::vector<float>(output.begin(), output.begin() + kDim), second);
-  EXPECT_EQ(std::vector<float>(output.begin() + kDim,
-                               output.begin() + 2 * kDim),
-            std::vector<float>(kDim, 0.0F));
+  EXPECT_EQ(
+      std::vector<float>(output.begin() + kDim, output.begin() + 2 * kDim),
+      std::vector<float>(kDim, 0.0F));
   EXPECT_EQ(std::vector<float>(output.begin() + 2 * kDim, output.end()), first);
 
   engine.reset();
@@ -480,9 +484,9 @@ TEST(KVEngineFlatReadTest, DramRowsSupportNonPowerOfTwoByteWidths) {
 }
 
 TEST(KVEngineFlatReadTest, DramRowsSupportDirectFixedSlices) {
-  constexpr int64_t kDim = 16;
+  constexpr int64_t kDim            = 16;
   constexpr int64_t kMetadataFloats = sizeof(int64_t) / sizeof(float);
-  constexpr int64_t kStoredDim = kMetadataFloats + kDim;
+  constexpr int64_t kStoredDim      = kMetadataFloats + kDim;
   const std::string value_path =
       "/dev/shm/test_kv_engine_flat_slice_" + std::to_string(getpid());
   std::filesystem::create_directories(value_path);
@@ -511,7 +515,7 @@ TEST(KVEngineFlatReadTest, DramRowsSupportDirectFixedSlices) {
   const std::vector<uint64_t> put_keys = {101, 202};
   std::vector<float> first(kStoredDim);
   std::vector<float> second(kStoredDim);
-  const int64_t first_index = 17;
+  const int64_t first_index  = 17;
   const int64_t second_index = 29;
   std::memcpy(first.data(), &first_index, sizeof(first_index));
   std::memcpy(second.data(), &second_index, sizeof(second_index));
@@ -530,19 +534,30 @@ TEST(KVEngineFlatReadTest, DramRowsSupportDirectFixedSlices) {
   std::vector<float> output(get_keys.size() * kDim, -1.0F);
   BaseKV::BatchGetFlatStats stats;
   ASSERT_TRUE(engine->BatchGetFlatRange(
-      base::ConstArray<uint64_t>(get_keys), output.data(), get_keys.size(),
-      kStoredDim, kMetadataFloats, kDim, 0, &stats));
+      base::ConstArray<uint64_t>(get_keys),
+      output.data(),
+      get_keys.size(),
+      kStoredDim,
+      kMetadataFloats,
+      kDim,
+      0,
+      &stats));
   EXPECT_EQ(stats.missing_rows, 1);
   EXPECT_EQ(std::vector<float>(output.begin(), output.begin() + kDim),
             std::vector<float>(second.begin() + kMetadataFloats, second.end()));
-  EXPECT_EQ(std::vector<float>(output.begin() + kDim,
-                               output.begin() + 2 * kDim),
-            std::vector<float>(kDim, 0.0F));
+  EXPECT_EQ(
+      std::vector<float>(output.begin() + kDim, output.begin() + 2 * kDim),
+      std::vector<float>(kDim, 0.0F));
   EXPECT_EQ(std::vector<float>(output.begin() + 2 * kDim, output.end()),
             std::vector<float>(first.begin() + kMetadataFloats, first.end()));
   EXPECT_FALSE(engine->BatchGetFlatRange(
-      base::ConstArray<uint64_t>(get_keys), output.data(), get_keys.size(),
-      kStoredDim, kStoredDim, kDim, 0));
+      base::ConstArray<uint64_t>(get_keys),
+      output.data(),
+      get_keys.size(),
+      kStoredDim,
+      kStoredDim,
+      kDim,
+      0));
 
   engine.reset();
   std::filesystem::remove_all(value_path);

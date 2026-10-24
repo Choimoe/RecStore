@@ -273,17 +273,16 @@ TEST_F(ConcurrentSlabMemoryPoolTest, SizedFactorySupportsRowsBeyondDefaultCap) {
   // class and hit a CHECK failure at the first insert. An explicit list is the
   // supported way to serve wider rows.
   const std::vector<int> classes{8 + 32, 8 + 2048};
-  auto* pool =
-      base::Factory<base::MallocApi,
-                    const std::string&,
-                    int64,
-                    const std::string&,
-                    const std::vector<int>&>::NewInstance(
-          "CONCURRENT_SLAB_MEMORY_POOL",
-          path_ + "_wide",
-          64 * 1024 * 1024,
-          "DRAM",
-          classes);
+  auto* pool = base::Factory<
+      base::MallocApi,
+      const std::string&,
+      int64,
+      const std::string&,
+      const std::vector<int>&>::NewInstance("CONCURRENT_SLAB_MEMORY_POOL",
+                                            path_ + "_wide",
+                                            64 * 1024 * 1024,
+                                            "DRAM",
+                                            classes);
   ASSERT_NE(pool, nullptr);
 
   char* wide = pool->New(1032);

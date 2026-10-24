@@ -153,8 +153,8 @@ public:
       return ReadFlatFixedRowsGeneric(
           handles, num_rows, out_buf, row_bytes, missing_rows);
     }
-    uint64_t local_missing = 0;
-    char* dst              = static_cast<char*>(out_buf);
+    uint64_t local_missing   = 0;
+    char* dst                = static_cast<char*>(out_buf);
     const unsigned row_shift = Log2PowerOfTwo(row_bytes);
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + (row << row_shift);
@@ -175,13 +175,14 @@ public:
     return true;
   }
 
-  bool ReadFlatFixedRowSlices(const uint64_t* handles,
-                              size_t num_rows,
-                              void* out_buf,
-                              size_t stored_row_bytes,
-                              size_t source_offset_bytes,
-                              size_t output_row_bytes,
-                              uint64_t* missing_rows) const override {
+  bool ReadFlatFixedRowSlices(
+      const uint64_t* handles,
+      size_t num_rows,
+      void* out_buf,
+      size_t stored_row_bytes,
+      size_t source_offset_bytes,
+      size_t output_row_bytes,
+      uint64_t* missing_rows) const override {
     if (handles == nullptr || out_buf == nullptr || output_row_bytes == 0 ||
         source_offset_bytes > stored_row_bytes ||
         output_row_bytes > stored_row_bytes - source_offset_bytes) {
@@ -189,11 +190,15 @@ public:
     }
     if (!IsPowerOfTwo(output_row_bytes)) {
       return ReadFlatFixedRowSlicesGeneric(
-          handles, num_rows, out_buf, source_offset_bytes, output_row_bytes,
+          handles,
+          num_rows,
+          out_buf,
+          source_offset_bytes,
+          output_row_bytes,
           missing_rows);
     }
-    uint64_t local_missing = 0;
-    char* dst              = static_cast<char*>(out_buf);
+    uint64_t local_missing   = 0;
+    char* dst                = static_cast<char*>(out_buf);
     const unsigned row_shift = Log2PowerOfTwo(output_row_bytes);
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + (row << row_shift);
