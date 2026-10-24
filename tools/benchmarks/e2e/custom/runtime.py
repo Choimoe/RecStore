@@ -221,7 +221,7 @@ def start_rdma_ps_cluster(
         config_path=str(config_path),
         num_servers=len(cfg.servers),
         num_clients=_rdma_client_process_count(cfg.clients),
-        thread_num=16,
+        thread_num=int(os.getenv("RECSTORE_E2E_RDMA_SERVER_THREADS", "16")),
         value_size=value_size,
         max_kv_num_per_request=max_kv_num_per_request,
         timeout=180,
