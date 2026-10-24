@@ -1,6 +1,11 @@
+import tempfile
 import unittest
+from datetime import timedelta
+from pathlib import Path
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from ..bagpipe_cache.planned import PlannedBagPipeController
 from ..bagpipe_cache.controller import BagPipeCacheController
@@ -40,6 +45,49 @@ def _controller(ps=None, capacity=1):
         table_offsets={"f0": 0}, master_table_name="table", device="cpu",
         id_extractor=lambda sf: sf.ids,
     )
+
+
+def _distributed_reference(rank, rendezvous):
+    dist.init_process_group(
+        "gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        ps = _PS()
+        controller = _controller(ps)
+        all_ids = [[[3], [7], [3]], [[], [3], [3]]]
+        all_grads = [
+            [[[2.0, 4.0]], [[1.0, 1.0]], [[2.0, 3.0]]],
+            [[], [[3.0, 5.0]], [[4.0, 6.0]]],
+        ]
+        batches = [_Features(ids) for ids in all_ids[rank]]
+        for step, batch in enumerate(batches):
+            controller.prescan_batch(step, batch)
+        controller.finalize_prescan()
+        tickets = [controller.enqueue(batch) for batch in batches]
+        reference = {key: ps.rows[key].clone() for key in (3, 7)}
+        for step, batch in enumerate(batches):
+            controller.prefill_cache(batch, torch.device("cpu"))
+            expected = torch.stack([reference[key] for key in batch.ids.tolist()]) if batch.ids.numel() else torch.empty((0, 2))
+            torch.testing.assert_close(controller.lookup(batch).values(), expected, rtol=0, atol=0)
+            ids, _, _ = tickets[step]
+            grads = torch.tensor(all_grads[rank][step]).reshape(-1, 2)
+            controller.update_grads("table", ids, grads, 0.1, step)
+            for key in reference:
+                total = torch.zeros(2)
+                for source in range(2):
+                    for pos, source_key in enumerate(all_ids[source][step]):
+                        if source_key == key:
+                            total += torch.tensor(all_grads[source][step][pos])
+                reference[key].add_(total, alpha=-0.1 / 2)
+        controller.shutdown()
+        for row, key in enumerate(controller._global_ids.tolist()):
+            torch.testing.assert_close(controller._values[row], reference[key], rtol=0, atol=0)
+            if rank == 0:
+                torch.testing.assert_close(ps.rows[key], reference[key], rtol=0, atol=0)
+        assert ps.writes == int(rank == 0), "Only the designated owner may persist replicas"
+    finally:
+        dist.destroy_process_group()
 
 
 class TestPlannedBagPipe(unittest.TestCase):
@@ -85,6 +133,10 @@ class TestPlannedBagPipe(unittest.TestCase):
         controller.update_grads("table", ids, grads, 0.1, 0)
         controller.shutdown()
         torch.testing.assert_close(controller.kv_client.rows[3], torch.tensor([2.8, 5.8]))
+
+    def test_real_collective_matches_global_mean_sgd_with_late_touch_and_empty_rank(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mp.spawn(_distributed_reference, args=(str(Path(directory) / "rendezvous"),), nprocs=2, join=True)
 
     def test_same_count_different_ids_and_nonunit_lengths_are_rejected(self):
         controller = _controller()
