@@ -97,7 +97,7 @@ class BagPipePlugin(OptimizationPlugin):
         lr: float = 0.01,
         id_extractor: Callable[[Any], torch.Tensor] | None = None,
         enabled: bool = True,
-        planned: bool = False,
+        prescan: bool = False,
         **_: Any,
     ) -> "BagPipePlugin":
         """Create a BagPipePlugin.
@@ -107,6 +107,9 @@ class BagPipePlugin(OptimizationPlugin):
 
         Accepts ``**_`` to swallow extra kwargs from the registry (e.g.
         ``plugin_config``) that BagPipe does not use.
+
+        ``prescan=True`` selects the resident controller with precomputed
+        collective layouts. Its full working set must fit the row limit.
 
         ``cleanup_proportion`` (from :class:`OptimizationConfig`) and
         ``cleanup_batch_proportion`` (legacy name) are aliases; if both are
@@ -124,7 +127,7 @@ class BagPipePlugin(OptimizationPlugin):
             cleanup_batch = 0.25
 
         controller_cls = BagPipeCacheController
-        if planned:
+        if prescan:
             from .planned import PlannedBagPipeController
             controller_cls = PlannedBagPipeController
         controller = controller_cls(
@@ -202,19 +205,18 @@ class BagPipePlugin(OptimizationPlugin):
             self._controller.prefill_cache(sparse_features, device)
 
     def prescan_batch(self, batch_num: int, sparse_features: Any) -> None:
-        """Oracle prescan hook: record a batch's unique IDs before training.
+        """Record a batch's IDs before training.
 
         Call once per batch during a pre-training pass over the dataset, then
-        :meth:`finalize_prescan` once at the end.  The resulting shared-ID set
-        is complete, which licenses the local-only fast path in
-        ``update_grads`` (IDs provably untouched by other ranks skip the
-        cross-rank aggregation entirely).  No-op when the plugin is disabled.
+        :meth:`finalize_prescan` once at the end. The resident controller builds
+        per-step collective layouts; the dynamic controller builds its oracle
+        shared-ID set. No-op when the plugin is disabled.
         """
         if self._controller is not None:
             self._controller.prescan_batch(batch_num, sparse_features)
 
     def finalize_prescan(self) -> None:
-        """Build the complete shared-ID set from the prescanned batches.
+        """Finalize the controller's metadata and storage before training.
 
         Collective (all_gather): every rank must call it after finishing its
         own prescan pass.  No-op when the plugin is disabled.

@@ -49,42 +49,49 @@ errors, not reasons to fall back to replace-style fills: a fallback could evict
 a key without updating the mirror. An external cache reset is also a hard error
 because dirty local updates cannot be reconstructed safely after the reset.
 
-## Opt-in planned resident mode
+## Prescanned execution
 
-The DLRM runner also supports `--optimization-plugin bagpipe_planned` with
-`--optimization-prescan --optimization-lookahead 4`. This mode stores the
-complete planned working set in a compact FP32 tensor on every rank, loaded
-from the PS before training. It bypasses the C++ hash cache and retains every
-row until final writeback; a rank's first use therefore includes all preceding
-updates to that row.
+BagPipe has one public plugin name, `bagpipe`. In the DLRM runner, enable
+precomputed collective layouts with:
 
-The runner prescans exactly the configured training steps, exchanges their
-fused IDs once, and builds each step's global active-row layout and local index
-maps. Training communicates only FP32 gradient values with an all-reduce.
-SGD applies their sum divided by world size, matching TorchRec/DDP global mean
-gradient semantics. The pending aggregate is applied before the next lookup;
-the final update is completed before validation or shutdown. There is no
-gradient compression or stale-read allowance. After successful training, all
-ranks align and rank 0 writes the authoritative values to the PS. Writeback
-errors propagate; error cleanup does not enter new collectives.
+```text
+--read-mode bagpipe --optimization-prescan
+```
 
-Plans require a fixed batch schedule, fused tables, consistent feature order,
-and exactly one ID per feature per sample. Enqueue and lookup validate actual
-IDs and bag lengths, including changes that preserve unique-ID counts. A
-different shuffle or training schedule requires a new prescan. Each rank must
-issue one fused sparse optimizer update per step; empty optimizer traces and
-uneven rank termination are outside the runner's supported contract.
+Without prescan, BagPipe uses the dynamic C++ cache described above. With
+prescan, it scans the configured training steps, loads the complete touched
+working set into a compact FP32 tensor on each rank, and communicates gradients
+using fixed per-step layouts. It retains every row until final writeback, so a
+rank's first use includes all preceding updates to that row. The internal
+resident controller shares the same plugin, read path, and sparse optimizer.
+No separate `bagpipe_planned` plugin is registered.
 
-The full global working set must fit on **each** GPU, together with the stored
-batch plans and training tensors. The configured row limit retains the existing
-capacity unit: `cache_capacity * 64` rows. Exceeding it fails explicitly.
-This is a resident working-set optimization, not an out-of-core replacement
-for eviction or dynamic cache coherence. Report prescan/startup cost and GPU
-memory use separately from steady-state throughput.
+The runner exchanges the prescanned fused IDs once and builds each step's
+global active-row layout and local index maps. Each step all-reduces FP32
+gradient values and applies their sum divided by world size, matching
+TorchRec/DDP global mean gradient semantics. The pending aggregate is applied
+before the next lookup, and the final update is drained before validation.
+There is no gradient compression or stale-read allowance. After successful
+training, all ranks align and rank 0 writes the authoritative values to the PS.
+Writeback errors propagate; error cleanup does not enter new collectives.
+
+Plans require an exactly repeatable batch sequence, fused tables, consistent
+feature order, and exactly one ID per feature per sample. Enqueue and lookup
+validate actual IDs and bag lengths, including changes that preserve unique-ID
+counts. A different shuffle or training schedule requires a new prescan. Each
+rank must issue one fused sparse optimizer update per step; empty optimizer
+traces and uneven rank termination are outside the runner's supported contract.
+
+The full global working set must fit on **each** GPU, together with plan metadata
+and training tensors. The row limit is `cache_capacity * 64`, matching the C++
+cache's capacity unit. Capacity or schedule violations fail explicitly; they
+do not silently switch controllers. This resident working-set optimization does
+not replace eviction or dynamic cache coherence for out-of-core workloads.
 
 CPU layout construction temporarily uses one PyTorch CPU thread because small
 per-batch sorts and searches suffer substantial thread-pool overhead. The
 previous thread budget is restored even if planning fails; training retains
 its original setting. Startup statistics separate metadata exchange, global
 unique construction, layout construction, PS loading, device copies, and
-rank-ready waiting.
+rank-ready waiting. Report these startup costs, GPU memory use, and final PS
+writeback separately from steady training throughput.

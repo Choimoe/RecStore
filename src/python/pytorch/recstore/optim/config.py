@@ -22,10 +22,10 @@ class OptimizationConfig:
             at which to evict and write back.
         cache_capacity: GPU cache capacity (number of embedding rows).
         embedding_dim: Embedding dimension.
-        prescan: BagPipe-specific — run the oracle prescan over the dataset
-            before training so the shared-ID set is complete (issues #278).
-            Without it the fallback set only covers the first steps and every
-            ID outside it must take the cross-rank sparse aggregation path.
+        prescan: BagPipe-specific — precompute collective layouts over the
+            configured training steps and keep the full working set resident.
+            Requires a repeatable sequence, one ID per bag, and enough capacity.
+            Without it BagPipe uses dynamic prefetch and eviction.
         plugin_config: Extensible per-plugin config for future strategies.
     """
 

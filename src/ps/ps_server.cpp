@@ -12,7 +12,6 @@
 #include "base/init.h"
 #include "base/json.h"
 #include "ps/base/base_ps_server.h"
-#include "recstore_config.h"
 #include "src/base/config.h"
 
 #ifdef ENABLE_PERF_REPORT
