@@ -201,6 +201,7 @@ class RunConfig:
     torchrec_memory_mode: str = "hbm"
     torchrec_timing_sync_mode: str = "stage"
     torchrec_align_recstore_init: bool = False
+    validation_state: bool = False
     torchrec_profiler_warmup: int = 0
     torchrec_profiler_active: int = 2
     torchrec_profiler_repeat: int = 1
@@ -562,6 +563,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hps-torch-gpucacheper", type=float, default=1.0)
     parser.add_argument(
+        "--validation-state",
+        action="store_true",
+        help="Export exact local embedding and dense tensors for numerical validation after training.",
+    )
+    parser.add_argument(
         "--save-checkpoint",
         action="store_true",
         default=False,
@@ -760,6 +766,8 @@ def validate_recstore_config(cfg: RunConfig) -> None:
             cfg.optimization.lookahead = cfg.prefetch_depth or 4
     # Validate OptimizationConfig
     opt = cfg.optimization
+    if opt.plugin == "bagpipe_planned" and not opt.prescan:
+        raise RuntimeError("bagpipe_planned requires --optimization-prescan")
     if opt.plugin != "none" and opt.lookahead <= 0:
         raise RuntimeError(
             f"--optimization-plugin {opt.plugin!r} requires --optimization-lookahead > 0"
