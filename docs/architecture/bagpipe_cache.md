@@ -60,13 +60,15 @@ updates to that row.
 
 The runner prescans exactly the configured training steps, exchanges their
 fused IDs once, and builds each step's global active-row layout and local index
-maps. Training communicates only FP32 gradient values with an all-reduce.
-SGD applies their sum divided by world size, matching TorchRec/DDP global mean
-gradient semantics. The pending aggregate is applied before the next lookup;
-the final update is completed before validation or shutdown. There is no
-gradient compression or stale-read allowance. After successful training, all
-ranks align and rank 0 writes the authoritative values to the PS. Writeback
-errors propagate; error cleanup does not enter new collectives.
+maps. Training communicates only full-precision FP32 gradient values through
+the configured sparse collective: all-reduce by default, or the opt-in
+all-gather layout described below. SGD applies their sum divided by world size,
+matching TorchRec/DDP global mean gradient semantics. The pending aggregate is
+applied before the next lookup; the final update is completed before validation
+or shutdown. There is no gradient compression or stale-read allowance. After
+successful training, all ranks align and rank 0 writes the authoritative values
+to the PS. Writeback errors propagate; error cleanup does not enter new
+collectives.
 
 Plans require a fixed batch schedule, fused tables, consistent feature order,
 and exactly one ID per feature per sample. Enqueue and lookup validate actual
@@ -101,12 +103,18 @@ subset, or unequal-width features.
 In eager planned DLRM, a sparse-input autograd hook submits the sparse
 all-reduce as soon as that gradient is available. Both forward and backward
 run inside `DDP.no_sync()`. A fixed contiguous dense-gradient buffer then
-performs one dense all-reduce, preserving collective order on every rank:
-sparse SUM, dense SUM, then the next step. Dense gradients are divided before
-SUM, matching DDP, and sparse SGD divides the summed gradient by world size.
-Every trainable dense parameter must participate; missing gradients or
-replaced gradient views fail explicitly. This path changes submission order,
-not the sequence of optimizer updates.
+performs one dense all-reduce. Distributed planned runs create separate
+all-rank NCCL process groups for sparse collectives and for the dense
+reduction. The sparse controller and gather-SGD submit on the sparse group;
+the contiguous dense buffer reduces on the dense group. Both are submitted in
+a fixed sparse-then-dense order after backward, but the independent
+communicators allow the transfers to make progress concurrently. Each
+collective owns separate input and output buffers, and both reductions are
+joined before the next step consumes their results. Dense gradients are
+divided before SUM, matching DDP, and sparse SGD divides the summed gradient
+by world size. Every trainable dense parameter must participate; missing
+gradients or replaced gradient views fail explicitly. This path changes
+submission order, not the sequence of optimizer updates.
 
 `--optimization-cuda-graphs` captures resident lookup, DLRM forward/backward,
 and FP32 pooled-gradient packing for each batch size in the plan, including
@@ -143,3 +151,8 @@ when rank-local row sets overlap little, but adds merge kernels and output
 storage; less traffic does not guarantee higher end-to-end throughput.
 `all_reduce` remains the default. Both modes communicate full FP32 values and
 apply every gradient; neither uses quantization, dropped rows, or stale reads.
+On the 100 Gb/s RoCE test fabric, four NCCL channels reduced collective tail
+latency; the benchmark applies the same channel count to both lanes. Channel
+count can change NCCL's FP32 reduction association at the ULP level, so rerun
+loss and final-weight alignment whenever it changes. It does not introduce
+quantization, dropped rows, or any intentional numerical approximation.

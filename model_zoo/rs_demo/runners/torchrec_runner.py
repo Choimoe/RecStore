@@ -274,6 +274,7 @@ def _run_single_or_dist_worker(
     from torchrec.modules.embedding_modules import EmbeddingBagCollection
 
     is_dist = world_size > 1
+    dense_group = None
     use_uvm_caching = cfg.torchrec_memory_mode == "uvm_caching"
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     if torch.cuda.is_available():
@@ -285,6 +286,9 @@ def _run_single_or_dist_worker(
         dist.init_process_group(backend=backend)
         if backend == "nccl" and is_dist:
             dist.barrier()
+    if is_dist:
+        dense_group = dist.new_group(ranks=list(range(world_size)), backend=backend)
+        dist.barrier()
 
     if is_dist:
         fingerprint_path = Path(cfg.output_root) / "outputs" / cfg.run_id / "torchrec_worker_fingerprints.json"
@@ -419,7 +423,9 @@ def _run_single_or_dist_worker(
         tail = local_samples % cfg.batch_size
         if tail and not dataloader.drop_last:
             batch_sizes.add(tail)
-        dense_gradient_buffer = PlannedDenseGradientBuffer(dense_module)
+        dense_gradient_buffer = PlannedDenseGradientBuffer(
+            dense_module, group=dense_group
+        )
         dense_graph = CapturedDlrmDense(
             dense_module, criterion, dense_gradient_buffer,
             batch_sizes=sorted(batch_sizes), num_features=len(DEFAULT_CAT_NAMES),

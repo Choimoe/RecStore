@@ -7,7 +7,7 @@ import torch.distributed as dist
 class PlannedDenseGradientBuffer:
     """Use DDP.no_sync() around both forward and backward with this buffer."""
 
-    def __init__(self, module):
+    def __init__(self, module, group=None):
         self.params = [param for param in module.parameters() if param.requires_grad]
         if not self.params or any(
             p.dtype != torch.float32 or not p.is_contiguous()
@@ -22,6 +22,7 @@ class PlannedDenseGradientBuffer:
             self.params, self.flat.split([p.numel() for p in self.params])
         )]
         self.seen = set()
+        self.group = group
         self.hooks = [param.register_hook(self._mark(index)) for index, param in enumerate(self.params)]
 
     def _mark(self, index):
@@ -51,7 +52,7 @@ class PlannedDenseGradientBuffer:
         # dense reduction on the same group. DDP must not submit other buckets.
         # Match DDP's division before SUM, avoiding unnecessary SUM overflow.
         self.flat.div_(world_size)
-        work = dist.all_reduce(self.flat, async_op=True)
+        work = dist.all_reduce(self.flat, group=self.group, async_op=True)
         work.wait()
 
     def close(self):

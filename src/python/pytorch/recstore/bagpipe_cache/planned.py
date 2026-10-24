@@ -33,7 +33,7 @@ class PlannedBagPipeController:
     def __init__(
         self, embedding_module, kv_client, *, cache_capacity, embedding_dim,
         table_offsets, master_table_name, device, id_extractor,
-        lookahead_value=4, sparse_collective="all_reduce", **_,
+        lookahead_value=4, sparse_collective="all_reduce", sparse_group=None, **_,
     ):
         self.embedding_module = embedding_module
         self.kv_client = kv_client
@@ -43,6 +43,7 @@ class PlannedBagPipeController:
         if sparse_collective not in ("all_reduce", "all_gather"):
             raise ValueError("Planned BagPipe sparse_collective must be all_reduce or all_gather")
         self.sparse_collective = sparse_collective
+        self.sparse_group = sparse_group
         self._keys = list(table_offsets)
         self._id_extractor = id_extractor
         # Match the existing BagPipe configuration: one cache set has 64 rows.
@@ -277,10 +278,17 @@ class PlannedBagPipeController:
         work = None
         if communicate:
             if self.sparse_collective == "all_gather":
-                payload = torch.empty((self._world * send_payload.size(0), self.embedding_dim), device=self.device, dtype=torch.float32)
-                work = dist.all_gather_into_tensor(payload, send_payload, async_op=True)
+                payload = torch.empty(
+                    (self._world * send_payload.size(0), self.embedding_dim),
+                    device=self.device, dtype=torch.float32,
+                )
+                work = dist.all_gather_into_tensor(
+                    payload, send_payload, group=self.sparse_group, async_op=True
+                )
             else:
-                work = dist.all_reduce(payload, async_op=True)
+                work = dist.all_reduce(
+                    payload, group=self.sparse_group, async_op=True
+                )
         # The asynchronous gather must retain its local input as well as output.
         self._pending = (work, payload, plan, float(lr), send_payload)
         self._updated += 1

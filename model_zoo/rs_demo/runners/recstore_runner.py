@@ -392,6 +392,7 @@ class RecStoreRunner(BenchmarkRunner):
         orig_cwd = Path.cwd()
         plugin = None
         dense_gradient_buffer = None
+        sparse_group = dense_group = None
         events: _EventLog | None = None
         step_iter = None
         try:
@@ -400,6 +401,13 @@ class RecStoreRunner(BenchmarkRunner):
             device, use_dist = self._init_process_group(
                 world_size, local_rank, dist
             )
+            if use_dist:
+                # Separate communicators let sparse all-gather overlap the dense
+                # all-reduce instead of serializing on the default NCCL stream.
+                all_ranks = list(range(world_size))
+                sparse_group = dist.new_group(ranks=all_ranks, backend="nccl")
+                dense_group = dist.new_group(ranks=all_ranks, backend="nccl")
+                dist.barrier()
 
             recstore.load_ops_library()
             client = recstore.RecStoreClient()
@@ -503,6 +511,7 @@ class RecStoreRunner(BenchmarkRunner):
                     lr=0.01,
                     id_extractor=_id_extractor,
                     sparse_collective=cfg.optimization.sparse_collective,
+                    sparse_group=sparse_group,
                 )
                 sparse_optimizer = plugin.create_sparse_optimizer(
                     [embedding_module], lr=0.01
@@ -551,7 +560,9 @@ class RecStoreRunner(BenchmarkRunner):
             early_sparse_update = planned_dense and not cfg.optimization.cuda_graphs
             if planned_dense:
                 from ..runtime.gradient_buffer import PlannedDenseGradientBuffer
-                dense_gradient_buffer = PlannedDenseGradientBuffer(dense_module)
+                dense_gradient_buffer = PlannedDenseGradientBuffer(
+                    dense_module, group=dense_group
+                )
             record_pooled_grad = getattr(embedding_module, "record_pooled_grad", None)
 
             if _maybe_warmup_gpu_local_shm_fast_path(cfg=cfg, client=client, device=device):

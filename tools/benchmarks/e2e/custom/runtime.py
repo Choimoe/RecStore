@@ -342,6 +342,10 @@ def _nccl_env() -> dict[str, str]:
         "NCCL_SOCKET_FAMILY": "AF_INET",
         "NCCL_IB_DISABLE": "0",
         "NCCL_IB_HCA": "mlx5_0",
+        # Four channels fill the 100 Gb/s RoCE link on the two-node test bed.
+        # Keep both benchmark lanes on the same setting; override per fabric.
+        "NCCL_MIN_NCHANNELS": "4",
+        "NCCL_MAX_NCHANNELS": "4",
         "NCCL_DEBUG": "INFO",
         "NCCL_DEBUG_SUBSYS": "NET",
     }

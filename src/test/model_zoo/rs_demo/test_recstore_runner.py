@@ -643,11 +643,13 @@ class TestRecStoreRunner(unittest.TestCase):
                 fake_dist = types.SimpleNamespace(
                     is_initialized=lambda: False,
                     init_process_group=lambda **kwargs: None,
+                    new_group=lambda **kwargs: object(),
                     barrier=lambda *args, **kwargs: None,
                     destroy_process_group=lambda: None,
                 )
                 stack.enter_context(mock.patch("torch.distributed.is_initialized", fake_dist.is_initialized))
                 stack.enter_context(mock.patch("torch.distributed.init_process_group", fake_dist.init_process_group))
+                stack.enter_context(mock.patch("torch.distributed.new_group", fake_dist.new_group))
                 stack.enter_context(mock.patch("torch.distributed.barrier", fake_dist.barrier))
                 stack.enter_context(mock.patch("torch.distributed.destroy_process_group", fake_dist.destroy_process_group))
 
