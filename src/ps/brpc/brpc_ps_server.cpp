@@ -25,7 +25,6 @@
 #include "ps/base/cache_ps_impl.h"
 #include "ps/base/parameters.h"
 #include "ps_brpc.pb.h"
-#include "recstore_config.h"
 #include "src/base/config.h"
 
 #ifdef ENABLE_PERF_REPORT
