@@ -73,6 +73,21 @@ class TestTorchRecReport(unittest.TestCase):
         self.assertEqual(line["kv_local_only_ms"], "3.0")
         self.assertEqual(line["kv_extended_ms"], "4.2")
 
+    def test_write_stage_csv_includes_fields_from_later_rows(self) -> None:
+        rows = [
+            {"step": 1, "bagpipe_gather_sgd_fused": 1.0},
+            {"step": 2, "bagpipe_gather_sgd_fused": 1.0, "bagpipe_gather_sgd_first_submit_ms": 2.5},
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "main.csv"
+            write_stage_csv(out_path, rows)
+            with out_path.open("r", encoding="utf-8") as f:
+                written = list(csv.DictReader(f))
+
+        self.assertEqual(written[0]["bagpipe_gather_sgd_first_submit_ms"], "")
+        self.assertEqual(written[1]["bagpipe_gather_sgd_first_submit_ms"], "2.5")
+
     def test_merge_rank_outputs_preserves_rank_and_step_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path0 = Path(tmpdir) / "rank0.csv"

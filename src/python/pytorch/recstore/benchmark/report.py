@@ -91,7 +91,7 @@ def analyze_embupdate(
 def write_stage_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         raise ValueError("rows must not be empty")
-    fieldnames = list(rows[0].keys())
+    fieldnames = list(dict.fromkeys(key for row in rows for key in row))
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

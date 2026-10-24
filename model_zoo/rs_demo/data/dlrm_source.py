@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -40,12 +41,21 @@ def build_kjt_batch_from_dense_sparse_labels(
     if device is not None and sparse_mat.device != device:
         sparse_mat = sparse_mat.to(device, non_blocking=True)
     batch_size = sparse_mat.shape[0]
-    values_list = [sparse_mat[:, i] for i in range(26)]
-    values = torch.cat(values_list, dim=0)
-    one_lengths = torch.ones(batch_size, dtype=torch.int32, device=values.device)
-    lengths = torch.cat([one_lengths for _ in range(26)], dim=0)
+    if sparse_mat.ndim != 2 or sparse_mat.shape[1] != len(cat_names):
+        raise ValueError("DLRM sparse input must have one column per feature")
+    values = sparse_mat.t().contiguous().view(-1)
+    lengths = torch.ones(values.numel(), dtype=torch.int32, device=values.device)
 
-    kjt = build_sparse_features(cat_names, values, lengths)
+    # Unit-length bags have known metadata; avoid a GPU reduction/readback.
+    try:
+        jagged_tensor = importlib.import_module("torchrec.sparse.jagged_tensor")
+        kjt = jagged_tensor.KeyedJaggedTensor(
+            keys=cat_names, values=values, lengths=lengths, stride=batch_size,
+            length_per_key=[batch_size] * len(cat_names),
+            offset_per_key=[i * batch_size for i in range(len(cat_names) + 1)],
+        )
+    except ModuleNotFoundError:
+        kjt = _SimpleKeyedJaggedTensor(cat_names, values, lengths)
     return dense_batch, kjt
 
 
@@ -169,6 +179,32 @@ def convert_kjt_ids_to_fused_ids_device(
     return (values + prefixes).contiguous()
 
 
+class _ContinuousDistributedBatchSampler:
+    """Repeat fixed epoch batch indices without caching dataset values."""
+
+    def __init__(self, sampler, batch_size, steps):
+        self.sampler = sampler
+        self.batch_size = batch_size
+        self.steps = steps
+        self.batches = None
+        self.index_prepare_ms = 0.0
+        if not len(sampler):
+            raise ValueError("Continuous DLRM loading requires a nonempty sampler")
+
+    def __iter__(self):
+        if self.batches is None:
+            start = time.perf_counter()
+            self.batches = list(torch.utils.data.BatchSampler(self.sampler, self.batch_size, drop_last=False))
+            self.index_prepare_ms = (time.perf_counter() - start) * 1000
+            print(f"[rs_demo] continuous loader: {len(self.batches)} index batches, "
+                  f"{self.steps} steps, index preparation {self.index_prepare_ms:.3f} ms")
+        for step in range(self.steps):
+            yield self.batches[step % len(self.batches)]
+
+    def __len__(self):
+        return self.steps
+
+
 def build_train_dataloader(
     repo_root: Path,
     data_dir_rel: str,
@@ -181,8 +217,13 @@ def build_train_dataloader(
     seed: int | None = None,
     rank: int | None = None,
     world_size: int | None = None,
+    steps: int | None = None,
 ):
     from data.custom_dataloader import CustomCriteoDataset  # type: ignore
+
+    continuous = os.getenv("RS_DEMO_DATALOADER_CONTINUOUS", "0") == "1"
+    if continuous and (world_size is None or world_size <= 1 or steps is None or steps <= 0):
+        raise ValueError("Continuous DLRM loading requires world_size > 1 and positive steps")
 
     data_dir = (repo_root / data_dir_rel).resolve()
     if not data_dir.exists():
@@ -220,12 +261,13 @@ def build_train_dataloader(
 
     num_workers = max(0, int(os.getenv("RS_DEMO_DATALOADER_NUM_WORKERS", "2")))
     pin_memory = os.getenv("RS_DEMO_DATALOADER_PIN_MEMORY", "1") != "0"
+    batching = dict(batch_size=batch_size, shuffle=effective_shuffle, sampler=sampler, drop_last=False)
+    if continuous:
+        # These runners keep DistributedSampler.epoch fixed across iterations.
+        batching = {"batch_sampler": _ContinuousDistributedBatchSampler(sampler, batch_size, steps)}
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=batch_size,
-        shuffle=effective_shuffle,
-        sampler=sampler,
-        drop_last=False,
+        **batching,
         pin_memory=pin_memory,
         num_workers=num_workers,
         persistent_workers=num_workers > 0,

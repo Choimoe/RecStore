@@ -66,6 +66,8 @@ def _build_worker_fingerprint(repo_root: Path) -> dict[str, dict[str, str]]:
         "model_zoo/rs_demo/models/dlrm.py",
         "model_zoo/rs_demo/models/utils.py",
         "model_zoo/rs_demo/runtime/hybrid_dlrm.py",
+        "model_zoo/rs_demo/runtime/gradient_buffer.py",
+        "model_zoo/rs_demo/runtime/dense_graph.py",
     ]
     files: dict[str, str] = {}
     for rel_path in rel_paths:
@@ -218,6 +220,7 @@ def _build_train_dataloader_for_mode(
         seed=seed,
         rank=rank if (world_size > 1 and not fair_remote_mode) else None,
         world_size=world_size if (world_size > 1 and not fair_remote_mode) else None,
+        steps=cfg.steps,
     )
 
 
@@ -294,6 +297,8 @@ def _run_single_or_dist_worker(
         )
 
     fair_remote_mode = _is_fair_remote_mode(cfg, world_size)
+    if cfg.optimization.cuda_graphs and fair_remote_mode:
+        raise RuntimeError("--optimization-cuda-graphs requires replicated TorchRec training")
     torch.manual_seed(cfg.seed if fair_remote_mode else cfg.seed + rank)
 
     _dataset, dataloader = _build_train_dataloader_for_mode(
@@ -366,26 +371,69 @@ def _run_single_or_dist_worker(
         _zero_embedding_parameters(embedding_module, torch)
         torch.manual_seed(cfg.seed)
 
+    dense_init_start = time.perf_counter()
     dense_module = build_dense_module(
         cfg,
         num_sparse_features=len(DEFAULT_CAT_NAMES),
         embedding_dim=cfg.embedding_dim,
         device=device,
     )
-    dense_module = _maybe_wrap_dense_module_for_dist(
-        dense_module=dense_module,
-        device=device,
-        local_rank=local_rank,
-        use_dist=use_dist,
-        fair_remote_mode=fair_remote_mode,
-        torch=torch,
-    )
+    if cfg.optimization.cuda_graphs:
+        if device.type != "cuda":
+            raise RuntimeError("--optimization-cuda-graphs requires CUDA")
+        # DDP parameter hooks are not capture-safe. Match its initial broadcast
+        # and use the same explicit dense gradient reduction as RecStore.
+        if use_dist:
+            with torch.no_grad():
+                for value in list(dense_module.parameters()) + list(dense_module.buffers()):
+                    dist.broadcast(value, src=0)
+    else:
+        dense_module = _maybe_wrap_dense_module_for_dist(
+            dense_module=dense_module,
+            device=device,
+            local_rank=local_rank,
+            use_dist=use_dist,
+            fair_remote_mode=fair_remote_mode,
+            torch=torch,
+        )
 
     _dispatch_module = dense_module.module if isinstance(
         dense_module, torch.nn.parallel.DistributedDataParallel) else dense_module
     criterion = build_criterion(cfg, _dispatch_module)
     dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
     sparse_optimizer = torch.optim.SGD(embedding_module.parameters(), lr=0.01)
+    lifecycle = {"rank": rank, "dense_initialization_ms": (time.perf_counter() - dense_init_start) * 1e3}
+    is_trainer_rank = (not fair_remote_mode) or rank == 0
+    dense_gradient_buffer = dense_graph = None
+    if cfg.optimization.cuda_graphs:
+        graph_setup_start = time.perf_counter()
+        from ..runtime.dense_graph import CapturedDlrmDense
+        from ..runtime.gradient_buffer import PlannedDenseGradientBuffer
+
+        # DistributedSampler includes any padding in its per-rank length.
+        # Derive full/tail shapes without consuming a shuffled data iterator.
+        local_samples = len(dataloader.batch_sampler.sampler)
+        if local_samples <= 0:
+            raise RuntimeError("CUDA graphs require a nonempty training sampler")
+        batch_sizes = {min(cfg.batch_size, local_samples)}
+        tail = local_samples % cfg.batch_size
+        if tail and not dataloader.drop_last:
+            batch_sizes.add(tail)
+        dense_gradient_buffer = PlannedDenseGradientBuffer(dense_module)
+        dense_graph = CapturedDlrmDense(
+            dense_module, criterion, dense_gradient_buffer,
+            batch_sizes=sorted(batch_sizes), num_features=len(DEFAULT_CAT_NAMES),
+            embedding_dim=cfg.embedding_dim,
+        )
+        lifecycle["dense_graph_capture_ms"] = dense_graph.capture_ms
+        lifecycle["dense_graph_batch_sizes"] = sorted(batch_sizes)
+        lifecycle["dense_graph_setup_ms"] = (time.perf_counter() - graph_setup_start) * 1e3
+        _barrier_for_step_alignment(
+            dist=dist, device=device, local_rank=local_rank, use_dist=use_dist,
+        )
+        lifecycle_path = Path(cfg.output_root) / "outputs" / cfg.run_id / f"lifecycle_rank{rank}.json"
+        lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+        lifecycle_path.write_text(json.dumps(lifecycle, indent=2) + "\n")
 
     profiler = build_torchrec_profiler(
         ProfilerConfig(
@@ -400,7 +448,6 @@ def _run_single_or_dist_worker(
     profiler_context = profiler or nullcontext()
 
     rows: list[dict[str, Any]] = []
-    is_trainer_rank = (not fair_remote_mode) or rank == 0
     with profiler_context:
         for step in range(cfg.steps):
             row: dict[str, Any] = {
@@ -422,6 +469,8 @@ def _run_single_or_dist_worker(
                 "torchrec_role": "trainer" if is_trainer_rank else "embedding_worker",
                 "torchrec_is_trainer": _bool_int(is_trainer_rank),
             }
+            if cfg.optimization.cuda_graphs:
+                row["dense_graph_ms"] = row["gradient_communication_ms"] = 0.0
             step_start = time.perf_counter()
             timer = StepTimer(row, torch, device, mode=cfg.torchrec_timing_sync_mode)
 
@@ -431,6 +480,7 @@ def _run_single_or_dist_worker(
                 except StopIteration:
                     data_iter = iter(dataloader)
                     dense_batch, sparse_batch, labels_batch = next(data_iter)
+            row["batch_size"] = int(dense_batch.shape[0])
 
             with timer.cpu("input_pack_ms"):
                 dense_batch, sparse_features = build_kjt_batch_from_dense_sparse_labels(
@@ -461,20 +511,28 @@ def _run_single_or_dist_worker(
                 )
 
             if is_trainer_rank:
-                with timer.gpu("dense_fwd_ms"):
-                    loss, _ = compute_dense_loss(
-                        cfg, dense_module, criterion,
-                        dense_features, embedded_sparse, labels)
-                row["loss"] = float(loss.detach().float().cpu().item())
-
-                with timer.gpu("backward_ms"):
-                    embedded_sparse_grad = run_hybrid_backward(
-                        loss=loss,
-                        embedded_sparse=embedded_sparse,
-                        dense_module=dense_module,
-                        torch=torch,
-                        device=device,
-                    )
+                if dense_graph is not None:
+                    with timer.gpu("dense_graph_ms"):
+                        loss, embedded_sparse_grad = dense_graph(
+                            dense_features, embedded_sparse, labels
+                        )
+                    row["dense_fwd_ms"] = row["backward_ms"] = 0.0
+                    with timer.gpu("gradient_communication_ms"):
+                        dense_gradient_buffer.reduce()
+                else:
+                    with timer.gpu("dense_fwd_ms"):
+                        loss, _ = compute_dense_loss(
+                            cfg, dense_module, criterion,
+                            dense_features, embedded_sparse, labels)
+                    with timer.gpu("backward_ms"):
+                        embedded_sparse_grad = run_hybrid_backward(
+                            loss=loss,
+                            embedded_sparse=embedded_sparse,
+                            dense_module=dense_module,
+                            torch=torch,
+                            device=device,
+                            synchronize=False,
+                        )
 
                 with timer.gpu("dense_optimizer_ms"):
                     dense_optimizer.step()
@@ -496,6 +554,10 @@ def _run_single_or_dist_worker(
                 sparse_optimizer.step()
                 sparse_optimizer.zero_grad(set_to_none=True)
 
+            if is_trainer_rank:
+                # Match RecStore's readback boundary; stream dependencies and
+                # the final device drain already order the backward/update work.
+                row["loss"] = float(loss.detach().float().cpu().item())
             if profiler is not None:
                 profiler.step()
 
@@ -504,6 +566,10 @@ def _run_single_or_dist_worker(
             # tail. finish() returns that drain wait (the cross-rank straggler
             # cost) instead of letting it vanish into the step_total gap.
             row["step_sync_wait_ms"] = timer.finish()
+            row["dense_compute_ms"] = (
+                row["dense_fwd_ms"] + row["backward_ms"]
+                + row["dense_optimizer_ms"] + row.get("dense_graph_ms", 0.0)
+            )
             row["step_total_ms"] = (time.perf_counter() - step_start) * 1e3
             row["collective_launch_ms"] = 0.0
             row["collective_wait_ms"] = (
@@ -516,8 +582,17 @@ def _run_single_or_dist_worker(
                 local_rank=local_rank,
                 use_dist=use_dist,
             )
+            rows[-1]["step_wall_ms"] = (time.perf_counter() - step_start) * 1e3
 
+    if dense_gradient_buffer is not None:
+        dense_gradient_buffer.close()
     _write_rows(out_csv, rows)
+    if cfg.validation_state:
+        from ..runtime.validation import export_validation_state
+        export_validation_state(
+            Path(cfg.output_root) / "outputs" / cfg.run_id / f"validation_rank{rank}.pt",
+            embedding_module, dense_module,
+        )
     if (is_dist or use_uvm_caching) and dist.is_initialized():
         if is_dist:
             dist.barrier(device_ids=[local_rank] if device.type == "cuda" else None)

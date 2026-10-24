@@ -29,9 +29,18 @@ from model_zoo.rs_demo.runners.torchrec_runner import (
 class _FakeDist:
     def __init__(self) -> None:
         self.barrier_calls = 0
+        self.broadcasts = []
+        self.broadcast_value = None
 
     def barrier(self, device_ids=None) -> None:
         self.barrier_calls += 1
+
+    def broadcast_object_list(self, values, src):
+        self.broadcasts.append((list(values), src))
+        if values[0] is None:
+            values[0] = self.broadcast_value
+        else:
+            self.broadcast_value = values[0]
 
 
 class _FakePlanner:
@@ -193,18 +202,20 @@ class TestTorchRecDispatch(unittest.TestCase):
             )
             self.assertTrue(plan_path.exists())
             self.assertFalse(plan_path.with_suffix(".pkl.tmp").exists())
+            with plan_path.open("rb") as handle:
+                self.assertEqual(pickle.load(handle), plan)
 
         self.assertEqual(plan["token"], "rank0-plan")
         self.assertEqual(planner.calls, 1)
-        self.assertEqual(fake_dist.barrier_calls, 1)
+        self.assertEqual(fake_dist.broadcasts, [([plan], 0)])
+        self.assertEqual(fake_dist.barrier_calls, 0)
 
-    def test_nonzero_rank_loads_shared_sharding_plan(self) -> None:
+    def test_nonzero_rank_receives_broadcast_without_shared_plan_file(self) -> None:
         fake_dist = _FakeDist()
+        fake_dist.broadcast_value = {"token": "rank0-plan"}
         planner = _FakePlanner()
         with tempfile.TemporaryDirectory() as tmpdir:
             plan_path = Path(tmpdir) / "plan.pkl"
-            with plan_path.open("wb") as f:
-                pickle.dump({"token": "rank0-plan"}, f)
             plan = _compute_or_load_shared_sharding_plan(
                 dist=fake_dist,
                 rank=1,
@@ -213,10 +224,12 @@ class TestTorchRecDispatch(unittest.TestCase):
                 planner=planner,
                 plan_path=plan_path,
             )
+            self.assertFalse(plan_path.exists())
 
         self.assertEqual(plan["token"], "rank0-plan")
         self.assertEqual(planner.calls, 0)
-        self.assertEqual(fake_dist.barrier_calls, 1)
+        self.assertEqual(fake_dist.broadcasts, [([None], 0)])
+        self.assertEqual(fake_dist.barrier_calls, 0)
 
     def test_build_runner_torchrec_requires_dependency(self) -> None:
         cfg = RunConfig(backend="torchrec")
@@ -658,6 +671,7 @@ class TestTorchRecDispatch(unittest.TestCase):
         self.assertEqual(build_loader.call_args.kwargs["seed"], 20260330)
         self.assertEqual(build_loader.call_args.kwargs["rank"], 3)
         self.assertEqual(build_loader.call_args.kwargs["world_size"], 4)
+        self.assertEqual(build_loader.call_args.kwargs["steps"], 1)
 
     def test_maybe_wrap_dense_module_for_dist_wraps_replicated_dense(self) -> None:
         dense_module = mock.Mock()

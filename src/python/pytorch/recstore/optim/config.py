@@ -26,6 +26,10 @@ class OptimizationConfig:
             before training so the shared-ID set is complete (issues #278).
             Without it the fallback set only covers the first steps and every
             ID outside it must take the cross-rank sparse aggregation path.
+        cuda_graphs: Capture supported DLRM dense forward/backward with fixed
+            FP32 gradient storage; communication and SGD remain outside capture.
+        sparse_collective: Planned BagPipe gradient transport: ``all_reduce``
+            (default), or the experimental padded ``all_gather`` alternative.
         plugin_config: Extensible per-plugin config for future strategies.
     """
 
@@ -35,4 +39,6 @@ class OptimizationConfig:
     cache_capacity: int = 0
     embedding_dim: int = 128
     prescan: bool = False
+    cuda_graphs: bool = False
+    sparse_collective: str = "all_reduce"
     plugin_config: Dict[str, Any] = field(default_factory=dict)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -128,6 +130,96 @@ class TestDlrmSourceFallback(unittest.TestCase):
         self.assertEqual(sizes[5], 3)
         self.assertEqual(sizes[8], 63)
         self.assertLess(sum(sizes), 5000 * 26)
+
+
+class _CountingBatchDataset(torch.utils.data.Dataset):
+    def __init__(self, size=160000):
+        self.size = size
+        self.reads = 0
+        self.samples_read = 0
+
+    def __len__(self):
+        return self.size
+
+    def __getitems__(self, indices):
+        self.reads += 1
+        self.samples_read += len(indices)
+        return torch.tensor(indices), self.reads
+
+
+class TestContinuousDlrmLoader(unittest.TestCase):
+    def _build(self, dataset, *, continuous, rank=0, world_size=2, steps=320):
+        module = SimpleNamespace(CustomCriteoDataset=lambda **_: dataset)
+        with mock.patch.dict("sys.modules", {"data.custom_dataloader": module}), mock.patch.dict(
+            dlrm_source.os.environ,
+            {"RS_DEMO_DATALOADER_CONTINUOUS": str(int(continuous)),
+             "RS_DEMO_DATALOADER_NUM_WORKERS": "0", "RS_DEMO_DATALOADER_PIN_MEMORY": "0"},
+        ):
+            return dlrm_source.build_train_dataloader(
+                Path.cwd(), ".", 1.0, 100, 1024,
+                rank=rank, world_size=world_size, seed=20260330, steps=steps,
+            )[1]
+
+    def test_320_batches_match_original_indices_tails_and_fresh_reads_on_both_ranks(self):
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                original_data, continuous_data = _CountingBatchDataset(), _CountingBatchDataset()
+                original = self._build(original_data, continuous=False, rank=rank)
+                continuous = self._build(continuous_data, continuous=True, rank=rank)
+                self.assertEqual(original.batch_size, 1024)
+                self.assertEqual(len(original), 79)
+                self.assertIsNone(continuous.batch_size)
+                self.assertEqual(len(continuous.batch_sampler.sampler), 80000)
+                self.assertEqual(len(continuous), 320)
+                self.assertIsNone(continuous.batch_sampler.batches)
+                self.assertEqual(continuous_data.reads, 0)
+                original_iter = iter(original)
+                continuous_iter = iter(continuous)
+                tails = []
+                samples = 0
+                first_indices = None
+                for step in range(320):
+                    try:
+                        expected, expected_read = next(original_iter)
+                    except StopIteration:
+                        original_iter = iter(original)
+                        expected, expected_read = next(original_iter)
+                    actual, actual_read = next(continuous_iter)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    self.assertEqual(actual_read, step + 1)
+                    self.assertEqual(actual_read, expected_read)
+                    samples += actual.numel()
+                    if actual.numel() != 1024:
+                        tails.append((step, actual.numel()))
+                    if step == 0:
+                        first_indices = actual.clone()
+                    if step == 79:
+                        torch.testing.assert_close(actual, first_indices, rtol=0, atol=0)
+                        self.assertEqual(actual_read, 80, "Repeated indices must trigger a new dataset read")
+                with self.assertRaises(StopIteration):
+                    next(continuous_iter)
+                self.assertEqual(tails, [(78, 128), (157, 128), (236, 128), (315, 128)])
+                self.assertEqual(samples, 324096)
+                self.assertEqual(continuous_data.reads, 320)
+                self.assertEqual(continuous_data.samples_read, samples)
+                self.assertEqual(original_data.samples_read, samples)
+                self.assertEqual(len(continuous.batch_sampler.batches), 79)
+                self.assertGreaterEqual(continuous.batch_sampler.index_prepare_ms, 0)
+
+    def test_continuous_rejects_unpartitioned_missing_steps_and_empty_data(self):
+        for world_size, steps in ((None, 320), (1, 320), (2, None), (2, 0), (2, -1)):
+            with self.subTest(world_size=world_size, steps=steps):
+                with self.assertRaisesRegex(ValueError, "world_size > 1 and positive steps"):
+                    self._build(_CountingBatchDataset(), continuous=True, world_size=world_size, steps=steps)
+        with self.assertRaisesRegex(ValueError, "nonempty sampler"):
+            self._build(_CountingBatchDataset(0), continuous=True)
+
+    def test_continuous_flag_is_forwarded_to_both_benchmark_lanes(self):
+        from tools.benchmarks.e2e.custom.runtime import _recstore_nccl_env, _torchrec_nccl_env
+
+        with mock.patch.dict(dlrm_source.os.environ, {"RS_DEMO_DATALOADER_CONTINUOUS": "1"}):
+            for environment in (_recstore_nccl_env(), _torchrec_nccl_env()):
+                self.assertEqual(environment["RS_DEMO_DATALOADER_CONTINUOUS"], "1")
 
 
 if __name__ == "__main__":

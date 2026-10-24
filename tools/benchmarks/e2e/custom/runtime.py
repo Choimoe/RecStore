@@ -55,6 +55,14 @@ def _rdma_fabric_node(node_id: int, role: str) -> dict[str, Any]:
 
 
 def estimate_runtime_capacity(num_embeddings: int) -> int:
+    # The default formula sizes the KV for the full fused key space
+    # (26 tables x num_embeddings) with a 2x churn headroom. Large-declared-
+    # capacity runs (the PS stores only dataset-touched keys lazily) would
+    # preallocate hundreds of GB of slab memory at PS startup, so allow an
+    # explicit entry-count override for those experiments.
+    override = os.environ.get("RS_E2E_RUNTIME_CAPACITY")
+    if override:
+        return max(int(override), 100_000)
     # DLRM uses one sparse id per table, so the PS key space spans all tables.
     return max(int(num_embeddings) * SPARSE_FEATURES_PER_SAMPLE * 2, 100_000)
 
@@ -221,7 +229,7 @@ def start_rdma_ps_cluster(
         config_path=str(config_path),
         num_servers=len(cfg.servers),
         num_clients=_rdma_client_process_count(cfg.clients),
-        thread_num=16,
+        thread_num=int(os.getenv("RECSTORE_E2E_RDMA_SERVER_THREADS", "16")),
         value_size=value_size,
         max_kv_num_per_request=max_kv_num_per_request,
         timeout=180,
@@ -345,6 +353,7 @@ def _dataloader_env() -> dict[str, str]:
         "RS_DEMO_DATALOADER_NUM_WORKERS",
         "RS_DEMO_DATALOADER_PIN_MEMORY",
         "RS_DEMO_DATALOADER_CPU_LIST",
+        "RS_DEMO_DATALOADER_CONTINUOUS",
     )
     return {name: os.environ[name] for name in names if name in os.environ}
 

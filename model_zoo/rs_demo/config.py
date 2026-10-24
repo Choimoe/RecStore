@@ -24,6 +24,9 @@ except ImportError:
         cleanup_proportion: float = 0.25
         cache_capacity: int = 0
         embedding_dim: int = 128
+        prescan: bool = False
+        cuda_graphs: bool = False
+        sparse_collective: str = "all_reduce"
         plugin_config: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -201,6 +204,7 @@ class RunConfig:
     torchrec_memory_mode: str = "hbm"
     torchrec_timing_sync_mode: str = "stage"
     torchrec_align_recstore_init: bool = False
+    validation_state: bool = False
     torchrec_profiler_warmup: int = 0
     torchrec_profiler_active: int = 2
     torchrec_profiler_repeat: int = 1
@@ -327,6 +331,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--master-addr", type=str, default="127.0.0.1")
+    parser.add_argument(
+        "--optimization-cuda-graphs", action="store_true",
+        help="DLRM: capture FP32 dense forward/backward for planned RecStore or TorchRec batch shapes.",
+    )
+    parser.add_argument(
+        "--optimization-sparse-collective", choices=["all_reduce", "all_gather"],
+        default="all_reduce",
+        help="Planned BagPipe: reduce the active union or gather only each rank's unique gradients.",
+    )
     parser.add_argument("--master-port", type=int, default=29500)
     parser.add_argument("--rdzv-backend", type=str, default="c10d")
     parser.add_argument("--rdzv-id", type=str, default="")
@@ -562,6 +575,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hps-torch-gpucacheper", type=float, default=1.0)
     parser.add_argument(
+        "--validation-state",
+        action="store_true",
+        help="Export exact local embedding and dense tensors for numerical validation after training.",
+    )
+    parser.add_argument(
         "--save-checkpoint",
         action="store_true",
         default=False,
@@ -645,6 +663,8 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
         cache_capacity=int(cfg_kwargs.pop("optimization_cache_capacity", 0)),
         embedding_dim=int(cfg_kwargs.get("embedding_dim", 128)),
         prescan=bool(cfg_kwargs.pop("optimization_prescan", False)),
+        cuda_graphs=bool(cfg_kwargs.pop("optimization_cuda_graphs", False)),
+        sparse_collective=str(cfg_kwargs.pop("optimization_sparse_collective", "all_reduce")),
     )
     cfg_kwargs["optimization"] = optimization
 
@@ -690,6 +710,10 @@ def validate_torchrec_config(cfg: RunConfig) -> None:
     if cfg.backend != "torchrec":
         return
     resolve_num_embeddings_per_feature(cfg.num_embeddings, cfg.num_embeddings_per_feature)
+    if cfg.optimization.cuda_graphs and cfg.model != "dlrm":
+        raise RuntimeError("--optimization-cuda-graphs requires the TorchRec DLRM path")
+    if cfg.optimization.cuda_graphs and cfg.torchrec_dist_mode != "replicated":
+        raise RuntimeError("--optimization-cuda-graphs requires replicated TorchRec training")
 
     if cfg.nnodes <= 0:
         raise RuntimeError("--nnodes must be greater than 0.")
@@ -760,6 +784,14 @@ def validate_recstore_config(cfg: RunConfig) -> None:
             cfg.optimization.lookahead = cfg.prefetch_depth or 4
     # Validate OptimizationConfig
     opt = cfg.optimization
+    if opt.plugin == "bagpipe_planned" and not opt.prescan:
+        raise RuntimeError("bagpipe_planned requires --optimization-prescan")
+    if opt.cuda_graphs and (opt.plugin != "bagpipe_planned" or cfg.model != "dlrm"):
+        raise RuntimeError("--optimization-cuda-graphs requires the bagpipe_planned DLRM path")
+    if opt.sparse_collective not in {"all_reduce", "all_gather"}:
+        raise RuntimeError("Unknown planned sparse collective")
+    if opt.sparse_collective != "all_reduce" and opt.plugin != "bagpipe_planned":
+        raise RuntimeError("--optimization-sparse-collective requires bagpipe_planned")
     if opt.plugin != "none" and opt.lookahead <= 0:
         raise RuntimeError(
             f"--optimization-plugin {opt.plugin!r} requires --optimization-lookahead > 0"

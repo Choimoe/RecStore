@@ -222,6 +222,7 @@ def _build_train_dataloader_for_mode(repo_root: Path, cfg: RunConfig, rank: int)
         seed=cfg.seed,
         rank=rank if world_size > 1 else None,
         world_size=world_size if world_size > 1 else None,
+        steps=cfg.steps,
     )
 
 
@@ -390,6 +391,7 @@ class RecStoreRunner(BenchmarkRunner):
 
         orig_cwd = Path.cwd()
         plugin = None
+        dense_gradient_buffer = None
         events: _EventLog | None = None
         step_iter = None
         try:
@@ -423,7 +425,8 @@ class RecStoreRunner(BenchmarkRunner):
                 initialize_tables=(rank == 0),
             )
             # -- optimization plugin + read path --------------------------------
-            use_bagpipe = cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
+            use_planned_bagpipe = cfg.optimization.plugin == "bagpipe_planned"
+            use_bagpipe = use_planned_bagpipe or cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
 
             if use_bagpipe:
                 fused_id_prefixes = torch.tensor(
@@ -452,7 +455,7 @@ class RecStoreRunner(BenchmarkRunner):
                     or cfg.gpu_cache_capacity
                     or 160_000
                 )
-                if not client.is_gpu_cache_enabled():
+                if not use_planned_bagpipe and not client.is_gpu_cache_enabled():
                     enabled = client.enable_gpu_cache(
                         cache_capacity, cfg.embedding_dim
                     )
@@ -463,7 +466,7 @@ class RecStoreRunner(BenchmarkRunner):
                             "returned False"
                         )
                 print(
-                    "[rs_demo] BagPipe GPU cache enabled: "
+                    "[rs_demo] BagPipe cache configured: "
                     f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
                 )
                 # BagPipe owns its cache policy.  The cold-start lookup must not
@@ -482,7 +485,7 @@ class RecStoreRunner(BenchmarkRunner):
 
                 master_table_name = eb_configs[0]["name"] if eb_configs else ""
                 plugin = OptimizationPluginRegistry.create(
-                    "bagpipe",
+                    "bagpipe_planned" if use_planned_bagpipe else "bagpipe",
                     embedding_module=embedding_module,
                     kv_client=client,
                     lookahead=cfg.optimization.lookahead,
@@ -499,6 +502,7 @@ class RecStoreRunner(BenchmarkRunner):
                     device=device,
                     lr=0.01,
                     id_extractor=_id_extractor,
+                    sparse_collective=cfg.optimization.sparse_collective,
                 )
                 sparse_optimizer = plugin.create_sparse_optimizer(
                     [embedding_module], lr=0.01
@@ -524,10 +528,18 @@ class RecStoreRunner(BenchmarkRunner):
                 embedding_dim=cfg.embedding_dim,
                 device=device,
             )
-            dense_module = _maybe_wrap_dense_module_for_dist(
-                dense_module=dense_module, device=device,
-                local_rank=local_rank, use_dist=use_dist,
-            )
+            if use_dist and cfg.optimization.cuda_graphs:
+                # DDP's parameter hooks are not capture-safe, even after
+                # unwrapping. Match its initial broadcast, then use the
+                # explicit dense gradient reduction for every training step.
+                with torch.no_grad():
+                    for value in list(dense_module.parameters()) + list(dense_module.buffers()):
+                        dist.broadcast(value, src=0)
+            else:
+                dense_module = _maybe_wrap_dense_module_for_dist(
+                    dense_module=dense_module, device=device,
+                    local_rank=local_rank, use_dist=use_dist,
+                )
             unwrapped_module = (
                 dense_module.module
                 if isinstance(dense_module, torch.nn.parallel.DistributedDataParallel)
@@ -535,6 +547,11 @@ class RecStoreRunner(BenchmarkRunner):
             )
             criterion = build_criterion(cfg, unwrapped_module)
             dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
+            planned_dense = use_planned_bagpipe and cfg.model == "dlrm"
+            early_sparse_update = planned_dense and not cfg.optimization.cuda_graphs
+            if planned_dense:
+                from ..runtime.gradient_buffer import PlannedDenseGradientBuffer
+                dense_gradient_buffer = PlannedDenseGradientBuffer(dense_module)
             record_pooled_grad = getattr(embedding_module, "record_pooled_grad", None)
 
             if _maybe_warmup_gpu_local_shm_fast_path(cfg=cfg, client=client, device=device):
@@ -543,6 +560,7 @@ class RecStoreRunner(BenchmarkRunner):
                     dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
                 )
 
+            lifecycle = {"rank": rank}
             # -- BagPipe oracle prescan (issue #278) ---------------------------
             # One pass over this rank's shard before training so the shared-ID
             # set is complete: IDs provably local-only then skip the per-step
@@ -555,11 +573,18 @@ class RecStoreRunner(BenchmarkRunner):
                 and cfg.optimization.prescan
                 and plugin is not None
                 and plugin.is_enabled
-                and use_dist
+                and (use_dist or use_planned_bagpipe)
             ):
                 prescan_start = time.perf_counter()
                 prescan_batches = 0
-                for dense_b, sparse_b, _labels_b in dataloader:
+                prescan_iter = iter(dataloader)
+                prescan_steps = cfg.steps if use_planned_bagpipe else len(dataloader)
+                for _ in range(prescan_steps):
+                    try:
+                        dense_b, sparse_b, _labels_b = next(prescan_iter)
+                    except StopIteration:
+                        prescan_iter = iter(dataloader)
+                        dense_b, sparse_b, _labels_b = next(prescan_iter)
                     _, sf = build_kjt_batch_from_dense_sparse_labels(
                         dense_b, sparse_b, _labels_b, device=device
                     )
@@ -569,9 +594,17 @@ class RecStoreRunner(BenchmarkRunner):
                 # ID unions); shard sizes may differ by a batch, and the
                 # all_gather itself blocks until every rank arrives.
                 plugin.finalize_prescan()
+                if use_planned_bagpipe:
+                    # Replay the same seeded sampling sequence, including
+                    # RandomSampler epoch changes in single-rank training.
+                    del prescan_iter
+                    dataset, dataloader = _build_train_dataloader_for_mode(repo_root, cfg, rank)
                 _barrier_for_step_alignment(
                     dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
                 )
+                lifecycle["bagpipe_prescan_total_ms"] = (time.perf_counter() - prescan_start) * 1e3
+                if use_planned_bagpipe:
+                    lifecycle.update(plugin._controller.consume_stats(reset=False))
                 print(
                     f"[rs_demo] BagPipe oracle prescan: {prescan_batches} batches "
                     f"in {time.perf_counter() - prescan_start:.1f}s"
@@ -580,6 +613,31 @@ class RecStoreRunner(BenchmarkRunner):
                 print(
                     "[rs_demo] --optimization-prescan ignored: single-rank runs "
                     "never aggregate gradients across ranks"
+                )
+
+            dense_graph = None
+            if cfg.optimization.cuda_graphs:
+                if device.type != "cuda":
+                    raise RuntimeError("--optimization-cuda-graphs requires CUDA")
+                from ..runtime.dense_graph import CapturedDlrmDense
+                controller = plugin._controller
+                payload_capacities = {}
+                for plan in controller._plans:
+                    batch_size = plan.raw_ids.numel() // len(default_cat_names)
+                    payload_capacities[batch_size] = max(
+                        payload_capacities.get(batch_size, 0), controller._payload_rows(plan),
+                    )
+                dense_graph = CapturedDlrmDense(
+                    unwrapped_module, criterion, dense_gradient_buffer,
+                    batch_sizes=sorted(payload_capacities),
+                    num_features=len(default_cat_names), embedding_dim=cfg.embedding_dim,
+                    resident_values=controller._values, payload_capacities=payload_capacities,
+                )
+                lifecycle["dense_graph_capture_ms"] = dense_graph.capture_ms
+                lifecycle["planned_graph_scope"] = "resident lookup + dense forward/backward + sparse gradient pack"
+                lifecycle["dense_compute_ms_unavailable"] = True
+                _barrier_for_step_alignment(
+                    dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
                 )
 
             rows: list[dict[str, Any]] = []
@@ -601,6 +659,7 @@ class RecStoreRunner(BenchmarkRunner):
                     data_iter_state["iter"] = iter(dataloader)
                     dense_batch, sparse_batch, labels_batch = next(data_iter_state["iter"])
                 row["batch_prepare_ms"] = (time.perf_counter() - batch_prepare_start) * 1e3
+                row["batch_size"] = int(dense_batch.shape[0])
 
                 input_pack_start = time.perf_counter()
                 _, sparse_features = build_kjt_batch_from_dense_sparse_labels(
@@ -699,50 +758,101 @@ class RecStoreRunner(BenchmarkRunner):
                 events.emit("consume_start", step=step)
                 with timer.cpu("embed_lookup_ms"):
                     read_path.before_lookup(step, sparse_features, ticket, row)
-                    if callable(record_pooled_grad):
+                    if dense_graph is not None:
+                        graph_inputs = plugin._controller.planned_graph_inputs(sparse_features)
+                    elif use_planned_bagpipe:
+                        embeddings = plugin._controller.lookup(sparse_features)
+                    elif callable(record_pooled_grad):
                         with torch.no_grad():
                             embeddings = embedding_module(sparse_features)
                     else:
                         embeddings = embedding_module(sparse_features)
                 events.emit("consume_end", step=step)
 
-                if embeddings is None:
+                if dense_graph is None and embeddings is None:
                     raise RuntimeError("recstore embedding module returned no embeddings")
 
                 events.emit("pack_start", step=step)
-                with timer.gpu("embed_pool_local_ms"):
-                    embedded_sparse_source = reshape_torchrec_embeddings_for_dlrm(
-                        embeddings=embeddings, feature_names=default_cat_names, torch=torch
-                    )
+                if dense_graph is None:
+                    with timer.gpu("embed_pool_local_ms"):
+                        embedded_sparse_source = reshape_torchrec_embeddings_for_dlrm(
+                            embeddings=embeddings, feature_names=default_cat_names, torch=torch
+                        )
+                else:
+                    row["embed_pool_local_ms"] = 0.0
                 with timer.gpu("output_unpack_ms"):
-                    dense_features, embedded_sparse, labels = prepare_hybrid_dlrm_input(
-                        dense_batch=dense_batch,
-                        embedded_sparse_source=embedded_sparse_source,
-                        labels_batch=labels_batch,
-                        torch=torch, device=device, detach_sparse=True,
-                    )
+                    if dense_graph is not None:
+                        dense_features = dense_batch.to(device, non_blocking=True)
+                        labels = labels_batch.to(device, non_blocking=True).float().view(-1, 1)
+                    else:
+                        dense_features, embedded_sparse, labels = prepare_hybrid_dlrm_input(
+                            dense_batch=dense_batch,
+                            embedded_sparse_source=embedded_sparse_source,
+                            labels_batch=labels_batch,
+                            torch=torch, device=device, detach_sparse=True,
+                        )
                 events.emit("pack_end", step=step)
                 events.emit("fwd_start", step=step)
-                with timer.gpu("dense_fwd_ms"):
-                    loss, _ = compute_dense_loss(
-                        cfg, dense_module, criterion, dense_features, embedded_sparse, labels
-                    )
+                # Fixed collective order: sparse gradients become ready before
+                # the bottom MLP; dense gradients reduce once backward ends.
+                # no_sync must cover forward as well as backward.
+                dense_sync_context = (
+                    dense_module.no_sync() if early_sparse_update and use_dist
+                    else nullcontext()
+                )
+                with dense_sync_context:
+                    if dense_graph is not None:
+                        # The graph includes resident lookup and sparse packing;
+                        # these cannot be reported as separate dense-only stages.
+                        with timer.gpu("planned_graph_ms"):
+                            loss, packed_grads = dense_graph(
+                                dense_features, None, labels,
+                                lookup_rows=graph_inputs[0], pooled_rows=graph_inputs[1],
+                                payload_rows=graph_inputs[2],
+                            )
+                        row["dense_fwd_ms"] = row["backward_ms"] = 0.0
+                        with timer.gpu("gradient_communication_ms"):
+                            plugin._controller.update_packed_grads(
+                                packed_grads, sparse_optimizer.param_groups[0]["lr"], step
+                            )
+                            dense_gradient_buffer.reduce()
+                    else:
+                        with timer.gpu("dense_fwd_ms"):
+                            loss, _ = compute_dense_loss(
+                                cfg, dense_module, criterion, dense_features, embedded_sparse, labels
+                            )
 
-                events.emit("fwd_end", step=step)
-                events.emit("bwd_start", step=step)
-                with timer.gpu("backward_ms"):
-                    for param in dense_module.parameters():
-                        if param.requires_grad:
-                            param.grad = None
-                    if not embedded_sparse.is_leaf:
-                        embedded_sparse.retain_grad()
-                    embedded_sparse.grad = None
-                    loss.backward()
-                    if embedded_sparse.grad is None:
-                        raise RuntimeError(
-                            "missing embedded_sparse gradient after backward"
-                        )
-                    embedded_sparse_grad = embedded_sparse.grad.detach()
+                        events.emit("fwd_end", step=step)
+                        events.emit("bwd_start", step=step)
+                        with timer.gpu("backward_ms"):
+                            if dense_gradient_buffer is not None:
+                                dense_gradient_buffer.begin_step()
+                            else:
+                                for param in dense_module.parameters():
+                                    if param.requires_grad:
+                                        param.grad = None
+                            if not embedded_sparse.is_leaf:
+                                embedded_sparse.retain_grad()
+                            embedded_sparse.grad = None
+                            sparse_hook = None
+                            if early_sparse_update:
+                                sparse_hook = embedded_sparse.register_hook(
+                                    lambda grad: plugin._controller.update_pooled_grads(
+                                        grad, sparse_optimizer.param_groups[0]["lr"], step
+                                    )
+                                )
+                            try:
+                                loss.backward()
+                            finally:
+                                if sparse_hook is not None:
+                                    sparse_hook.remove()
+                            if embedded_sparse.grad is None:
+                                raise RuntimeError(
+                                    "missing embedded_sparse gradient after backward"
+                                )
+                            embedded_sparse_grad = embedded_sparse.grad.detach()
+                            if dense_gradient_buffer is not None:
+                                dense_gradient_buffer.reduce()
 
                 events.emit("bwd_end", step=step)
                 events.emit("dense_opt_start", step=step)
@@ -754,8 +864,14 @@ class RecStoreRunner(BenchmarkRunner):
                 events.emit("sparse_start", step=step)
                 with timer.cpu("sparse_optimizer_ms"):
                     replay_start = time.perf_counter()
-                    sparse_grad = embedded_sparse_grad.to(embedded_sparse_source.device)
-                    if callable(record_pooled_grad):
+                    if dense_graph is None:
+                        sparse_grad = embedded_sparse_grad.to(embedded_sparse_source.device)
+                    if use_planned_bagpipe:
+                        if not early_sparse_update and dense_graph is None:
+                            plugin._controller.update_pooled_grads(
+                                sparse_grad, sparse_optimizer.param_groups[0]["lr"], step
+                            )
+                    elif callable(record_pooled_grad):
                         prepared_ids = (
                             ticket
                             if isinstance(ticket, tuple) and len(ticket) == 3
@@ -769,7 +885,8 @@ class RecStoreRunner(BenchmarkRunner):
                     row["sparse_backward_replay_ms"] = (time.perf_counter() - replay_start) * 1e3
 
                     optimizer_step_start = time.perf_counter()
-                    sparse_optimizer.step()
+                    if not use_planned_bagpipe:
+                        sparse_optimizer.step()
                     row["sparse_optimizer_step_ms"] = (
                         time.perf_counter() - optimizer_step_start
                     ) * 1e3
@@ -795,6 +912,9 @@ class RecStoreRunner(BenchmarkRunner):
                     read_path.after_sparse_update(
                         step, sparse_features, sparse_optimizer, row
                     )
+                    if use_planned_bagpipe and step == cfg.steps - 1:
+                        # Charge the final deferred SGD to training as well.
+                        plugin._controller._wait_pending()
                     sparse_optimizer.zero_grad()
 
                 events.emit("sparse_end", step=step)
@@ -808,7 +928,7 @@ class RecStoreRunner(BenchmarkRunner):
                     row["dense_fwd_ms"]
                     + row["backward_ms"]
                     + row["dense_optimizer_ms"]
-                )
+                ) if dense_graph is None else 0.0
                 _finalize_step_timing(row, wall_start=step_wall_start)
                 rows.append(finalize_recstore_row(row))
                 events.emit("barrier_start", step=step)
@@ -827,10 +947,28 @@ class RecStoreRunner(BenchmarkRunner):
                 )
                 if profiler is not None:
                     profiler.step()
+                rows[-1]["step_wall_ms"] = (time.perf_counter() - step_wall_start) * 1e3
 
             print("[rs_demo] workload finished")
 
             _write_rows(out_csv, rows)
+            if cfg.validation_state:
+                if not use_planned_bagpipe:
+                    raise RuntimeError("RecStore validation-state requires bagpipe_planned")
+                from ..runtime.validation import export_validation_state
+                export_validation_state(
+                    Path(cfg.output_root) / "outputs" / cfg.run_id / f"validation_rank{rank}.pt",
+                    embedding_module, dense_module, planned_controller=plugin._controller,
+                )
+            if plugin is not None:
+                shutdown_start = time.perf_counter()
+                plugin.shutdown()
+                lifecycle["bagpipe_shutdown_ms"] = (time.perf_counter() - shutdown_start) * 1e3
+                plugin = None
+            if use_bagpipe:
+                lifecycle_path = Path(cfg.output_root) / "outputs" / cfg.run_id / f"lifecycle_rank{rank}.json"
+                lifecycle_path.parent.mkdir(parents=True, exist_ok=True)
+                lifecycle_path.write_text(json.dumps(lifecycle, indent=2) + "\n")
             if cfg.save_checkpoint:
                 from ..checkpoint import export_checkpoint
                 export_checkpoint(
@@ -850,12 +988,17 @@ class RecStoreRunner(BenchmarkRunner):
                 "rows": rows,
             }
         finally:
+            if dense_gradient_buffer is not None:
+                dense_gradient_buffer.close()
             if step_iter is not None:
                 step_iter.close()
             if events is not None:
                 events.close()
             if plugin is not None:
-                plugin.shutdown()
+                if cfg.optimization.plugin == "bagpipe_planned":
+                    plugin._controller.shutdown(flush=False)
+                else:
+                    plugin.shutdown()
             os.chdir(str(orig_cwd))
 
     def run(self, repo_root: Path, cfg: RunConfig) -> dict:

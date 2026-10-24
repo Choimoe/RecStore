@@ -97,6 +97,8 @@ class BagPipePlugin(OptimizationPlugin):
         lr: float = 0.01,
         id_extractor: Callable[[Any], torch.Tensor] | None = None,
         enabled: bool = True,
+        planned: bool = False,
+        sparse_collective: str = "all_reduce",
         **_: Any,
     ) -> "BagPipePlugin":
         """Create a BagPipePlugin.
@@ -122,7 +124,11 @@ class BagPipePlugin(OptimizationPlugin):
         else:
             cleanup_batch = 0.25
 
-        controller = BagPipeCacheController(
+        controller_cls = BagPipeCacheController
+        if planned:
+            from .planned import PlannedBagPipeController
+            controller_cls = PlannedBagPipeController
+        controller = controller_cls(
             embedding_module,
             kv_client,
             lookahead_value=lookahead,
@@ -136,6 +142,7 @@ class BagPipePlugin(OptimizationPlugin):
             device=device if device is not None else torch.device("cpu"),
             lr=lr,
             id_extractor=id_extractor if id_extractor is not None else (lambda sf: sf),
+            **({"sparse_collective": sparse_collective} if planned else {}),
         )
         return cls(controller, embedding_module=embedding_module, lr=lr)
 

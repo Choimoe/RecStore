@@ -881,6 +881,7 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertEqual(build_loader.call_args.kwargs["shuffle"], True)
         self.assertEqual(build_loader.call_args.kwargs["rank"], 1)
         self.assertEqual(build_loader.call_args.kwargs["world_size"], 2)
+        self.assertEqual(build_loader.call_args.kwargs["steps"], 1)
 
     def test_runner_uses_world_size_from_nnodes_and_nproc_per_node(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
