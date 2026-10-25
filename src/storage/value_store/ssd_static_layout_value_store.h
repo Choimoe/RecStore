@@ -243,6 +243,12 @@ private:
   struct PageLock {
     std::vector<std::shared_mutex*> mutexes;
     bool exclusive = false;
+    PageLock() = default;
+    PageLock(const PageLock&) = delete;
+    PageLock& operator=(const PageLock&) = delete;
+    PageLock(PageLock&& other) noexcept : exclusive(other.exclusive) {
+      mutexes.swap(other.mutexes);
+    }
     ~PageLock() {
       for (auto it = mutexes.rbegin(); it != mutexes.rend(); ++it) {
         if (exclusive) {
