@@ -229,7 +229,6 @@ public:
     }
     const size_t row_bytes = static_cast<size_t>(embedding_dim) * sizeof(float);
     thread_local std::vector<Value_t> handles;
-    thread_local std::vector<char> read_buffer;
     handles.assign(keys.Size(), kValueHandleNone);
     const auto index_lookup_start =
         stats != nullptr ? std::chrono::steady_clock::now()
@@ -266,6 +265,10 @@ public:
       }
       return true;
     }
+    std::vector<uint64_t> batch_handles;
+    std::vector<size_t> batch_rows;
+    batch_handles.reserve(static_cast<size_t>(num_rows));
+    batch_rows.reserve(static_cast<size_t>(num_rows));
     for (int64_t row = 0; row < num_rows; ++row) {
       const Value_t handle = handles[static_cast<size_t>(row)];
       float* dst           = values + row * embedding_dim;
@@ -296,17 +299,29 @@ public:
         }
         std::memcpy(dst, ptr, row_bytes);
       } else {
-        read_buffer.resize(row_bytes + sizeof(float));
-        const size_t actual =
-            value_store_->Read(handle, read_buffer.data(), read_buffer.size());
-        if (actual != row_bytes) {
+        batch_handles.push_back(handle);
+        batch_rows.push_back(static_cast<size_t>(row));
+      }
+    }
+    if (!batch_handles.empty()) {
+      std::vector<ValueStore::ReadResult> batch_results;
+      value_store_->BatchRead(batch_handles, batch_results);
+      if (batch_results.size() != batch_rows.size()) {
+        LOG(ERROR) << "KVEngine::BatchGetFlat result size mismatch";
+        return false;
+      }
+      for (size_t i = 0; i < batch_rows.size(); ++i) {
+        const size_t row   = batch_rows[i];
+        const auto& result = batch_results[i];
+        if (result.data.size() != row_bytes) {
           LOG(ERROR) << "KVEngine::BatchGetFlat read size mismatch row=" << row
                      << " key=" << keys[static_cast<int>(row)]
                      << " expected_bytes=" << row_bytes
-                     << " actual_bytes=" << actual;
+                     << " actual_bytes=" << result.data.size();
           return false;
         }
-        std::memcpy(dst, read_buffer.data(), row_bytes);
+        std::memcpy(
+            values + row * embedding_dim, result.data.data(), row_bytes);
       }
     }
     if (stats != nullptr) {
@@ -725,6 +740,12 @@ public:
 
   std::string ExtraResultFields() const override {
     return value_store_ ? value_store_->ExtraResultFields() : "";
+  }
+
+  void ResetStats() override {
+    if (value_store_) {
+      value_store_->ResetStats();
+    }
   }
 
 private:

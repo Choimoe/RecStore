@@ -210,6 +210,69 @@ class TestRecstoreConfigSchema(unittest.TestCase):
             }
         )
 
+    def test_rejects_static_strategy_on_plain_ssd_store(self) -> None:
+        self.assert_invalid_config(
+            {
+                "capacity": 1024,
+                "index": {"type": "DRAM_EXTENDIBLE_HASH"},
+                "value": {
+                    "type": "SSD_VALUE_STORE",
+                    "path": "/tmp/recstore_plain.db",
+                    "ssd_allocator": {
+                        "type": "SSD_SLAB",
+                        "capacity_bytes": 1024 * 128,
+                        "io": {"type": "IOURING"},
+                    },
+                    "ssd_layout": {
+                        "strategy": "bandana",
+                        "mapping_path": "/tmp/layout.bin",
+                    },
+                },
+            }
+        )
+
+    def test_accepts_static_strategy_on_tiered_store(self) -> None:
+        self.validate_config(
+            {
+                "capacity": 1024,
+                "index": {"type": "DRAM_EXTENDIBLE_HASH"},
+                "value": {
+                    "type": "TIERED_VALUE_STORE",
+                    "default_value_size_hint": 128,
+                    "dram_allocator": {
+                        "type": "PERSIST_LOOP_SLAB",
+                        "capacity_bytes": 1024 * 128,
+                    },
+                    "ssd_allocator": {
+                        "type": "SSD_SLAB",
+                        "capacity_bytes": 1024 * 128,
+                        "io": {"type": "IOURING"},
+                    },
+                    "ssd_layout": {
+                        "strategy": "maxembed",
+                        "mapping_path": "/tmp/layout.bin",
+                    },
+                },
+            }
+        )
+
+    def test_rejects_ssd_layout_on_dram_store(self) -> None:
+        self.assert_invalid_config(
+            {
+                "capacity": 1024,
+                "index": {"type": "DRAM_EXTENDIBLE_HASH"},
+                "value": {
+                    "type": "DRAM_VALUE_STORE",
+                    "default_value_size_hint": 128,
+                    "dram_allocator": {
+                        "type": "PERSIST_LOOP_SLAB",
+                        "capacity_bytes": 1024 * 128,
+                    },
+                    "ssd_layout": {"strategy": "plain"},
+                },
+            }
+        )
+
     def test_rejects_removed_external_engine_type_field(self) -> None:
         self.assert_invalid_config(
             {

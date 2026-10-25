@@ -508,7 +508,16 @@
                 "required": [
                   "path",
                   "ssd_allocator"
-                ]
+                ],
+                "properties": {
+                  "ssd_layout": {
+                    "properties": {
+                      "strategy": {
+                        "enum": ["plain"]
+                      }
+                    }
+                  }
+                }
               }
             },
             {
@@ -536,6 +545,22 @@
                         "enum": ["bandana", "maxembed"]
                       }
                     }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": ["ssd_layout"]
+              },
+              "then": {
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "SSD_VALUE_STORE",
+                      "SSD_STATIC_LAYOUT_VALUE_STORE",
+                      "TIERED_VALUE_STORE"
+                    ]
                   }
                 }
               }

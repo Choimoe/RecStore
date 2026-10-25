@@ -6,8 +6,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <fstream>
-#include <sstream>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -25,6 +23,7 @@
 #include "storage/io_backend/force_link.h"
 #include "storage/kv_engine/base_kv.h"
 #include "storage/kv_engine/engine_selector.h"
+#include "storage/ssd_layout/ssd_layout.h"
 
 DEFINE_string(
     dram_path,
@@ -152,9 +151,9 @@ public:
 
   uint64_t NextKey() {
     if (distribution_ == "uniform") {
-      return rng_.Uniform(record_count_) + 1;
+      return rng_.Uniform(record_count_);
     }
-    return NextZipfian() + 1;
+    return NextZipfian();
   }
 
   uint64_t NextUint(uint64_t n) { return rng_.Uniform(n); }
@@ -418,11 +417,8 @@ PhaseStats LoadRecords(BaseKV* kv, int load_threads, uint64_t record_count) {
     threads.emplace_back([kv, tid, per_thread, record_count, &counts]() {
       base::auto_bind_core();
       std::string value(FLAGS_value_size, static_cast<char>('a' + (tid % 26)));
-      const bool static_keys =
-          !FLAGS_ssd_layout_strategy.empty() && FLAGS_ssd_layout_strategy != "plain";
-      const uint64_t origin = static_keys ? 0 : 1;
-      const uint64_t begin = static_cast<uint64_t>(tid) * per_thread + origin;
-      const uint64_t end   = std::min(record_count + origin, begin + per_thread);
+      const uint64_t begin = static_cast<uint64_t>(tid) * per_thread;
+      const uint64_t end   = std::min(record_count, begin + per_thread);
       for (uint64_t key = begin; key < end; ++key) {
         kv->Put(key, std::string_view(value.data(), value.size()), tid);
         ++counts[tid];
@@ -570,24 +566,17 @@ void ReplayQueryLog(BaseKV* kv) {
   if (FLAGS_ssd_layout_query.empty()) {
     return;
   }
-  std::ifstream input(FLAGS_ssd_layout_query);
-  if (!input) {
-    throw std::invalid_argument("cannot open ssd_layout_query");
-  }
-  std::string line;
-  // ponytail: replay uses vertex ids as keys. Apply the header starting
-  // offset here if a log is not already zero-based.
-  std::getline(input, line);
+  const auto graph = ssd_layout::ReadQueryLog(FLAGS_ssd_layout_query, false);
   uint64_t queries = 0;
   uint64_t rows    = 0;
+  kv->ResetStats();
   const auto begin = std::chrono::steady_clock::now();
-  while (std::getline(input, line)) {
-    std::istringstream row(line);
+  for (size_t query = 0; query + 1 < graph.xpins.size(); ++query) {
     std::vector<uint64_t> keys;
-    uint64_t key = 0;
-    while (row >> key) {
-      keys.push_back(key);
-    }
+    keys.reserve(graph.xpins[query + 1] - graph.xpins[query]);
+    keys.insert(keys.end(),
+                graph.pins.begin() + graph.xpins[query],
+                graph.pins.begin() + graph.xpins[query + 1]);
     if (keys.empty()) {
       continue;
     }

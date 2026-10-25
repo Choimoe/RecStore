@@ -86,7 +86,8 @@ MaxEmbed 读得更少，代价是 SSD 空间和写放大（每次写入要更新
 
 `io.base_offset_bytes` 必须按页对齐，物理页号为
 `page_id + base_offset_bytes / PAGE_SIZE`。未提供 `value.io` 时读取
-`value.ssd_allocator.io`。
+`value.ssd_allocator.io`；两处都省略时使用 `IOURING`、queue depth 512 和
+base offset 0。
 
 在 `TIERED_VALUE_STORE` 中，给 `value` 加上同样的 `ssd_layout` 即可让 SSD
 子层使用静态布局，详见

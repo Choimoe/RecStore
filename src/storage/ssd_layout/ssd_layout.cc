@@ -438,7 +438,8 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
   if (binary) {
     size_t offset = 0;
     const auto need = [&](size_t count, size_t width) {
-      if (offset + count * width > bytes.size()) {
+      if (offset > bytes.size() ||
+          (width != 0 && count > (bytes.size() - offset) / width)) {
         Fail("truncated binary query log");
       }
     };
@@ -449,6 +450,9 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
     offset += sizeof(queries);
     std::memcpy(&vertices, bytes.data() + offset, sizeof(vertices));
     offset += sizeof(vertices);
+    if (queries > std::numeric_limits<uint32_t>::max()) {
+      Fail("query log query count exceeds uint32 range");
+    }
     graph.vertex_count = vertices;
     graph.xpins.resize(queries + 1);
     need(queries + 1, sizeof(uint64_t));
@@ -487,6 +491,9 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
   uint64_t declared_pins = 0;
   if (!(header >> starting >> vertices >> queries >> declared_pins)) {
     Fail("text query log header is invalid");
+  }
+  if (queries > std::numeric_limits<uint32_t>::max()) {
+    Fail("query log query count exceeds uint32 range");
   }
   graph.vertex_count = vertices;
   graph.xpins.resize(queries + 1);

@@ -252,6 +252,7 @@ public:
   void BatchReadPages(const std::vector<IOEntry>& entries) override {
     if (entries.empty())
       return;
+    RecordRead(entries);
     struct io_uring* ring = get_thread_ring();
     int max_inflight      = std::max(queue_cnt / 2, 1);
     size_t submitted      = 0;

@@ -1,3 +1,4 @@
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -14,6 +15,7 @@
 
 #include "memory/shm_file.h"
 #include "storage/index/utils/hash.h"
+#include "storage/io_backend/force_link.h"
 #include "storage/io_backend/io_backend.h"
 #include "storage/kv_engine/engine_composite.h"
 #include "storage/ssd_layout/ssd_layout.h"
@@ -195,10 +197,15 @@ TEST_F(StaticLayoutValueTest, BatchReadUsesFewerPagesThanPlain) {
   for (int i = 0; i < 6; ++i) {
     plain_handles.push_back(plain.AllocAndWrite(payload, 4));
   }
+  plain.ResetStats();
   g_read_entries.store(0);
   std::vector<ValueStore::ReadResult> plain_out;
   plain.BatchRead(plain_handles, plain_out);
   const uint64_t plain_reads = g_read_entries.load();
+  EXPECT_NE(plain.ExtraResultFields().find("layout_page_reads=6"),
+            std::string::npos);
+  EXPECT_NE(plain.ExtraResultFields().find("layout_bytes_read=24576"),
+            std::string::npos);
 
   auto bandana = std::make_unique<SsdStaticLayoutValueStore>(
       Config(Save(Bandana()), "bandana"));
@@ -241,7 +248,8 @@ TEST_F(StaticLayoutValueTest, HybridWatermarkAndReplicaUpdate) {
       {"type", "SSD_SLAB"},
       {"capacity_bytes", 64ULL << 20},
       {"path", (root_ / "ssd.db").string()},
-      {"io", {{"type", "INMEMORY"}, {"queue_depth", 4}, {"base_offset_bytes", 0}}}};
+      {"io",
+       {{"type", "INMEMORY"}, {"queue_depth", 4}, {"base_offset_bytes", 0}}}};
   config.json_config_["value"]["tiering"] = {{"high_watermark_ratio", 0.0}};
   KVEngineComposite engine(config);
   for (uint64_t key = 0; key < 6; ++key) {
@@ -266,6 +274,72 @@ TEST_F(StaticLayoutValueTest, HybridWatermarkAndReplicaUpdate) {
   const uint64_t second = hybrid.AllocAndWrite(1, payload, 4);
   EXPECT_EQ(first & (1ULL << 63), 0U);
   EXPECT_NE(second & (1ULL << 63), 0U);
+}
+
+TEST_F(StaticLayoutValueTest, HybridValidatesStaticRowsBeforeDramPlacement) {
+  BaseKVConfig config =
+      Config(Save(Bandana()), "bandana", "TIERED_VALUE_STORE");
+  config.json_config_["value"]["dram_allocator"] = {
+      {"type", "PERSIST_LOOP_SLAB"},
+      {"capacity_bytes", 1 << 20},
+      {"path", (root_ / "dram").string()}};
+  config.json_config_["value"]["ssd_allocator"] = {
+      {"type", "SSD_SLAB"},
+      {"capacity_bytes", 64ULL << 20},
+      {"path", (root_ / "ssd.db").string()},
+      {"io",
+       {{"type", "INMEMORY"}, {"queue_depth", 4}, {"base_offset_bytes", 0}}}};
+  config.json_config_["value"]["tiering"] = {{"high_watermark_ratio", 1.0}};
+  HybridValueStore hybrid(config);
+  const char payload[4] = {'a', 'b', 'c', 'd'};
+  EXPECT_THROW(hybrid.AllocAndWrite(99, payload, sizeof(payload)),
+               std::invalid_argument);
+  EXPECT_THROW(hybrid.AllocAndWrite(0, payload, sizeof(payload) - 1),
+               std::invalid_argument);
+}
+
+TEST_F(StaticLayoutValueTest, StaticStoreUsesIoDefaultsWhenConfigIsOmitted) {
+  BaseKVConfig config = Config(Save(Bandana()), "bandana");
+  config.json_config_["value"].erase("io");
+  ForceLinkIOBackends();
+  EXPECT_NO_THROW({ SsdStaticLayoutValueStore store(config); });
+}
+
+TEST_F(StaticLayoutValueTest, BatchGetFlatUsesGroupedStaticReads) {
+  const auto mapping               = Save(Bandana());
+  const std::vector<uint64_t> keys = {0, 1, 2};
+  const std::array<float, 3> input = {1.0F, 2.0F, 3.0F};
+  auto exercise                    = [&](BaseKVConfig config) {
+    KVEngineComposite engine(config);
+    for (size_t i = 0; i < keys.size(); ++i) {
+      engine.Put(
+          keys[i],
+          std::string(reinterpret_cast<const char*>(&input[i]), sizeof(float)),
+          0);
+    }
+    g_read_entries.store(0);
+    std::array<float, 3> output{};
+    EXPECT_TRUE(engine.BatchGetFlat(
+        base::ConstArray<uint64_t>(keys), output.data(), 3, 1, 0));
+    EXPECT_EQ(output, input);
+    EXPECT_EQ(g_read_entries.load(), 1U);
+  };
+
+  exercise(Config(mapping, "bandana"));
+
+  BaseKVConfig hybrid = Config(mapping, "bandana", "TIERED_VALUE_STORE");
+  hybrid.json_config_["value"]["dram_allocator"] = {
+      {"type", "PERSIST_LOOP_SLAB"},
+      {"capacity_bytes", 1 << 20},
+      {"path", (root_ / "flat-dram").string()}};
+  hybrid.json_config_["value"]["ssd_allocator"] = {
+      {"type", "SSD_SLAB"},
+      {"capacity_bytes", 64ULL << 20},
+      {"path", (root_ / "flat-ssd.db").string()},
+      {"io",
+       {{"type", "INMEMORY"}, {"queue_depth", 4}, {"base_offset_bytes", 0}}}};
+  hybrid.json_config_["value"]["tiering"] = {{"high_watermark_ratio", 0.0}};
+  exercise(std::move(hybrid));
 }
 
 TEST_F(StaticLayoutValueTest, ConcurrentPageUpdatesDoNotTear) {

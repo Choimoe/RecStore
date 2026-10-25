@@ -96,6 +96,21 @@ public:
     uint64_t page_count; // number of pages in this buffer
   };
 
+  struct ReadStats {
+    uint64_t page_reads = 0;
+    uint64_t bytes_read = 0;
+  };
+
+  ReadStats GetReadStats() const {
+    return {page_reads_.load(std::memory_order_relaxed),
+            bytes_read_.load(std::memory_order_relaxed)};
+  }
+
+  void ResetReadStats() {
+    page_reads_.store(0, std::memory_order_relaxed);
+    bytes_read_.store(0, std::memory_order_relaxed);
+  }
+
   // Batch write using sliding-window async IO (no coroutines).
   // Buffers are NOT freed by this method; caller is responsible.
   virtual void BatchWritePages(const std::vector<IOEntry>& entries) {
@@ -109,6 +124,7 @@ public:
   // Batch read using sliding-window async IO (no coroutines).
   // Buffers are NOT freed by this method; caller is responsible.
   virtual void BatchReadPages(const std::vector<IOEntry>& entries) {
+    RecordRead(entries);
     for (auto& e : entries) {
       for (uint64_t i = 0; i < e.page_count; i++) {
         ReadPageSync(e.page_id + i, e.buffer + i * PAGE_SIZE);
@@ -120,6 +136,17 @@ protected:
   std::atomic<PageID_t> next_page_id{1};
   char* empty_page = nullptr;
   int queue_cnt    = 512;
+  std::atomic<uint64_t> page_reads_{0};
+  std::atomic<uint64_t> bytes_read_{0};
+
+  void RecordRead(const std::vector<IOEntry>& entries) {
+    uint64_t pages = 0;
+    for (const auto& entry : entries) {
+      pages += entry.page_count;
+    }
+    page_reads_.fetch_add(pages, std::memory_order_relaxed);
+    bytes_read_.fetch_add(pages * PAGE_SIZE, std::memory_order_relaxed);
+  }
 
   virtual void ReadPageAsync(coroutine<void>::push_type& sink,
                              uint64_t index,

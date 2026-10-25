@@ -52,8 +52,11 @@ public:
       copy_count_ += row.size();
     }
 
-    const auto& io = value.contains("io") ? value.at("io")
-                                           : value.at("ssd_allocator").at("io");
+    const json io =
+        value.contains("io")
+            ? value.at("io")
+            : value.value("ssd_allocator", json::object())
+                  .value("io", json::object());
     BaseKVConfig io_config = config;
     auto& json             = io_config.json_config_;
     const uint64_t base_offset =
@@ -219,6 +222,14 @@ public:
   size_t SlotCapacity(uint64_t handle) const override {
     CopiesOf(handle);
     return artifact_.row_size;
+  }
+
+  void ResetStats() override {
+    io_backend_->ResetReadStats();
+    page_reads_.store(0, std::memory_order_relaxed);
+    requested_rows_.store(0, std::memory_order_relaxed);
+    effective_rows_.store(0, std::memory_order_relaxed);
+    bytes_read_.store(0, std::memory_order_relaxed);
   }
 
   std::string ExtraResultFields() const override {

@@ -550,6 +550,16 @@ set_tests_properties(
 )
 
 add_python_unittest(
+    test_run_ssd_layout_microbench_py
+    src/test/scripts/test_run_ssd_layout_microbench.py
+)
+set_tests_properties(
+    test_run_ssd_layout_microbench_py
+    PROPERTIES
+    LABELS "storage;python"
+)
+
+add_python_unittest(
     test_hierkv_python_ops_py
     src.python.pytorch.recstore.unittest.test_kvclient_local_fast_path
     src.python.pytorch.recstore.unittest.test_embeddingbag_single_node_distributed

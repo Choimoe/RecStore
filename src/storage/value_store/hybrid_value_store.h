@@ -217,6 +217,12 @@ public:
     return os.str();
   }
 
+  void ResetStats() override {
+    if (ssd_store_) {
+      ssd_store_->ResetStats();
+    }
+  }
+
   std::string ExtraResultFields() const override {
     const uint64_t dram_live =
         dram_live_allocs_.load(std::memory_order_relaxed);
@@ -324,6 +330,10 @@ private:
   uint64_t PlaceStatic(uint64_t key, size_t size) {
     if (key > ssd_layout::kMaxKey) {
       throw std::invalid_argument("static SSD key is out of range");
+    }
+    const size_t row_size = ssd_store_->SlotCapacity(key + 1);
+    if (size != row_size) {
+      throw std::invalid_argument("static SSD layout value size mismatch");
     }
     if (ShouldUseDram(size)) {
       const uint64_t raw = dram_store_.Alloc(size);

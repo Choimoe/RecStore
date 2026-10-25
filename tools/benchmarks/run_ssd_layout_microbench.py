@@ -20,6 +20,31 @@ def run(cmd, log_path: Path) -> None:
         subprocess.run(cmd, check=True, stdout=log, stderr=subprocess.STDOUT)
 
 
+def parse_layout_result(log_path: Path) -> dict[str, int | float]:
+    result_line = next(
+        (line for line in log_path.read_text().splitlines()
+         if line.startswith("LAYOUT_RESULT ")),
+        None,
+    )
+    if result_line is None:
+        raise ValueError(f"{log_path} has no LAYOUT_RESULT")
+    fields = dict(
+        field.split("=", 1) for field in result_line.split()[1:] if "=" in field
+    )
+    required = ("seconds", "layout_page_reads", "layout_bytes_read")
+    missing = [name for name in required if name not in fields]
+    if missing:
+        raise ValueError(f"{log_path} missing layout metric: {', '.join(missing)}")
+    seconds = float(fields["seconds"])
+    bytes_read = int(fields["layout_bytes_read"])
+    return {
+        "page_io_count": int(fields["layout_page_reads"]),
+        "bytes_read": bytes_read,
+        "seconds": seconds,
+        "bandwidth_bytes_sec": bytes_read / seconds if seconds > 0 else 0.0,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--layout-bin", required=True)
@@ -54,7 +79,10 @@ def main() -> None:
         out / "replicate.log",
     )
 
-    rows = ["strategy\tlog"]
+    rows = [
+        "strategy\tpage_io_count\tbytes_read\tseconds"
+        "\tbandwidth_bytes_sec\tlog"
+    ]
     for strategy, mapping in (
         ("plain", ""),
         ("bandana", str(bandana)),
@@ -80,7 +108,12 @@ def main() -> None:
             cmd.append(f"--ssd_layout_mapping={mapping}")
         log = out / f"{strategy}.log"
         run(cmd, log)
-        rows.append(strategy + "\t" + log.name)
+        metrics = parse_layout_result(log)
+        rows.append(
+            f"{strategy}\t{metrics['page_io_count']}\t{metrics['bytes_read']}"
+            f"\t{metrics['seconds']:.6f}"
+            f"\t{metrics['bandwidth_bytes_sec']:.6f}\t{log.name}"
+        )
     (out / "summary.tsv").write_text("\n".join(rows) + "\n")
     print(out)
 

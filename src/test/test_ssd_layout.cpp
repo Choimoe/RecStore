@@ -61,6 +61,41 @@ TEST_F(LayoutTest, TextAndBinaryLogsMatch) {
   EXPECT_EQ(text.pins, binary.pins);
 }
 
+TEST_F(LayoutTest, TextLogNormalizesStartingOffset) {
+  const auto path = root_ / "offset-query.txt";
+  std::ofstream(path) << "100 4 2 4\n100 103\n101 102\n";
+  const auto graph = ssd_layout::ReadQueryLog(path.string(), false);
+  EXPECT_EQ(graph.vertex_count, 4U);
+  EXPECT_EQ(graph.xpins, (std::vector<uint64_t>{0, 2, 4}));
+  EXPECT_EQ(graph.pins, (std::vector<uint32_t>{0, 3, 1, 2}));
+}
+
+TEST_F(LayoutTest, RejectsQueryCountsOutsideUint32Range) {
+  constexpr uint64_t too_many =
+      static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1;
+  const auto text_path = root_ / "too-many-queries.txt";
+  std::ofstream(text_path) << "0 1 " << too_many << " 0\n";
+  try {
+    (void)ssd_layout::ReadQueryLog(text_path.string(), false);
+    FAIL() << "oversized text query count was accepted";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_STREQ(error.what(), "query log query count exceeds uint32 range");
+  }
+
+  const auto binary_path  = root_ / "too-many-queries.bin";
+  const uint64_t vertices = 1;
+  std::ofstream binary(binary_path, std::ios::binary);
+  binary.write(reinterpret_cast<const char*>(&too_many), sizeof(too_many));
+  binary.write(reinterpret_cast<const char*>(&vertices), sizeof(vertices));
+  binary.close();
+  try {
+    (void)ssd_layout::ReadQueryLog(binary_path.string(), true);
+    FAIL() << "oversized binary query count was accepted";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_STREQ(error.what(), "query log query count exceeds uint32 range");
+  }
+}
+
 TEST_F(LayoutTest, PartitionIsDeterministicAndBounded) {
   const auto graph = WriteLogs();
   const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);

@@ -134,6 +134,7 @@ public:
 
   virtual LayoutId GetLayoutId() const { return {}; }
 
+  virtual void ResetStats() {}
   virtual std::string GetInfo() const { return "(no info)"; }
   virtual std::string ExtraResultFields() const { return ""; }
 };

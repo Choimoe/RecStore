@@ -50,6 +50,7 @@ public:
     return;
   }
   virtual std::string ExtraResultFields() const { return ""; }
+  virtual void ResetStats() {}
   virtual void Get(const uint64_t key, std::string& value, unsigned tid) = 0;
   virtual bool Exists(const uint64_t key, unsigned tid) {
     std::string value;
