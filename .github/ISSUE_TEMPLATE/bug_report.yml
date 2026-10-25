@@ -1,0 +1,61 @@
+name: 🐛 Bug report
+description: Bug, Usage Issue, Installation Error, etc.
+title: "[Bug]: "
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        📖 Before submitting a Bug Report, please ensure the following:
+        ⚠️ You are running the latest version of RecStore.
+        ⚠️ The issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/RecStore/RecStore/issues?q=is%3Aissue+sort%3Acreated-desc+).
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Usage Issues
+        - Installation Error
+        - Correctness
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 🐛 Description
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 🛠️ Environment
+      description: |
+        💡 Please run the following and paste the output below.
+        ```sh
+        wget https://raw.githubusercontent.com/RecStore/RecStore/main/tools/env/collect.py
+        # For security purposes, please feel free to check the contents of collect.py before running it.
+        python collect.py --redact
+        ```
+      value: |
+        <details>
+        <summary>The output of <code>python collect.py --redact</code></summary>
+
+        ```text
+        Your output of `python collect.py --redact` here
+        ==============================
+                System Info
+        ==============================
+        ...
+        ```
+
+        </details>
+
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting 🙏!

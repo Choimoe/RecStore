@@ -1,0 +1,32 @@
+name: 🚀 Feature request
+description: Propose a new feature or improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        📖 Before submitting a Feature request, please ensure the following:
+        ⚠️ The issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/RecStore/RecStore/issues?q=is%3Aissue+sort%3Acreated-desc+).
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 📚 Description
+      description: |
+        💡 In addition to "I want to add feature XXX", please also describe "why it is needed" and "what effect/purpose I can achieve".
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 🪞 Alternatives
+      description: |
+        A description of any alternative solutions or features you've considered, if any.
+
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing 🎉!

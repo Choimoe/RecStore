@@ -202,6 +202,10 @@ public:
     }
     get_payload_completions_.resize(
         static_cast<std::size_t>(std::max(1, thread_count_)));
+    next_rebuild_check_ns_.assign(
+        static_cast<std::size_t>(std::max(1, thread_count_)), 0);
+    rebuild_poll_backoff_ms_.assign(
+        static_cast<std::size_t>(std::max(1, thread_count_)), 0);
   }
 
   void Run() {
@@ -209,6 +213,39 @@ public:
     for (int i = 0; i < thread_count_; ++i) {
       threads_.emplace_back(&PetPSServer::PollingThread, this, i);
     }
+    // Observation-only shard heartbeat to the control plane.
+    heartbeat_thread_ = std::thread(&PetPSServer::HeartbeatThread, this);
+  }
+
+  // Graceful exit: stop every loop and join. Idempotent; the caller decides
+  // whether to tear the process down normally or short-circuit the (large)
+  // slab unmap.
+  //
+  // Deliberately no draining publication here: nothing consumes `draining`
+  // yet (the health snapshot reports liveness only), while a draining record
+  // permanently rejects READY for the same (deployment, epoch, shard), so a
+  // plain restart would never come back. Draining stays an explicit operator
+  // action until the re-ready rule is settled.
+  void Stop() {
+    if (stop_requested_.exchange(true, std::memory_order_relaxed)) {
+      return;
+    }
+    get_payload_cv_.notify_all();
+    for (std::thread& worker : get_payload_workers_) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+    for (std::thread& thread : threads_) {
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
+    if (heartbeat_thread_.joinable()) {
+      heartbeat_thread_.join();
+    }
+    LOG(INFO) << "component=petps_server event=server_stopped"
+              << " server_id=" << FLAGS_global_id;
   }
 
 private:
@@ -219,20 +256,27 @@ private:
     int slot_in_qp     = -1;
     int poll_thread_id = -1;
     std::uint64_t seq  = 0;
+    // Transport response epoch when the request was accepted; a later rebuild
+    // invalidates the slot this task would complete.
+    std::uint64_t response_epoch = 0;
     petps::RequestDescriptor descriptor{};
     const char* payload = nullptr;
     petps::RcShardServerTransport::ResponseView response{};
   };
 
   struct GetPayloadCompletion {
-    int slot           = -1;
-    int client_id      = -1;
-    int qp_index       = -1;
-    int slot_in_qp     = -1;
-    int poll_thread_id = -1;
-    std::uint64_t seq  = 0;
+    int slot                     = -1;
+    int client_id                = -1;
+    int qp_index                 = -1;
+    int slot_in_qp               = -1;
+    int poll_thread_id           = -1;
+    std::uint64_t seq            = 0;
+    std::uint64_t response_epoch = 0;
     petps::RcShardServerTransport::ResponseView response{};
     bool payload_written_direct = false;
+    // The lane was rebuilt while the worker held this task, so its response
+    // must not be completed (the payload WRs were flushed or refused).
+    bool stale = false;
   };
 
   struct ProfileCounters {
@@ -471,6 +515,44 @@ private:
         << " poller_max_get_thread=" << poller_max_get_thread << std::endl;
   }
 
+  // Periodically surfaces the two rebuild-fence counters so a test driver can
+  // assert the fence actually fired. Like MaybeReportProfile this is opt-in
+  // through an interval flag (0 = off), so it never writes to stderr in a
+  // production run; the counters can only move when lane rebuild is enabled.
+  void MaybeReportRebuildFenceStats() {
+    if (FLAGS_rdma_rc_server_fence_stats_interval_ms <= 0 ||
+        !FLAGS_rdma_lane_rebuild_enabled) {
+      return;
+    }
+    const std::uint64_t kIntervalNs =
+        static_cast<std::uint64_t>(
+            FLAGS_rdma_rc_server_fence_stats_interval_ms) *
+        1000000ull;
+    const std::uint64_t now = NowNs();
+    std::uint64_t expected =
+        next_fence_report_ns_.load(std::memory_order_relaxed);
+    if (expected == 0) {
+      next_fence_report_ns_.compare_exchange_strong(
+          expected, now + kIntervalNs, std::memory_order_relaxed);
+      return;
+    }
+    if (now < expected ||
+        !next_fence_report_ns_.compare_exchange_strong(
+            expected, now + kIntervalNs, std::memory_order_relaxed)) {
+      return;
+    }
+    const std::uint64_t rejected =
+        transport_ == nullptr ? 0 : transport_->ResponseRejectedEpochCount();
+    const std::uint64_t dropped =
+        payload_completion_dropped_stale_.load(std::memory_order_relaxed);
+    // std::cerr, not LOG(INFO): the test driver captures the process pipe,
+    // while glog INFO lines only land in the per-process log files.
+    std::cerr << "component=rdma_rc_server event=rebuild_fence_stats"
+              << " shard=" << shard_id_ << " fence_rejected=" << rejected
+              << " dropped_stale=" << dropped
+              << " fence_events=" << (rejected + dropped) << std::endl;
+  }
+
   bool GetPayloadOffloadEnabled() const {
     return get_payload_worker_count_ > 0;
   }
@@ -554,20 +636,50 @@ private:
       {
         std::unique_lock<std::mutex> lock(get_payload_mu_);
         get_payload_cv_.wait(lock, [this] {
-          return !get_payload_tasks_.empty();
+          return !get_payload_tasks_.empty() ||
+                 stop_requested_.load(std::memory_order_relaxed);
         });
+        if (stop_requested_.load(std::memory_order_relaxed)) {
+          return;
+        }
         task = get_payload_tasks_.front();
         get_payload_tasks_.pop_front();
       }
 
+      // Test-only: widen the enqueue-to-post window so a lane rebuild lands in
+      // the middle of this task's lifetime. That forces the response-epoch
+      // fence (RcLaneRebuiltDuringResponse / stale completion drop) to fire,
+      // which the tight loopback timing otherwise almost never does.
+      if (FLAGS_rdma_rc_server_get_worker_hold_us > 0) {
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(FLAGS_rdma_rc_server_get_worker_hold_us));
+      }
+
       const bool profile_enabled = FLAGS_rdma_rc_profile_interval_ms > 0;
       const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      const bool payload_written_direct   = HandleGet(
-          task.descriptor,
-          task.payload,
-          &task.response,
-          worker_id,
-          task.slot_in_qp);
+      bool payload_written_direct         = false;
+      bool stale                          = false;
+      try {
+        payload_written_direct = HandleGet(
+            task.descriptor,
+            task.payload,
+            &task.response,
+            worker_id,
+            task.slot_in_qp,
+            task.response_epoch);
+      } catch (const petps::RcLaneRebuiltDuringResponse&) {
+        // A rebuild released this request's slot; completing it would overwrite
+        // the new generation's response.
+        stale = true;
+      } catch (const std::exception& error) {
+        // Never let a worker exception terminate the shard: the client will
+        // time out and retire the lane.
+        LOG(ERROR) << "component=rdma_rc_server event=get_payload_worker_error"
+                   << " shard=" << shard_id_ << " worker_id=" << worker_id
+                   << " slot=" << task.slot << " error=\"" << error.what()
+                   << "\"";
+        stale = true;
+      }
       if (profile_enabled) {
         profile_.handled_get.fetch_add(1, std::memory_order_relaxed);
         profile_.handle_get_ns.fetch_add(
@@ -580,8 +692,10 @@ private:
           task.slot_in_qp,
           task.poll_thread_id,
           task.seq,
+          task.response_epoch,
           task.response,
           payload_written_direct,
+          stale,
       };
       PushGetPayloadCompletion(completion);
     }
@@ -644,6 +758,21 @@ private:
   void DrainGetPayloadCompletions(int poll_thread_id, bool profile_enabled) {
     GetPayloadCompletion completion;
     while (TryPopGetPayloadCompletion(poll_thread_id, &completion)) {
+      if (completion.stale ||
+          completion.response_epoch !=
+              transport_->ResponseEpoch(
+                  completion.client_id, completion.qp_index)) {
+        // The lane was rebuilt after the request was accepted. Its payload WRs
+        // were flushed by the reset (or refused), so writing the status word
+        // now would report kOk for a response that never reached the client.
+        payload_completion_dropped_stale_.fetch_add(
+            1, std::memory_order_relaxed);
+        VLOG(1) << "component=rdma_rc_server event=get_payload_dropped_stale"
+                << " shard=" << shard_id_ << " client_id="
+                << completion.client_id << " qp=" << completion.qp_index
+                << " slot=" << completion.slot << " seq=" << completion.seq;
+        continue;
+      }
       if (completion.payload_written_direct) {
         CompleteResponseStatusOnlyForSlot(
             completion.slot,
@@ -664,6 +793,7 @@ private:
             profile_enabled);
       }
     }
+    MaybeReportRebuildFenceStats();
   }
 
   // Count a direct_sg batch that failed after the probe and record the probe
@@ -686,6 +816,7 @@ private:
       petps::RcShardServerTransport::ResponseView* response,
       int thread_id,
       int slot_in_qp,
+      std::uint64_t response_epoch,
       CachePS::FlatGetProfile* get_profile) {
     if (descriptor.response_bytes == 0 || descriptor.embedding_dim == 0) {
       return false;
@@ -769,6 +900,7 @@ private:
           descriptor.client_id,
           descriptor.qp_index,
           slot_in_qp,
+          response_epoch,
           base::ConstArray<petps::RawVerbsSge>(
               sges.data(), static_cast<int>(sge_count)),
           response_offset,
@@ -795,7 +927,14 @@ private:
                  const char* payload,
                  petps::RcShardServerTransport::ResponseView* response,
                  int thread_id,
-                 int slot_in_qp) {
+                 int slot_in_qp,
+                 std::uint64_t response_epoch) {
+    if (FLAGS_rdma_rc_fake_get_mode == "throw") {
+      // Test-only fault injection for the ProcessSlot handler guard: proves a
+      // throwing handler cannot terminate the shard and still completes the
+      // request with kInternalError instead of leaving the client to time out.
+      throw std::runtime_error("injected handler failure");
+    }
     if (FLAGS_rdma_rc_fake_get_mode == "status_only") {
       response->status->status =
           static_cast<std::int32_t>(petps::RpcStatus::kOk);
@@ -842,7 +981,13 @@ private:
         FLAGS_rdma_rc_profile_interval_ms > 0 ? &get_profile : nullptr;
     if ((descriptor.flags & petps::kRcFlagGetDirectSg) != 0) {
       const bool direct_ok = HandleGetDirectSg(
-          descriptor, keys, response, thread_id, slot_in_qp, get_profile_ptr);
+          descriptor,
+          keys,
+          response,
+          thread_id,
+          slot_in_qp,
+          response_epoch,
+          get_profile_ptr);
       if (direct_ok) {
         return true;
       }
@@ -981,6 +1126,26 @@ private:
     response->status->response_bytes = 0;
   }
 
+  // Observation-only heartbeat loop. It never changes serving behavior: a
+  // failed heartbeat is logged and retried, never propagated to the data path.
+  void HeartbeatThread() {
+    const int interval_ms = std::max(1, FLAGS_rdma_heartbeat_interval_ms);
+    LOG(INFO) << "component=rdma_control_plane event=heartbeat_thread_ready"
+              << " server_id=" << FLAGS_global_id
+              << " interval_ms=" << interval_ms;
+    while (!stop_requested_.load(std::memory_order_relaxed)) {
+      try {
+        control_plane_client_.SendHeartbeat(FLAGS_global_id);
+      } catch (const std::exception& error) {
+        LOG(WARNING) << "component=rdma_control_plane event=heartbeat_failed"
+                     << " server_id=" << FLAGS_global_id << " error=\""
+                     << error.what() << "\"";
+      }
+      // Bounded sleep: Stop() joins this thread after at most one interval.
+      std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+    }
+  }
+
   void MaybePublishServerReady() {
     const int started =
         started_threads_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1009,7 +1174,7 @@ private:
       RunCoroutinePollingThread(thread_id, coroutines_per_thread);
       return;
     }
-    while (true) {
+    while (!stop_requested_.load(std::memory_order_relaxed)) {
       const bool profile_enabled        = FLAGS_rdma_rc_profile_interval_ms > 0;
       const std::uint64_t poll_start_ns = profile_enabled ? NowNs() : 0;
       std::uint64_t scanned_slots       = 0;
@@ -1023,6 +1188,7 @@ private:
           &scanned_slots,
           &ready_slots);
       DrainGetPayloadCompletions(thread_id, profile_enabled);
+      MaybePollClientRebuilds(thread_id);
       if (profile_enabled) {
         profile_.scan_rounds.fetch_add(1, std::memory_order_relaxed);
         profile_.scanned_slots.fetch_add(
@@ -1142,101 +1308,178 @@ private:
         static_cast<std::int32_t>(petps::RpcStatus::kInvalidPayload);
     response.status->response_bytes = 0;
 
-    if (descriptor->shard_id != static_cast<std::uint32_t>(shard_id_)) {
-      LOG(ERROR) << "component=rdma_rc_server event=wrong_shard"
-                 << " expected_shard=" << shard_id_
-                 << " actual_shard=" << descriptor->shard_id << " slot=" << slot
-                 << " client_id=" << descriptor->client_id
-                 << " qp=" << descriptor->qp_index << " seq=" << seq << " op="
-                 << descriptor->op << " key_count=" << descriptor->key_count;
-      if (profile_enabled) {
-        profile_.wrong_shard.fetch_add(1, std::memory_order_relaxed);
-      }
+    // A handler exception must not escape this thread: std::thread's entry
+    // point terminates the process, so one malformed request would take the
+    // whole shard down. The guard sits around the dispatch rather than around
+    // the poll loop because the completion below also advances last_seq_; if
+    // the slot were left unconsumed, the next scan would find the same ready
+    // seq and throw again at polling rate.
+    auto fail_request = [&](const char* what) {
+      LOG(ERROR) << "component=rdma_rc_server event=handler_exception"
+                 << " shard=" << shard_id_ << " slot=" << slot << " client_id="
+                 << client_id << " qp=" << qp_index << " seq=" << seq
+                 << " op=" << descriptor->op << " error=\"" << what << "\"";
       response.status->status =
-          static_cast<std::int32_t>(petps::RpcStatus::kWrongShard);
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kGet)) {
-      if (GetPayloadOffloadEnabled()) {
-        const GetPayloadTask task{
-            slot,
-            client_id,
-            qp_index,
-            slot_in_qp,
-            thread_id,
-            seq,
-            *descriptor,
-            payload,
-            response,
-        };
-        if (!EnqueueGetPayloadTask(task)) {
-          return false;
-        }
-        inflight_seq_[static_cast<std::size_t>(slot)] = seq;
-        return true;
-      } else {
-        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-        const bool payload_written_direct =
-            HandleGet(*descriptor, payload, &response, thread_id, slot_in_qp);
+          static_cast<std::int32_t>(petps::RpcStatus::kInternalError);
+      response.status->response_bytes = 0;
+    };
+    try {
+      if (descriptor->shard_id != static_cast<std::uint32_t>(shard_id_)) {
+        LOG(ERROR) << "component=rdma_rc_server event=wrong_shard"
+                   << " expected_shard=" << shard_id_
+                   << " actual_shard=" << descriptor->shard_id
+                   << " slot=" << slot << " client_id=" << descriptor->client_id
+                   << " qp=" << descriptor->qp_index << " seq=" << seq << " op="
+                   << descriptor->op << " key_count=" << descriptor->key_count;
         if (profile_enabled) {
-          profile_.handled_get.fetch_add(1, std::memory_order_relaxed);
-          profile_.handle_get_ns.fetch_add(
-              NowNs() - handle_start_ns, std::memory_order_relaxed);
-          poller_profiles_.at(static_cast<std::size_t>(thread_id))
-              ->handled_get.fetch_add(1, std::memory_order_relaxed);
+          profile_.wrong_shard.fetch_add(1, std::memory_order_relaxed);
         }
-        if (payload_written_direct) {
-          CompleteResponseStatusOnlyForSlot(
+        response.status->status =
+            static_cast<std::int32_t>(petps::RpcStatus::kWrongShard);
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kGet)) {
+        if (GetPayloadOffloadEnabled()) {
+          const GetPayloadTask task{
               slot,
               client_id,
               qp_index,
               slot_in_qp,
-              response,
+              thread_id,
               seq,
-              profile_enabled);
+              transport_->ResponseEpoch(client_id, qp_index),
+              *descriptor,
+              payload,
+              response,
+          };
+          if (!EnqueueGetPayloadTask(task)) {
+            return false;
+          }
+          inflight_seq_[static_cast<std::size_t>(slot)] = seq;
           return true;
+        } else {
+          const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+          const bool payload_written_direct   = HandleGet(
+              *descriptor,
+              payload,
+              &response,
+              thread_id,
+              slot_in_qp,
+              transport_->ResponseEpoch(client_id, qp_index));
+          if (profile_enabled) {
+            profile_.handled_get.fetch_add(1, std::memory_order_relaxed);
+            profile_.handle_get_ns.fetch_add(
+                NowNs() - handle_start_ns, std::memory_order_relaxed);
+            poller_profiles_.at(static_cast<std::size_t>(thread_id))
+                ->handled_get.fetch_add(1, std::memory_order_relaxed);
+          }
+          if (payload_written_direct) {
+            CompleteResponseStatusOnlyForSlot(
+                slot,
+                client_id,
+                qp_index,
+                slot_in_qp,
+                response,
+                seq,
+                profile_enabled);
+            return true;
+          }
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kPut)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandlePut(*descriptor, payload, &response, thread_id);
+        if (profile_enabled) {
+          profile_.handled_put.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_put_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kUpdate)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandleUpdate(*descriptor, payload, &response, thread_id);
+        if (profile_enabled) {
+          profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_update_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kUpdateFlat)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandleUpdateFlat(*descriptor, payload, &response, thread_id);
+        if (profile_enabled) {
+          profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_update_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
+        }
+      } else if (descriptor->op ==
+                 static_cast<std::uint16_t>(petps::RcOp::kInitTable)) {
+        const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
+        HandleInitTable(*descriptor, payload, &response);
+        if (profile_enabled) {
+          profile_.handled_init.fetch_add(1, std::memory_order_relaxed);
+          profile_.handle_init_ns.fetch_add(
+              NowNs() - handle_start_ns, std::memory_order_relaxed);
         }
       }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kPut)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandlePut(*descriptor, payload, &response, thread_id);
-      if (profile_enabled) {
-        profile_.handled_put.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_put_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kUpdate)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandleUpdate(*descriptor, payload, &response, thread_id);
-      if (profile_enabled) {
-        profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_update_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kUpdateFlat)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandleUpdateFlat(*descriptor, payload, &response, thread_id);
-      if (profile_enabled) {
-        profile_.handled_update.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_update_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
-    } else if (descriptor->op ==
-               static_cast<std::uint16_t>(petps::RcOp::kInitTable)) {
-      const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;
-      HandleInitTable(*descriptor, payload, &response);
-      if (profile_enabled) {
-        profile_.handled_init.fetch_add(1, std::memory_order_relaxed);
-        profile_.handle_init_ns.fetch_add(
-            NowNs() - handle_start_ns, std::memory_order_relaxed);
-      }
+    } catch (const std::exception& error) {
+      fail_request(error.what());
+    } catch (...) {
+      fail_request("unknown exception");
     }
 
     CompleteResponseForSlot(
         slot, client_id, qp_index, slot_in_qp, response, seq, profile_enabled);
     return true;
+  }
+
+  // Throttled check for clients that rebuilt their lane QP. Runs on the polling
+  // thread that owns the lanes, so it serializes with response writes without a
+  // lock; disabled (and free) unless --rdma_lane_rebuild_enabled.
+  void MaybePollClientRebuilds(int thread_id) {
+    if (!FLAGS_rdma_lane_rebuild_enabled) {
+      return;
+    }
+    const std::uint64_t now = NowNs();
+    std::uint64_t& next =
+        next_rebuild_check_ns_.at(static_cast<std::size_t>(thread_id));
+    if (now < next) {
+      return;
+    }
+    const int base_ms  = std::max(1, FLAGS_rdma_lane_rebuild_poll_ms);
+    const int max_ms   = std::max(base_ms, FLAGS_rdma_lane_rebuild_poll_max_ms);
+    const int qp_count = transport_->config().qps_per_client_per_shard;
+    int rebuilt_total  = 0;
+    for (int qp_index = thread_id; qp_index < qp_count;
+         qp_index += thread_count_) {
+      try {
+        const int rebuilt = transport_->PollClientRebuildRequests(qp_index);
+        if (rebuilt > 0) {
+          LOG(WARNING)
+              << "component=rdma_rc_server event=client_lane_rebuild_applied"
+              << " shard=" << shard_id_ << " qp=" << qp_index
+              << " count=" << rebuilt;
+        }
+        rebuilt_total += rebuilt;
+      } catch (const std::exception& error) {
+        LOG(WARNING)
+            << "component=rdma_rc_server event=client_lane_rebuild_error"
+            << " shard=" << shard_id_ << " qp=" << qp_index << " error=\""
+            << error.what() << "\"";
+      }
+    }
+    // Each quiet round doubles the next interval: an idle deployment should not
+    // pay one GetMeta per client-lane every 50ms. A rebuild resets the backoff
+    // so the next attempt is caught at the base interval.
+    int& backoff_ms =
+        rebuild_poll_backoff_ms_.at(static_cast<std::size_t>(thread_id));
+    if (rebuilt_total > 0) {
+      backoff_ms = 0;
+    } else {
+      const int current = backoff_ms > 0 ? backoff_ms : base_ms;
+      backoff_ms        = std::min(max_ms, current * 2);
+    }
+    const int next_ms = backoff_ms > 0 ? backoff_ms : base_ms;
+    next              = now + static_cast<std::uint64_t>(next_ms) * 1000000ULL;
   }
 
   void ScanAssignedSlots(
@@ -1271,7 +1514,7 @@ private:
       int thread_id,
       int worker_id,
       int worker_count) {
-    while (true) {
+    while (!stop_requested_.load(std::memory_order_relaxed)) {
       const bool profile_enabled        = FLAGS_rdma_rc_profile_interval_ms > 0;
       const std::uint64_t poll_start_ns = profile_enabled ? NowNs() : 0;
       std::uint64_t scanned_slots       = 0;
@@ -1285,6 +1528,7 @@ private:
           &scanned_slots,
           &ready_slots);
       DrainGetPayloadCompletions(thread_id, profile_enabled);
+      MaybePollClientRebuilds(thread_id);
       if (profile_enabled) {
         profile_.scan_rounds.fetch_add(1, std::memory_order_relaxed);
         profile_.scanned_slots.fetch_add(
@@ -1321,7 +1565,7 @@ private:
                 sink, thread_id, coroutine_id, coroutines_per_thread);
           }));
     }
-    while (true) {
+    while (!stop_requested_.load(std::memory_order_relaxed)) {
       for (auto& coroutine : coroutines) {
         (*coroutine)();
       }
@@ -1339,17 +1583,25 @@ private:
   std::unique_ptr<petps::RcShardServerTransport> transport_;
   petps::RdmaControlPlaneClient control_plane_client_;
   std::vector<std::thread> threads_;
+  std::thread heartbeat_thread_;
   std::vector<std::uint64_t> last_seq_;
   std::vector<std::uint64_t> inflight_seq_;
   std::vector<std::unique_ptr<PollerProfile>> poller_profiles_;
   int get_payload_worker_count_ = 0;
   std::vector<std::thread> get_payload_workers_;
+  std::vector<std::uint64_t> next_rebuild_check_ns_;
+  std::vector<int> rebuild_poll_backoff_ms_;
   std::mutex get_payload_mu_;
   std::condition_variable get_payload_cv_;
   std::deque<GetPayloadTask> get_payload_tasks_;
   std::vector<std::deque<GetPayloadCompletion>> get_payload_completions_;
   std::atomic<int> started_threads_{0};
   std::atomic<bool> ready_published_{false};
+  std::atomic<bool> stop_requested_{false};
+  // Rebuild-fence observability: completions dropped because the response epoch
+  // changed, and the next periodic fence-stats report deadline.
+  std::atomic<std::uint64_t> payload_completion_dropped_stale_{0};
+  std::atomic<std::uint64_t> next_fence_report_ns_{0};
   ProfileCounters profile_;
 };
 
@@ -1421,6 +1673,18 @@ int main(int argc, char* argv[]) {
       deployment.configuration_digest,
       deployment.fabric_digest,
       deployment.num_shards};
+  control_plane_endpoint.health_stale_ms =
+      std::max(1, FLAGS_rdma_health_stale_ms);
+  control_plane_endpoint.health_dead_ms = std::max(
+      control_plane_endpoint.health_stale_ms + 1, FLAGS_rdma_health_dead_ms);
+  if (FLAGS_rdma_heartbeat_interval_ms >=
+      control_plane_endpoint.health_stale_ms) {
+    LOG(WARNING) << "component=rdma_control_plane"
+                 << " event=heartbeat_interval_not_below_stale"
+                 << " heartbeat_interval_ms="
+                 << FLAGS_rdma_heartbeat_interval_ms << " health_stale_ms="
+                 << control_plane_endpoint.health_stale_ms;
+  }
   if (FLAGS_global_id == 0) {
     control_plane_server =
         std::make_unique<petps::RdmaControlPlaneServer>(control_plane_endpoint);
@@ -1444,7 +1708,11 @@ int main(int argc, char* argv[]) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
   LOG(INFO) << "component=petps_server event=shutdown";
-  // ponytail: process exit; PetPSServer's joinable poll threads would
-  // std::terminate in ~vector<thread>. Upgrade: PetPSServer::Stop()+join.
+  ps->Stop();
+  if (control_plane_server != nullptr) {
+    control_plane_server->Stop();
+  }
+  // Threads are joined; the process still exits without the global teardown,
+  // which would unmap the multi-GB slab for no one.
   std::_Exit(0);
 }

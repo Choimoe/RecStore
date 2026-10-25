@@ -1,14 +1,17 @@
 #include "ps/rdma/rc_transport.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include <folly/portability/GFlags.h>
 
+#include "base/log.h"
 #include "ps/rdma/control_plane.h"
 #include "ps/rdma/rdma_common.h"
 #include "ps/rdma/rc_options.h"
@@ -296,7 +299,7 @@ void WaitForTrackedCompletion(
   while (true) {
     RawVerbsCompletion completion;
     if (!verbs->Poll(&completion, FLAGS_rdma_wait_timeout_ms)) {
-      throw std::runtime_error(
+      throw RcTrackedCompletionTimeout(
           "RC verbs write completion timeout " + context + " expected_wr_id=" +
           std::to_string(MakeTrackedWrId(kind, slot_ordinal)));
     }
@@ -457,18 +460,19 @@ RcShardClientTransport::RcShardClientTransport(const RcTransportConfig& config)
     Lane lane;
     const int raw_lane =
         RawLaneForLogicalClient(config_, config_.client_id, qp);
-    const std::size_t local_bytes =
-        static_cast<std::size_t>(config_.num_servers) *
-        static_cast<std::size_t>(RawLanesPerOsClient(config_)) *
-        ClientLaneBytes(config_);
-    RawVerbsConfig raw =
-        MakeRawConfig(config_, raw_lane, local_bytes, true, server_node_id_);
-    raw.reserved_region_offset = ClientShardLaneOffset(config_, raw_lane);
+    // Each lane owns only its own slot slice; peers keep addressing it with
+    // global offsets, which region_origin_offset maps back into the slice.
+    const std::uint64_t lane_origin = ClientShardLaneOffset(config_, raw_lane);
+    RawVerbsConfig raw              = MakeRawConfig(
+        config_, raw_lane, ClientLaneBytes(config_), true, server_node_id_);
+    raw.region_origin_offset = lane_origin;
+    // The whole slice is reserved for slots; nothing is bump-allocated here.
+    raw.reserved_region_offset = 0;
     raw.reserved_region_bytes  = ClientLaneBytes(config_);
     lane.verbs                 = std::make_unique<RawVerbsTransport>(raw);
     lane.lane_base             = lane.verbs->LocalPointer(GlobalAddress{
         static_cast<std::uint16_t>(config_.node_id),
-        static_cast<std::uint64_t>(ClientShardLaneOffset(config_, raw_lane)),
+        lane_origin,
     });
     std::memset(lane.lane_base, 0, ClientLaneBytes(config_));
     lane.submit_completion_pending.assign(
@@ -478,6 +482,13 @@ RcShardClientTransport::RcShardClientTransport(const RcTransportConfig& config)
     lane.verbs->PublishAndConnect();
     lanes_.push_back(std::move(lane));
   }
+  // Each lane registers only its own slot slice, so the total is
+  // lanes * ClientLaneBytes regardless of the shard count.
+  LOG(INFO) << "component=rdma_verbs event=client_region_lanes"
+            << " shard=" << server_node_id_
+            << " client_id=" << config_.client_id << " lanes=" << lanes_.size()
+            << " lane_bytes=" << ClientLaneBytes(config_)
+            << " total_bytes=" << lanes_.size() * ClientLaneBytes(config_);
 }
 
 RcShardClientTransport::~RcShardClientTransport() {
@@ -645,6 +656,123 @@ void RcShardClientTransport::ClearRequestSlot(const RcClientQpView& view) {
   commit->state.store(0, std::memory_order_release);
 }
 
+bool RcShardClientTransport::HarvestLaneCompletion(
+    int qp_index, RawVerbsCompletionError* error) {
+  Lane& lane = LaneAt(qp_index);
+  // Drain up to one poll batch so a busy lane does not delay a completion error
+  // behind a queue of parked successes.
+  for (int drained = 0; drained < kRawVerbsPollBatchSize; ++drained) {
+    RawVerbsCompletion completion;
+    const RawVerbsPollOutcome outcome = lane.verbs->TryPoll(&completion, error);
+    if (outcome == RawVerbsPollOutcome::kEmpty) {
+      return false;
+    }
+    if (outcome == RawVerbsPollOutcome::kError) {
+      return true;
+    }
+    const bool is_recv = completion.opcode == IBV_WC_RECV ||
+                         completion.opcode == IBV_WC_RECV_RDMA_WITH_IMM;
+    const std::uint64_t kind_bits = completion.wr_id >> 32;
+    const std::uint32_t slot_ordinal =
+        static_cast<std::uint32_t>(completion.wr_id);
+    if (!is_recv &&
+        kind_bits == static_cast<std::uint64_t>(TrackedWrKind::kSubmitCommit) &&
+        slot_ordinal < lane.submit_completion_ready.size()) {
+      // Park the completion for the next drain of that slot, do not lose it.
+      lane.submit_completion_ready[slot_ordinal] = 1;
+      continue;
+    }
+    if (!is_recv) {
+      LOG(WARNING) << "component=rdma_rc_client event=unexpected_completion"
+                   << " shard=" << config_.shard_id << " qp=" << qp_index
+                   << " wr_id=" << completion.wr_id;
+    }
+  }
+  return false;
+}
+
+bool RcShardClientTransport::RebuildLane(int qp_index) {
+  if (config_.num_os_clients != 1) {
+    // The server multiplexes every OS client QP of this lane onto one CQ, so it
+    // cannot reset/drain it safely. Refuse the rebuild and keep the lane
+    // terminally dirty rather than desynchronizing the two ends.
+    VLOG(1) << "component=rdma_rc_client event=lane_rebuild_skipped"
+            << " shard=" << config_.shard_id << " qp=" << qp_index
+            << " reason=shared_server_cq";
+    return false;
+  }
+  Lane& lane             = LaneAt(qp_index);
+  const auto server_node = static_cast<std::uint16_t>(server_node_id_);
+  // Re-read the peer's current addressing first: if the shard process
+  // restarted, its QP number / rkey / base changed, and re-pointing at the
+  // stale meta would leave the lane just as broken. Its generation is our ack
+  // baseline: the two sides count rebuilds independently, so an ack is "the
+  // peer rebuilt at least once since we took this snapshot", not "the peer
+  // caught up to our counter".
+  const std::uint64_t server_baseline =
+      lane.verbs
+          ->RefreshPeerMeta(
+              server_node, std::max(1, FLAGS_rdma_lane_rebuild_wait_ms))
+          .lane_generation;
+  // Bring both ends down before any new traffic: reset our QP, then publish a
+  // bumped generation so the server knows to rebuild its side too.
+  lane.verbs->RebuildQp(server_node);
+  // The rebuild drained the CQ and reset the QP, so no submit completion can
+  // still be parked for this lane; drop the stale bookkeeping.
+  std::fill(lane.submit_completion_pending.begin(),
+            lane.submit_completion_pending.end(),
+            std::uint8_t{0});
+  std::fill(lane.submit_completion_ready.begin(),
+            lane.submit_completion_ready.end(),
+            std::uint8_t{0});
+  // Response status/payload from the dead generation must not look done.
+  std::memset(lane.lane_base, 0, ClientLaneBytes(config_));
+  lane.generation = lane.verbs->AdvanceLaneGeneration(server_node);
+
+  const int wait_ms = std::max(0, FLAGS_rdma_lane_rebuild_wait_ms);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+  while (true) {
+    const auto remaining_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now())
+            .count();
+    if (remaining_ms <= 0) {
+      break;
+    }
+    try {
+      // The server republishes once it has rebuilt, so an ack is "the peer
+      // rebuilt after our baseline snapshot". Keep the RPC inside the handshake
+      // budget: the default control-plane deadline is much longer than
+      // --rdma_lane_rebuild_wait_ms.
+      const RawVerbsNodeMeta meta = lane.verbs->RefreshPeerMeta(
+          server_node, static_cast<int>(remaining_ms));
+      if (meta.lane_generation > server_baseline) {
+        LOG(WARNING) << "component=rdma_rc_client event=lane_rebuilt"
+                     << " shard=" << config_.shard_id << " qp=" << qp_index
+                     << " generation=" << lane.generation;
+        return true;
+      }
+    } catch (const std::exception& error) {
+      VLOG(1) << "component=rdma_rc_client event=lane_rebuild_ack_pending"
+              << " shard=" << config_.shard_id << " qp=" << qp_index
+              << " error=\"" << error.what() << "\"";
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  LOG(WARNING) << "component=rdma_rc_client event=lane_rebuild_timeout"
+               << " shard=" << config_.shard_id << " qp=" << qp_index
+               << " generation=" << lane.generation << " wait_ms=" << wait_ms;
+  return false;
+}
+
+std::uint64_t RcShardClientTransport::LaneGeneration(int qp_index) const {
+  return LaneAt(qp_index).generation;
+}
+
 RcShardServerTransport::RcShardServerTransport(const RcTransportConfig& config)
     : config_(config) {
   ValidateTransportConfig(config_);
@@ -654,10 +782,12 @@ RcShardServerTransport::RcShardServerTransport(const RcTransportConfig& config)
   if (config_.slots_per_qp <= 0) {
     throw std::runtime_error("slots_per_qp must be positive");
   }
-  lanes_.reserve(static_cast<std::size_t>(config_.qps_per_client_per_shard));
   const int raw_lane_count = RawLanesPerOsClient(config_);
+  // Lane owns a mutex and an atomic epoch, so it is neither copyable nor
+  // movable; build the vector directly instead of growing it in place.
+  lanes_ = std::vector<Lane>(static_cast<std::size_t>(raw_lane_count));
   for (int raw_lane = 0; raw_lane < raw_lane_count; ++raw_lane) {
-    Lane lane;
+    Lane& lane               = lanes_[static_cast<std::size_t>(raw_lane)];
     const int response_slots = config_.num_clients * config_.slots_per_qp;
     const std::size_t local_bytes =
         ServerLaneBytes(config_) +
@@ -672,6 +802,8 @@ RcShardServerTransport::RcShardServerTransport(const RcTransportConfig& config)
         static_cast<std::size_t>(response_slots), 0);
     lane.response_completion_ready.assign(
         static_cast<std::size_t>(response_slots), 0);
+    lane.observed_client_generation.assign(
+        static_cast<std::size_t>(config_.num_clients), 0);
     for (int slot = 0; slot < response_slots; ++slot) {
       void* response_slot =
           lane.verbs->AllocateRegistered(config_.response_slot_bytes);
@@ -679,7 +811,6 @@ RcShardServerTransport::RcShardServerTransport(const RcTransportConfig& config)
       lane.response_staging.push_back(response_slot);
     }
     lane.verbs->PublishAndConnect();
-    lanes_.push_back(std::move(lane));
   }
 }
 
@@ -908,10 +1039,17 @@ void RcShardServerTransport::CompleteResponse(
   }
 }
 
+std::uint64_t
+RcShardServerTransport::ResponseEpoch(int client_id, int qp_index) const {
+  return LaneAt(client_id, qp_index)
+      .response_epoch.load(std::memory_order_acquire);
+}
+
 void RcShardServerTransport::WriteResponsePayloadSg(
     int client_id,
     int qp_index,
     int slot_in_qp,
+    std::uint64_t expected_epoch,
     base::ConstArray<RawVerbsSge> sges,
     std::uint64_t response_offset,
     std::uint64_t bytes) {
@@ -924,15 +1062,25 @@ void RcShardServerTransport::WriteResponsePayloadSg(
   const int raw_lane = RawLaneForLogicalClient(config_, client_id, qp_index);
   const int client_node_id =
       config_.num_servers + OsClientIndexForLogicalClient(config_, client_id);
-  lane.verbs->WriteSg(
-      sges,
-      GlobalAddress{
-          static_cast<std::uint16_t>(client_node_id),
-          ClientResponseOffsetForRawLane(config_, raw_lane, slot_in_qp) +
-              response_offset,
-      },
-      /*wr_id=*/0,
-      false);
+  {
+    const std::lock_guard<std::mutex> guard(lane.rebuild_mu);
+    if (lane.response_epoch.load(std::memory_order_acquire) != expected_epoch) {
+      response_rejected_epoch_count_.fetch_add(1, std::memory_order_relaxed);
+      throw RcLaneRebuiltDuringResponse(
+          "lane rebuilt while the response payload was in flight: shard=" +
+          std::to_string(config_.shard_id) + " client_id=" +
+          std::to_string(client_id) + " qp=" + std::to_string(qp_index));
+    }
+    lane.verbs->WriteSg(
+        sges,
+        GlobalAddress{
+            static_cast<std::uint16_t>(client_node_id),
+            ClientResponseOffsetForRawLane(config_, raw_lane, slot_in_qp) +
+                response_offset,
+        },
+        /*wr_id=*/0,
+        false);
+  }
   if (FLAGS_rdma_rc_profile_interval_ms > 0) {
     auto& profile = TransportProfile();
     profile.response_payload_sg_write_count.fetch_add(
@@ -1002,6 +1150,79 @@ void RcShardServerTransport::CompleteResponseStatusOnly(
         NowNs() - start_ns, std::memory_order_relaxed);
     MaybeReportTransportProfile(config_, "server");
   }
+}
+
+bool RcShardServerTransport::RebuildClientLaneIfStale(
+    int client_id, int qp_index) {
+  if (config_.num_os_clients != 1) {
+    // One lane CQ multiplexes every OS client QP, so a reset here cannot be
+    // fenced by draining the CQ (it would discard the other clients'
+    // completions). Keep the lane as-is; the client refuses the same case.
+    return false;
+  }
+  Lane& lane = LaneAt(client_id, qp_index);
+  const int client_node_id =
+      config_.num_servers + OsClientIndexForLogicalClient(config_, client_id);
+  RawVerbsNodeMeta meta;
+  try {
+    // Don't inherit the 30s control-plane deadline: this runs on a data-plane
+    // polling thread, and a sick control plane must not stall request service.
+    meta = lane.verbs->RefreshPeerMeta(
+        static_cast<std::uint16_t>(client_node_id),
+        std::max(1, FLAGS_rdma_lane_rebuild_poll_timeout_ms));
+  } catch (const std::exception&) {
+    return false;
+  }
+  std::uint64_t& observed =
+      lane.observed_client_generation[static_cast<std::size_t>(client_id)];
+  if (meta.lane_generation == observed) {
+    return false;
+  }
+  // The CQ is exclusive to this QP (checked above), so the reset's flush
+  // completions can be drained. The response flags are cleared before any new
+  // response is posted, so a stale completion cannot be matched to a fresh one.
+  //
+  // Payload offload posts from the get-payload worker threads are fenced by
+  // rebuild_mu: a post either finishes before the reset (and is flushed with
+  // the rest of the old generation) or observes the bumped response_epoch and
+  // refuses. Without the fence a worker can land payload rows in the client's
+  // new-generation slot while the status word already reports kOk.
+  {
+    const std::lock_guard<std::mutex> guard(lane.rebuild_mu);
+    lane.response_epoch.fetch_add(1, std::memory_order_acq_rel);
+    lane.verbs->RebuildQp(static_cast<std::uint16_t>(client_node_id));
+    for (int slot_in_qp = 0; slot_in_qp < config_.slots_per_qp; ++slot_in_qp) {
+      const std::size_t ordinal = static_cast<std::size_t>(
+          ResponseSlotOrdinal(config_, client_id, slot_in_qp));
+      lane.response_completion_pending[ordinal] = 0;
+      lane.response_completion_ready[ordinal]   = 0;
+    }
+  }
+  observed                        = meta.lane_generation;
+  const std::uint16_t client_node = static_cast<std::uint16_t>(client_node_id);
+  const std::uint64_t next_generation =
+      lane.verbs->AdvanceLaneGeneration(client_node);
+  LOG(WARNING) << "component=rdma_rc_server event=lane_rebuilt"
+               << " shard=" << config_.shard_id << " client_id=" << client_id
+               << " qp=" << qp_index << " generation=" << next_generation;
+  return true;
+}
+
+int RcShardServerTransport::PollClientRebuildRequests(int qp_index) {
+  if (qp_index < 0 || qp_index >= config_.qps_per_client_per_shard) {
+    throw std::runtime_error("qp_index out of range");
+  }
+  const int clients_per_process = LogicalClientsPerProcess(config_);
+  int rebuilt                   = 0;
+  for (int os_client = 0; os_client < config_.num_os_clients; ++os_client) {
+    for (int local = 0; local < clients_per_process; ++local) {
+      const int client_id = os_client * clients_per_process + local;
+      if (RebuildClientLaneIfStale(client_id, qp_index)) {
+        ++rebuilt;
+      }
+    }
+  }
+  return rebuilt;
 }
 
 } // namespace petps

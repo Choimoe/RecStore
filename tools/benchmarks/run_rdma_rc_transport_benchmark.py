@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -136,7 +137,6 @@ def print_aggregate_table(rows):
 def build_benchmark_cmd(args):
     cmd = [
         args.benchmark_binary,
-        f"--config_path={args.config_path}",
         f"--num_shards={args.server_count}",
         f"--iterations={args.iterations}",
         f"--rounds={args.rounds}",
@@ -428,6 +428,7 @@ def main():
             "get",
             "async_get",
             "async_stream",
+            "adapter_get",
             "mixed",
         ],
         default="all",
@@ -446,6 +447,29 @@ def main():
     parser.add_argument("--rdma-namespace", default="auto")
     parser.add_argument("--rdma-control-plane-host", default="127.0.0.1")
     parser.add_argument("--rdma-control-plane-port", type=int)
+    parser.add_argument(
+        "--client-ssh",
+        default="",
+        help=(
+            "run the client on this SSH target (user@host) instead of locally; "
+            "sshpass must be available and SSHPASS set in the environment"
+        ),
+    )
+    parser.add_argument(
+        "--client-ssh-port",
+        type=int,
+        default=22222,
+        help="SSH port for --client-ssh",
+    )
+    parser.add_argument(
+        "--runtime-dir",
+        help=(
+            "directory for the materialized RDMA config; required to be "
+            "readable by every host when --client-ssh is used. Defaults to a "
+            "temporary directory locally, or <repo>/.cross-run with "
+            "--client-ssh"
+        ),
+    )
     parser.add_argument(
         "--qps-per-client-per-shard",
         "--rdma-rc-qps-per-client-per-shard",
@@ -583,7 +607,16 @@ def main():
         else max(1, args.batch_keys)
     )
 
-    with tempfile.TemporaryDirectory(prefix="recstore_rdma_rc_benchmark_") as tmpdir:
+    if args.client_ssh:
+        runtime_dir = Path(args.runtime_dir) if args.runtime_dir else REPO_ROOT / ".cross-run"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        runtime_context = contextlib.nullcontext(str(runtime_dir))
+    else:
+        runtime_context = tempfile.TemporaryDirectory(
+            prefix="recstore_rdma_rc_benchmark_"
+        )
+
+    with runtime_context as tmpdir:
         config_path = write_runtime_config(args, source_config_path, tmpdir)
         args.config_path = config_path
         runner = PetPSClusterRunner(
@@ -615,6 +648,8 @@ def main():
             rdma_client_bind_core_stride=args.client_bind_core_stride,
             rdma_fake_get_mode=args.fake_get_mode,
             rdma_skip_client_copy=args.skip_client_copy,
+            client_ssh=args.client_ssh or None,
+            client_ssh_port=args.client_ssh_port,
         )
 
         summary_rows = []

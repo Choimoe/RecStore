@@ -4,33 +4,67 @@ Extracted from controller.py.  The overlap barrier (_wait_pending_sync_now)
 is tightly coupled to update_grads because it waits for the async all_reduce
 launched in the previous step's update_grads call.
 
-协议（P0b 重构后, now/later 已合并）:
+Protocol (aligned with the official BagPipe: the PS receives ZERO per-step
+traffic; persistence rides on the dirty flag and the eviction writeback):
 
-- local-only id:  立即 best-effort 原位 SGD 落本地 cache（无 Query、无同步、
-                   缺 key 静默跳过），PS 持久化走 dirty 标记 + eviction 写回。
-                   **前提是该 id 确实不会被其它 rank 触碰**：只有 oracle
-                   预扫描 (_shared_ids_complete) 能证明这一点，因此回退集
-                   之外的 id 不算 local-only。
-- shared id:      本地不 apply（避免本地梯度与聚合梯度双重计入）；梯度进
-                   单次 dense all_reduce（侧流发射，与主流计算重叠），
-                   **所有 rank** 在下一步 prefill 的 barrier 处用聚合梯度
-                   best-effort 原位落 cache。副本收敛 =
-                   同一 PS 初值 + 同一聚合增量序列。rank0 推 PS 降级为
-                   持久化（深度-1 异步流水线），不在一致性关键路径上。
-- unknown id:     集合不完整时，不在已知共享集里的 id 归属未知：走 sparse
-                   all_gather 聚合（与 shared 同一 barrier 消费），既不本地
-                   apply 也不标 dirty —— 否则各 rank 独立 apply 自己的梯度、
-                   再在 eviction 值写回时互相覆盖（last-writer-wins 丢增量，
-                   副本永久分叉）。
-- 失效:           每步不再失效共享 id（原实现 rank≠0 每步 invalidate ~3.6K
-                   热门共享 id，是 embed_lookup 41ms 的主因）。barrier 先于
-                   prefill 执行，填充读到的已是推送后的 PS 值；残余的 RDMA
-                   服务端排序竞态由反熵兜底（_anti_entropy_maybe：每
-                   _anti_entropy_interval 步随机失效少量共享缓存 id 强制重拉）。
+- local-only id:  immediate best-effort in-place SGD on the local cache (no
+                   Query, no synchronization, missing keys silently skipped);
+                   PS persistence goes through the dirty flag + the eviction
+                   value writeback.  **This requires the id to be provably
+                   untouched by other ranks**: only the oracle prescan
+                   (_shared_ids_complete) can prove that, so with the
+                   fallback (incomplete) set such ids are NOT local-only.
+- shared id:      not applied locally (that would double-count the local
+                   gradient against the aggregated one); the gradient goes
+                   through the aggregation path (issued on a side stream,
+                   overlapping main-stream compute), and **every rank**
+                   applies the aggregated gradient best-effort in place at
+                   the next prefill barrier and marks the row dirty.  Replica
+                   convergence = same PS initial value + same sequence of
+                   aggregated increments.  The aggregation path routes on the
+                   shared-set size (a rank-consistent decision): a small set
+                   (<= _dense_shared_max_rows) uses a dense all_reduce over
+                   the whole shared-set buffer; a large one folds into the
+                   sparse all_gather, communicating only the ids that
+                   actually appear this step.  With oracle prescan metadata
+                   (_prescan_sparse_max) the sparse path is sized ahead of
+                   time, so it needs neither the count all_gather nor the
+                   .item() readback (see _all_gather_sparse_prescan_async).
+- unknown id:     while the set is incomplete, ids outside the known shared
+                   set have unknown ownership: they go through the sparse
+                   all_gather (consumed at the same barrier as shared) and
+                   are neither applied locally nor marked dirty per-rank --
+                   otherwise each rank would apply its own gradient and the
+                   eviction writebacks would overwrite each other
+                   (last-writer-wins drops increments, replicas fork
+                   permanently).
+- persistence:    the dirty flag is the single source of truth for
+                   "local value != PS value".  It is set by the local-only
+                   apply AND by the aggregated apply (a shared row's local
+                   value advanced without anyone telling the PS), and it is
+                   cleared exactly when the value reaches the PS: the
+                   eviction writeback or the shutdown flush.  Eviction may
+                   write the same shared row from several ranks; that is
+                   safe because every replica applied the same aggregate
+                   sequence and the per-step prefill barrier bounds the
+                   inter-rank skew to ~1 step of increments (a rank cannot
+                   pass step t+1's barrier until every rank issued step t's
+                   collectives).
+- invalidation:   shared ids are no longer invalidated per step (the old
+                   implementation invalidated ~3.6K hot shared ids per step
+                   on rank!=0, the main cause of the 41ms embed_lookup).  The
+                   barrier runs before prefill, so fills read rows that the
+                   aggregated apply has already refreshed in place; the
+                   anti-entropy sampler that used to guard the fill-vs-push
+                   RDMA ordering race is gone together with the per-step
+                   push -- with a potentially stale PS, invalidate+refetch
+                   would REGRESS a replica by the whole unpersisted delta
+                   history instead of repairing it.
 
-旧的 all-or-nothing apply_sgd_update_gpu_cache（内部 Query 强制
-cudaStreamSynchronize + 全 rank 成功投票 all_reduce）连同 fallback 路径一并
-移除：best-effort op 永不失败，缺失的 key 下一步 prefill 自然补齐。
+The old all-or-nothing apply_sgd_update_gpu_cache (internal Query forcing a
+cudaStreamSynchronize + an all-rank success vote) was removed along with its
+fallback path: the best-effort op never fails, and missing keys are simply
+refilled by the next prefill.
 """
 
 from __future__ import annotations
@@ -52,13 +86,13 @@ class BagPipeGradMixin:
         - self.device, self.kv_client, self.master_table_name, self.lr
         - self._latest_dev, self._ttl_dev, self._cached_dev, self._dirty_dev
         - self._to_compact(), _to_fused(), _compact_in_range()
-        - self._sync_later_stream, self._pending_ps_push_handle
+        - self._sync_later_stream
         - self._pending_sync_now_work, self._pending_sync_now_lr
-        - self._anti_entropy_step, _anti_entropy_interval, _anti_entropy_ids
         - self._shared_ids, self._shared_ids_tensor, self._shared_ids_complete,
-          self._stats
+          self._global_unique_count, self._dense_shared_max_rows, self._stats
+        - self._prescan_sparse_max (list[int] or None), _prescan_batch_numels
         - self._dense_all_reduce_async(), _all_gather_sparse_async(),
-          _record_shared_id_candidates()
+          _all_gather_sparse_prescan_async(), _record_shared_id_candidates()
         - self._hot_add(), self._is_distributed(), _get_rank()
     """
 
@@ -71,10 +105,12 @@ class BagPipeGradMixin:
         """All ranks: apply aggregated shared-ID gradients to the local cache.
 
         The replicas converge because every rank starts from the same PS value
-        and applies the same sequence of aggregated increments.  rank0 also
-        pushes the aggregate to the PS, but only as persistence — no rank
-        invalidates on this path.  持久化推送走深度-1 异步流水线 (等上一条
-        完成再发下一条, 保 PS 侧顺序), 不在一致性关键路径上同步等待。
+        and applies the same sequence of aggregated increments.  There is no
+        per-step PS push (official BagPipe semantics): the applied rows are
+        marked dirty instead, and the PS receives the values through the
+        eviction writeback / shutdown flush.  Only rows the residency mirror
+        believes resident are marked -- the best-effort apply silently skips
+        the rest, and a skipped row holds no unpersisted local delta.
         """
         agg_ids = agg_ids.to(self.device, dtype=torch.int64)
         agg_grads = agg_grads.to(self.device, dtype=torch.float32)
@@ -95,69 +131,15 @@ class BagPipeGradMixin:
         except Exception as exc:
             logger.warning("[BagPipe] aggregated best-effort apply failed: %s", exc)
 
-        if not self._is_distributed() or self._get_rank() == 0:
-            prev = getattr(self, "_pending_ps_push_handle", None)
-            if prev is not None:
-                try:
-                    self.kv_client.wait(prev)
-                except Exception as exc:
-                    logger.warning("[BagPipe] previous PS push wait failed: %s", exc)
-            try:
-                self._pending_ps_push_handle = self.kv_client.update_async(
-                    self.master_table_name, agg_ids, agg_grads
-                )
-            except Exception as exc:
-                self._pending_ps_push_handle = None
-                logger.warning("[BagPipe] aggregated PS push failed: %s", exc)
-
-    # ------------------------------------------------------------------
-    #  Anti-entropy backstop
-    # ------------------------------------------------------------------
-
-    def _anti_entropy_maybe(self) -> None:
-        """Every _anti_entropy_interval steps, invalidate a small random sample
-        of cached shared IDs so any replica that diverged through the
-        fill-vs-push RDMA ordering race is forced to refetch from the PS.
-
-        Expected divergence lifetime is bounded by interval * (shared / sample)
-        steps; cost is a few hundred invalidations + refetches per interval,
-        amortized to ~nothing per step.
-        """
-        self._anti_entropy_step += 1
-        if self._anti_entropy_step % self._anti_entropy_interval != 0:
-            return
-        shared_t = self._shared_ids_tensor
-        if shared_t is None or shared_t.numel() == 0:
-            return
-        # 从 shared 集随机采样并过滤出已驻留的 (向量化; 簿记是 compact 索引)
-        k = min(self._anti_entropy_ids, int(shared_t.numel()))
-        perm = torch.randperm(
-            int(shared_t.numel()), device=shared_t.device
-        )[: k * 4]
-        cand = shared_t[perm]
-        cand_compact = self._compact_in_range(self._to_compact(cand))
-        cand_compact = cand_compact[self._cached_dev[cand_compact]]
-        if cand_compact.numel() == 0:
-            return
-        sample = cand_compact[:k].contiguous()
-        invalidator = getattr(
-            self.kv_client, "invalidate_gpu_cache_with_mask", None
-        )
-        if not callable(invalidator):
-            raise RuntimeError(
-                "BagPipe requires invalidate_gpu_cache_with_mask to keep its "
-                "residency mirror authoritative"
-            )
-        removed = invalidator(self.master_table_name, self._to_fused(sample))
-        # Same reconciliation as the eviction path: a sampled row the cache no
-        # longer holds has to leave the mirror too, or the mirror keeps
-        # advertising it as resident.
-        self._stats["bagpipe_anti_entropy_ids"] += float(
-            int(removed.sum().item())
-        )
-        self._cached_dev[sample] = False
-        self._dirty_dev[sample] = False
-        self._ttl_dev[sample] = 0
+        # The local value just advanced past the PS: dirty is what the
+        # eviction writeback and the shutdown flush key on.  Mirror-resident
+        # rows only -- see the docstring.
+        agg_compact = self._compact_in_range(self._to_compact(agg_ids))
+        resident = agg_compact[self._cached_dev[agg_compact]]
+        self._dirty_dev[resident] = True
+        record_dirty = getattr(self, "_record_dirty_marks", None)
+        if callable(record_dirty):
+            record_dirty(int(resident.numel()))
 
     # ------------------------------------------------------------------
     #  Overlap barrier (aggregated all_reduce of the previous step)
@@ -169,11 +151,10 @@ class BagPipeGradMixin:
         Consumed at the top of prefill_cache, before the forward lookup: the
         aggregated shared-ID gradients are applied in place on every rank, so
         the entries stay cached and valid — no invalidation, no refetch.
-        all_reduce 在侧流 (_sync_later_stream) 上发射, 与主流计算重叠;
-        apply 是主流 kernel, 需先同步侧流再读聚合结果。
+        The all_reduce is issued on the side stream (_sync_later_stream),
+        overlapping main-stream compute; the apply is a main-stream kernel,
+        so the side stream is synchronized before reading the aggregate.
         """
-        self._anti_entropy_maybe()
-
         works = self._pending_sync_now_work
         if works is None:
             self._pending_sync_now_lr = None
@@ -196,8 +177,8 @@ class BagPipeGradMixin:
         if self._sync_later_stream is not None:
             self._sync_later_stream.synchronize()
         if ids_parts:
-            # dense (已知共享) 与 sparse (归属未知) 的聚合结果合并成一次
-            # _apply_aggregated: 一个 PS 推送句柄, 一次深度-1 等待。
+            # The dense (known-shared) and sparse (unknown-ownership) results
+            # merge into a single _apply_aggregated call.
             agg_ids = ids_parts[0] if len(ids_parts) == 1 else torch.cat(ids_parts)
             agg_grads = (
                 grads_parts[0] if len(grads_parts) == 1 else torch.cat(grads_parts)
@@ -224,11 +205,17 @@ class BagPipeGradMixin:
         Note: the deferred barrier is consumed in prefill_cache (before the
         forward lookup), NOT here.
 
-        热路径上没有任何 ``.item()``/``.cpu()`` —— 控制流只依赖 numel 元数据,
-        计数走 GPU 热累加器 (``_hot_add``), 在 consume_stats 的 device-drain
-        点统一取回。原 now/later 双路 all_reduce 已合并为单次: 两条路都在
-        下一步 prefill 才被消费, 调度完全相同, 区分只剩一次多余的 6MB
-        all_reduce 与逐 id 判定开销。
+        Sync budget on the oracle path (prescan metadata present): the sparse
+        all_gather is sized by the prescan counts (rank-consistent, exchanged
+        once at finalize_prescan), so the per-step count all_gather and its
+        ``.item()`` readback are gone, and the bucket compaction happens
+        GPU-side (no boolean-index host sync).  Control flow depends only on
+        numel metadata; counters go through the GPU hot accumulators
+        (``_hot_add``) and are drained at the consume_stats device-drain
+        point.  Known remaining host syncs, deliberately out of scope here:
+        the local-only bucket's boolean-index compaction and the prefetch
+        pre-issue ``.cpu()`` (both are per-step serialization points for a
+        follow-up, not correctness issues).
         """
         t_start = time.perf_counter()
         embedding_module = getattr(self, "embedding_module", None)
@@ -267,8 +254,9 @@ class BagPipeGradMixin:
 
         self._record_shared_id_candidates(ids_cuda)
 
-        # ---- shared / local-only 向量化切分 (sorted 张量 + searchsorted,
-        #      与 _dense_all_reduce_async 同构, 无 .item()) ----
+        # ---- shared / local-only vectorized split (sorted tensor +
+        #      searchsorted, isomorphic to _dense_all_reduce_async,
+        #      no .item()) ----
         shared_t = self._shared_ids_tensor
         if shared_t is not None and shared_t.numel() > 0:
             pos = torch.searchsorted(shared_t, ids_cuda)
@@ -276,8 +264,10 @@ class BagPipeGradMixin:
             shared_mask = shared_t[pos_clamped] == ids_cuda
         else:
             shared_mask = torch.zeros_like(ids_cuda, dtype=torch.bool)
-        # 回退集只覆盖前几个 step, 集合外的 id 可能是共享的: 只要集合不完整
-        # (没有 oracle 预扫描), 它们就归入 unknown 走聚合路径, 而不是 local-only。
+        # The fallback set only covers the first few steps, so ids outside it
+        # may still be shared: while the set is incomplete (no oracle
+        # prescan) they are unknown-ownership and go through the aggregation
+        # path, never local-only.
         aggregate_unknown = self._is_distributed() and not self._shared_ids_complete
         local_mask = ~shared_mask
         unknown_mask = None
@@ -299,24 +289,44 @@ class BagPipeGradMixin:
         in_range = all_compact < self._latest_dev.numel()
         current_compact = all_compact[in_range]
         if all_resident:
+            renew = (
+                ~self._cached_dev[current_compact]
+                | (self._ttl_dev[current_compact] >= batch_num)
+            )
             self._cached_dev[current_compact] = True
-            self._ttl_dev[current_compact] = batch_num + self._ttl_margin
+            self._ttl_dev[current_compact[renew]] = (
+                batch_num + self._ttl_margin
+            )
         elif residency_mask is not None:
             residency_mask = residency_mask[in_range]
             failed_mask = ~residency_mask
             self._cached_dev[current_compact[failed_mask]] = False
             resident_compact = current_compact[residency_mask]
+            renew = (
+                ~self._cached_dev[resident_compact]
+                | (self._ttl_dev[resident_compact] >= batch_num)
+            )
             self._cached_dev[resident_compact] = True
-            self._ttl_dev[resident_compact] = batch_num + self._ttl_margin
+            self._ttl_dev[resident_compact[renew]] = (
+                batch_num + self._ttl_margin
+            )
             # Backfill no-evict insert failures must feed the eviction
             # backstop too; otherwise a full cache is only noticed via the
             # prefill path.
             self._insert_failures += int(failed_mask.sum().item())
             self._stats["bagpipe_insert_failures"] = float(self._insert_failures)
         else:
-            self._cached_dev[current_compact] = False
+            # A fallback lookup supplied no authoritative residency info for
+            # this batch.  Leave the mirror untouched.  Clearing it here can
+            # drop shared rows before the deferred aggregated apply marks them
+            # dirty, losing their increments because there is no per-step PS
+            # push.
+            # Stale bits are tolerated downstream: the eviction writeback
+            # reconciles against authoritative cache state, and the
+            # all-hits lookup revalidates residency via contains_gpu_cache.
+            pass
 
-        # ---- no_sync (local-only): 立即 best-effort 原位 SGD ----
+        # ---- no_sync (local-only): immediate best-effort in-place SGD ----
         self._hot_add("bagpipe_no_sync_ids", local_mask.sum())
         local_ids = ids_cuda[local_mask]
         if local_ids.numel() > 0:
@@ -327,40 +337,97 @@ class BagPipeGradMixin:
                 )
             except Exception as exc:
                 logger.warning("[BagPipe] local best-effort apply failed: %s", exc)
-            # PS 持久化走 dirty 张量 + eviction 值写回 (scatter, 无 tolist)。
-            # local_mask already excludes rows whose no-evict insert failed,
-            # so best-effort apply and the dirty mark agree.
+            # PS persistence rides on the dirty tensor + the eviction value
+            # writeback (scatter, no tolist).  local_mask already excludes
+            # rows whose no-evict insert failed, so the best-effort apply and
+            # the dirty mark agree.
             local_compact = self._compact_in_range(self._to_compact(local_ids))
             self._dirty_dev[local_compact] = True
+            record_dirty = getattr(self, "_record_dirty_marks", None)
+            if callable(record_dirty):
+                record_dirty(int(local_compact.numel()))
             self._cached_dev[local_compact] = True
             self._ttl_dev[local_compact] = batch_num + self._ttl_margin
 
-        # ---- 聚合路径: 已知共享走 dense all_reduce, 归属未知走 sparse
-        #      all_gather；两者都在侧流发射 (与主流计算重叠), 聚合结果由全
-        #      rank 在下一步 prefill 的 barrier 处一起落 cache ----
+        # ---- Aggregation path: the collectives are issued on the side
+        #      stream (overlapping main-stream compute); every rank applies
+        #      the aggregated result to its cache at the next prefill
+        #      barrier ----
         self._hot_add("bagpipe_sync_now_ids", shared_mask.sum())
+        # Routing (rank-consistent, no communication needed): a small
+        # shared set -> one dense all_reduce over the whole shared-set
+        # buffer (negligible at low row counts, and it avoids the per-id
+        # gather); a large shared set (fallback sample sets are ~14K rows,
+        # and the oracle prescan can reach whole-dataset scale) -> shared
+        # ids fold into the sparse all_gather, communicating only the rows
+        # that actually appear this step.  A dense all_reduce costs bytes
+        # proportional to the total shared-set row count regardless of this
+        # step's hits — pure waste when the set is large and the hit rate
+        # low (measured as the bulk of 2-rank per-step communication).
+        shared_t = self._shared_ids_tensor
+        use_dense = (
+            shared_t is not None
+            and shared_t.numel() > 0
+            and getattr(self, "_global_unique_count", 0) > 0
+            and getattr(self, "_global_unique_count", 0)
+            <= getattr(self, "_dense_shared_max_rows", 0)
+        )
         works = []
         if self._is_distributed():
-            # 集合通信无条件发射: 本 rank 的空桶不能跳过其它 rank 会进入的
-            # collective (按 numel 早退会让对端永久等待)。
-            _, _, dense_work = self._dense_all_reduce_async(
-                ids_cuda[shared_mask],
-                grads_cuda[shared_mask],
-                stream=self._sync_later_stream,
-            )
-            if dense_work is not None:
-                works.append(dense_work)
+            # Collectives are issued unconditionally: an empty local bucket
+            # must not skip a collective that other ranks will enter (an
+            # early exit on numel would hang the peer forever).  The routing
+            # condition depends only on rank-consistent quantities
+            # (_shared_ids_tensor / _global_unique_count), so one rank can
+            # never pick dense while another picks sparse.
+            # Sparse is called before dense: the side stream is serial, and
+            # dense's wait_stream would otherwise push the count exchange
+            # queued after it behind the main-stream backlog.
+            # Routing truth table (sparse column = mask folded into the
+            # sparse all_gather):
+            #   use_dense & unknown    -> sparse: unknown,   dense: shared
+            #   use_dense & no unknown -> sparse: none,      dense: shared
+            #   large set & unknown    -> sparse: shared|unknown (single aggregate)
+            #   large set & no unknown -> sparse: shared,    dense: none
             if unknown_mask is not None:
                 self._hot_add(
                     "bagpipe_unknown_aggregated_ids", unknown_mask.sum()
                 )
-                _, _, sparse_work = self._all_gather_sparse_async(
-                    ids_cuda[unknown_mask],
-                    grads_cuda[unknown_mask],
-                    stream=self._sync_later_stream,
+                sparse_mask = (
+                    unknown_mask if use_dense else (shared_mask | unknown_mask)
                 )
+            else:
+                sparse_mask = None if use_dense else shared_mask
+            if sparse_mask is not None:
+                # Oracle path: prescan counts size the all_gather ahead of
+                # time (no count exchange, no .item(), no boolean-index
+                # compaction -- the bucket is padded GPU-side).  The prescan
+                # metadata is globally uniform (finalize_prescan runs on all
+                # ranks or none) and batch_num indexes it identically on
+                # every rank, so the routing cannot diverge across ranks.
+                prescan_max = getattr(self, "_prescan_sparse_max", None)
+                if prescan_max and self._shared_ids_complete:
+                    max_n = prescan_max[batch_num % len(prescan_max)]
+                    _, _, sparse_work = self._all_gather_sparse_prescan_async(
+                        ids_cuda, grads_cuda, sparse_mask, max_n,
+                        stream=self._sync_later_stream,
+                    )
+                else:
+                    _, _, sparse_work = self._all_gather_sparse_async(
+                        ids_cuda[sparse_mask],
+                        grads_cuda[sparse_mask],
+                        stream=self._sync_later_stream,
+                    )
                 if sparse_work is not None:
                     works.append(sparse_work)
+            if use_dense:
+                _, _, dense_work = self._dense_all_reduce_async(
+                    ids_cuda[shared_mask],
+                    grads_cuda[shared_mask],
+                    stream=self._sync_later_stream,
+                )
+                if dense_work is not None:
+                    works.append(dense_work)
         self._pending_sync_now_work = works or None
         self._pending_sync_now_lr = lr if works else None
 

@@ -1,0 +1,71 @@
+{
+  "cache_ps": {
+    "ps_type": "GRPC",
+    "max_batch_keys_size": 65536,
+    "num_threads": 32,
+    "num_shards": 1,
+    "servers": [
+      {
+        "host": "10.0.2.192",
+        "port": 25000,
+        "shard": 0
+      }
+    ],
+    "base_kv_config": {
+      "capacity": 1000000,
+      "index": {
+        "type": "DRAM_EXTENDIBLE_HASH"
+      },
+      "value": {
+        "type": "DRAM_VALUE_STORE",
+        "default_value_size_hint": 16,
+        "dram_allocator": {
+          "type": "PERSIST_LOOP_SLAB",
+          "capacity_bytes": 16000000
+        },
+        "path": "/tmp/recstore_data_rdma_cross_host/value"
+      }
+    }
+  },
+  "distributed_client": {
+    "num_shards": 1,
+    "hash_method": "city_hash",
+    "max_keys_per_request": 500,
+    "servers": [
+      {
+        "host": "10.0.2.192",
+        "port": 25000,
+        "shard": 0
+      }
+    ]
+  },
+  "client": {
+    "host": "10.0.2.192",
+    "port": 25000,
+    "shard": 0
+  },
+  "rdma_deployment": {
+    "deployment_id": "rdma-cross-host-test",
+    "epoch": 1,
+    "protocol_version": 1,
+    "num_clients": 1,
+    "nodes": [
+      {
+        "node_id": 0,
+        "role": "server",
+        "device": "mlx5_0",
+        "port": 1,
+        "gid_index": 0,
+        "mode": "ib"
+      },
+      {
+        "node_id": 1,
+        "role": "client",
+        "device": "mlx5_0",
+        "port": 1,
+        "gid_index": 0,
+        "mode": "ib"
+      }
+    ]
+  }
+}

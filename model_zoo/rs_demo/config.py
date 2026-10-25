@@ -201,10 +201,17 @@ class RunConfig:
     torchrec_memory_mode: str = "hbm"
     torchrec_timing_sync_mode: str = "stage"
     torchrec_align_recstore_init: bool = False
+    validation_state: bool = False
     torchrec_profiler_warmup: int = 0
     torchrec_profiler_active: int = 2
     torchrec_profiler_repeat: int = 1
     torchrec_trace_dir: str = ""
+    recstore_profiler: bool = False
+    recstore_profiler_warmup: int = 0
+    recstore_profiler_active: int = 2
+    recstore_profiler_repeat: int = 1
+    recstore_trace_dir: str = ""
+    recstore_event_log: str = ""
     torchrec_main_csv: str = ""
     torchrec_main_agg_csv: str = ""
     torchrec_trace_csv: str = ""
@@ -308,6 +315,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="GPU cache capacity (number of embedding rows) for plugins that use it.",
+    )
+    parser.add_argument(
+        "--optimization-prescan",
+        action="store_true",
+        default=False,
+        help=(
+            "BagPipe: pre-scan the configured training steps and precompute "
+            "collective layouts. Requires a repeatable batch sequence, one ID "
+            "per bag, and the complete working set to fit the GPU row limit. "
+            "Without it BagPipe uses dynamic prefetch and eviction."
+        ),
     )
     parser.add_argument("--master-addr", type=str, default="127.0.0.1")
     parser.add_argument("--master-port", type=int, default=29500)
@@ -440,6 +458,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--torchrec-profiler", action="store_true", default=False)
     parser.add_argument(
+        "--recstore-profiler",
+        action="store_true",
+        default=False,
+        help="Record a torch profiler trace (CPU+CUDA) for the RecStore backend.",
+    )
+    parser.add_argument("--recstore-profiler-warmup", type=int, default=0)
+    parser.add_argument("--recstore-profiler-active", type=int, default=2)
+    parser.add_argument("--recstore-profiler-repeat", type=int, default=1)
+    parser.add_argument(
+        "--recstore-trace-dir",
+        type=str,
+        default="",
+        help="Directory for rank<N>.pt.trace.json when --recstore-profiler is set.",
+    )
+    parser.add_argument(
+        "--recstore-event-log",
+        type=str,
+        default="",
+        help="Optional JSONL path for per-step host timeline events (epoch seconds).",
+    )
+    parser.add_argument(
         "--torchrec-dist-mode",
         type=str,
         default="replicated",
@@ -524,6 +563,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--hps-torch-gpucacheper", type=float, default=1.0)
     parser.add_argument(
+        "--validation-state",
+        action="store_true",
+        help="Export exact local embedding and dense tensors for numerical validation after training.",
+    )
+    parser.add_argument(
         "--save-checkpoint",
         action="store_true",
         default=False,
@@ -559,6 +603,7 @@ def _migrate_legacy_optim_fields(raw: dict) -> dict:
             opt.setdefault("cleanup_proportion", 0.25)
             opt.setdefault("cache_capacity", 0)
             opt.setdefault("embedding_dim", raw.get("embedding_dim", 128))
+            opt.setdefault("prescan", False)
             opt.setdefault("plugin_config", {})
         return raw
 
@@ -605,6 +650,7 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
         cleanup_proportion=float(cfg_kwargs.pop("optimization_cleanup_proportion", 0.25)),
         cache_capacity=int(cfg_kwargs.pop("optimization_cache_capacity", 0)),
         embedding_dim=int(cfg_kwargs.get("embedding_dim", 128)),
+        prescan=bool(cfg_kwargs.pop("optimization_prescan", False)),
     )
     cfg_kwargs["optimization"] = optimization
 
@@ -681,6 +727,20 @@ def validate_recstore_config(cfg: RunConfig) -> None:
         return
     resolve_num_embeddings_per_feature(cfg.num_embeddings, cfg.num_embeddings_per_feature)
 
+    recstore_profiler_subargs_nondefault = any(
+        [
+            cfg.recstore_profiler_warmup != 0,
+            cfg.recstore_profiler_active != 2,
+            cfg.recstore_profiler_repeat != 1,
+        ]
+    )
+    if recstore_profiler_subargs_nondefault and not cfg.recstore_profiler:
+        raise RuntimeError(
+            "RecStore profiler sub-arguments require --recstore-profiler."
+        )
+    if cfg.recstore_profiler and not cfg.recstore_trace_dir:
+        raise RuntimeError("--recstore-profiler requires --recstore-trace-dir.")
+
     if cfg.nnodes <= 0:
         raise RuntimeError("--nnodes must be greater than 0.")
     if cfg.nproc_per_node <= 0:
@@ -706,6 +766,11 @@ def validate_recstore_config(cfg: RunConfig) -> None:
             cfg.optimization.lookahead = cfg.prefetch_depth or 4
     # Validate OptimizationConfig
     opt = cfg.optimization
+    if opt.plugin == "bagpipe_planned":
+        raise RuntimeError(
+            "bagpipe_planned has been merged into bagpipe; use "
+            "--read-mode bagpipe --optimization-prescan"
+        )
     if opt.plugin != "none" and opt.lookahead <= 0:
         raise RuntimeError(
             f"--optimization-plugin {opt.plugin!r} requires --optimization-lookahead > 0"
@@ -792,6 +857,9 @@ def ensure_parent_dirs(cfg: RunConfig) -> None:
     ensure_shared_dir(Path(cfg.recstore_main_agg_csv).parent)
     ensure_shared_dir(Path(cfg.server_log).parent)
     ensure_shared_dir(Path(cfg.torchrec_trace_dir))
+    ensure_shared_dir(Path(cfg.recstore_trace_dir))
+    if cfg.recstore_event_log:
+        ensure_shared_dir(Path(cfg.recstore_event_log).parent)
     ensure_shared_dir(Path(cfg.torchrec_main_csv).parent)
     ensure_shared_dir(Path(cfg.torchrec_main_agg_csv).parent)
     ensure_shared_dir(Path(cfg.torchrec_trace_csv).parent)

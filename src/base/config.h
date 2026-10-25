@@ -5,12 +5,10 @@
 #include <stdexcept>
 #include <string>
 
-#include "recstore_config.h"
-
 namespace base {
 
 inline constexpr const char* kDefaultRecStoreConfigPath =
-    RECSTORE_PATH "/recstore_config.json";
+    "recstore_config.json";
 inline constexpr const char* kRecStoreConfigFilename = "recstore_config.json";
 
 namespace detail {

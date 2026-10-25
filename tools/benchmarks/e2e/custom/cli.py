@@ -40,9 +40,16 @@ def _build_config_from_args(args: argparse.Namespace) -> tuple[BenchmarkConfig, 
         repeat=args.repeat,
         read_mode=args.read_mode,
         prefetch_depth=args.prefetch_depth,
+        ps_threads=args.ps_threads,
         optimization_cache_capacity=args.optimization_cache_capacity,
+        bagpipe_prescan=args.bagpipe_prescan,
+        optimization_lookahead=args.optimization_lookahead,
         index_type=args.index_type,
         torchrec_baselines=() if args.no_torchrec else parse_torchrec_baselines(args.torchrec_baselines),
+        profiler=args.profiler,
+        profiler_warmup=args.profiler_warmup,
+        profiler_active=args.profiler_active,
+        profiler_repeat=args.profiler_repeat,
         master_port=args.master_port,
         python_bin=args.python_bin,
         skip_build=args.skip_build,
@@ -68,11 +75,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--torchrec-baselines", default="hbm")
     parser.add_argument("--no-torchrec", action="store_true")
     parser.add_argument(
+        "--profiler",
+        action="store_true",
+        help="Record torch profiler traces for every lane (per rank).",
+    )
+    parser.add_argument("--profiler-warmup", type=int, default=30)
+    parser.add_argument("--profiler-active", type=int, default=5)
+    parser.add_argument("--profiler-repeat", type=int, default=1)
+    parser.add_argument(
         "--read-mode",
         choices=["direct", "prefetch", "bagpipe"],
         default="prefetch",
     )
     parser.add_argument("--prefetch-depth", type=int, default=0)
+    parser.add_argument(
+        "--ps-threads",
+        type=int,
+        default=0,
+        help=(
+            "RDMA PS RC poll threads per PS host; the trainer shares those "
+            "cores. 0 = auto: max(1, min(16, physical_cores // 4)). "
+            "RECSTORE_E2E_RDMA_SERVER_THREADS overrides auto, this flag wins."
+        ),
+    )
+    parser.add_argument(
+        "--optimization-lookahead",
+        type=int,
+        default=0,
+        help="BagPipe lookahead depth: prefetch this many batches ahead.",
+    )
     parser.add_argument(
         "--optimization-cache-capacity",
         type=int,
@@ -80,6 +111,16 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "GPU cache capacity for optimization plugins such as BagPipe; "
             "0 keeps the rs_demo default."
+        ),
+    )
+    parser.add_argument(
+        "--bagpipe-prescan",
+        action="store_true",
+        default=False,
+        help=(
+            "read_mode=bagpipe: pre-scan the dataset once before training so "
+            "the shared-ID set is complete (oracle prescan); local-only IDs "
+            "then skip the per-step cross-rank gradient aggregation."
         ),
     )
     parser.add_argument(

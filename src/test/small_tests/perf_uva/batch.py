@@ -4,8 +4,9 @@ import subprocess
 import itertools
 import datetime
 import os
+from pathlib import Path
 
-PROJECT_PATH = "/home/xieminhui/RecStore"
+PROJECT_PATH = Path(__file__).resolve().parents[4]
 
 CONFIG = {
     "method": ["CPU", "UVA"],
@@ -115,7 +116,7 @@ for each_i, config in all_configs:
     if not os.path.isdir(run_path):
         os.makedirs(run_path)
 
-    bin_path = f'{PROJECT_PATH}/build/bin/perf_uva'
+    bin_path = PROJECT_PATH / 'build/bin/perf_uva'
 
     execute_str = f'''{bin_path} --logtostderr \
         --method={config['method']} \

@@ -97,6 +97,7 @@ class BagPipePlugin(OptimizationPlugin):
         lr: float = 0.01,
         id_extractor: Callable[[Any], torch.Tensor] | None = None,
         enabled: bool = True,
+        prescan: bool = False,
         **_: Any,
     ) -> "BagPipePlugin":
         """Create a BagPipePlugin.
@@ -106,6 +107,9 @@ class BagPipePlugin(OptimizationPlugin):
 
         Accepts ``**_`` to swallow extra kwargs from the registry (e.g.
         ``plugin_config``) that BagPipe does not use.
+
+        ``prescan=True`` selects the resident controller with precomputed
+        collective layouts. Its full working set must fit the row limit.
 
         ``cleanup_proportion`` (from :class:`OptimizationConfig`) and
         ``cleanup_batch_proportion`` (legacy name) are aliases; if both are
@@ -122,7 +126,11 @@ class BagPipePlugin(OptimizationPlugin):
         else:
             cleanup_batch = 0.25
 
-        controller = BagPipeCacheController(
+        controller_cls = BagPipeCacheController
+        if prescan:
+            from .planned import PlannedBagPipeController
+            controller_cls = PlannedBagPipeController
+        controller = controller_cls(
             embedding_module,
             kv_client,
             lookahead_value=lookahead,
@@ -196,14 +204,37 @@ class BagPipePlugin(OptimizationPlugin):
         if self._controller is not None:
             self._controller.prefill_cache(sparse_features, device)
 
-    def on_step_end(self, step: int, row: Dict[str, Any]) -> None:
-        """Step-end hook: TTL eviction + writeback + stats.
+    def prescan_batch(self, batch_num: int, sparse_features: Any) -> None:
+        """Record a batch's IDs before training.
 
-        Called after ``sparse_optimizer.step()`` and ``flush()``.
+        Call once per batch during a pre-training pass over the dataset, then
+        :meth:`finalize_prescan` once at the end. The resident controller builds
+        per-step collective layouts; the dynamic controller builds its oracle
+        shared-ID set. No-op when the plugin is disabled.
+        """
+        if self._controller is not None:
+            self._controller.prescan_batch(batch_num, sparse_features)
+
+    def finalize_prescan(self) -> None:
+        """Finalize the controller's metadata and storage before training.
+
+        Collective (all_gather): every rank must call it after finishing its
+        own prescan pass.  No-op when the plugin is disabled.
+        """
+        if self._controller is not None:
+            self._controller.finalize_prescan()
+
+    def on_step_end(self, step: int, row: Dict[str, Any]) -> None:
+        """Step-end hook: schedule eviction for the next safe prefill point.
+
+        Called after ``sparse_optimizer.step()`` and ``flush()``.  Stats
+        draining deliberately does NOT happen here: the readbacks belong
+        after the runner's ``timer.finish()`` device drain (see
+        :meth:`consume_stats_into`).
         """
         if self._controller is not None:
             cleanup_start = time.perf_counter()
-            self._controller.cleanup(step)
+            self._controller.schedule_cleanup(step)
             row["bagpipe_cleanup_step_ms"] = (
                 time.perf_counter() - cleanup_start
             ) * 1e3
@@ -214,9 +245,18 @@ class BagPipePlugin(OptimizationPlugin):
             row.setdefault("bagpipe_gpu_cache_update_failure_reason", "")
 
     def consume_stats_into(self, row: Dict[str, Any]) -> None:
-        """Merge BagPipe cumulative stats into *row* (does not reset)."""
+        """Merge this step's BagPipe stats into *row* (per-step deltas).
+
+        Must be called exactly once per step, after ``timer.finish()``:
+        ``consume_stats(reset=True)`` drains the GPU hot accumulators and
+        zeroes the cumulative dict, so a call issued before the device
+        drain point would silently move device-wait time into the
+        enclosing phase's timer, and a skipped call would drop that step's
+        counts.  The runner invokes it via the read path's
+        ``after_step_sync`` hook.
+        """
         if self._controller is not None:
-            row.update(self._controller.consume_stats(reset=False))
+            row.update(self._controller.consume_stats(reset=True))
 
     def shutdown(self) -> None:
         """Wait for async work and stop the background cleanup thread."""

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["scikit-build-core>=1.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "recstore"
+description = "Distributed parameter server and embedding store for recommendation models"
+requires-python = ">=3.10"
+dependencies = [
+    # Torch ships the libtorch*/libc10* shared libraries the native extension
+    # links against, so the wheel does not bundle its own copy.  The pin keeps
+    # the installed torch ABI-identical to the one the extension was built
+    # against.
+    "torch==2.7.1",
+    "numpy",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dynamic = ["version"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+# Reuse the repository CMake build tree so a wheel build is incremental.
+# Override per build with SKBUILD_BUILD_DIR (CI uses its own tree).
+build-dir = "build"
+cmake.source-dir = "."
+cmake.build-type = "Release"
+# The repository's dev/CI CMake trees use Unix Makefiles; keep the generator in
+# sync so an existing build-dir can be reused as-is.
+cmake.args = ["-G", "Unix Makefiles"]
+# Only the Python extension is needed for the wheel; the test and benchmark
+# targets stay out of the wheel build.
+build.targets = ["recstore_torch_ops"]
+# Only install() rules tagged COMPONENT python end up in the wheel, which keeps
+# the third_party/ subprojects from leaking into the distribution.
+install.components = ["python"]
+wheel.packages = { recstore = "src/python/pytorch/recstore", torchrec_kv = "src/python/pytorch/torchrec_kv" }
+wheel.exclude = ["**/*.a", "**/__pycache__/**", "**/*.pyc"]
+
+# Version has a single source: the repository-root VERSION file, which CMake
+# also reads (see the top-level CMakeLists.txt).
+[[tool.dynamic-metadata]]
+field = "version"
+provider = "scikit_build_core.metadata.regex"
+input = "VERSION"
+regex = "^(?P<value>\\S+)$"

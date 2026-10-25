@@ -93,6 +93,26 @@ set_tests_properties(
         LABELS "rdma_integration"
 )
 
+add_test(
+    NAME petps_lane_rebuild_test
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/src/test/scripts/run_petps_integration.py
+            --server-count 1
+            --config-path ${PROJECT_SOURCE_DIR}/src/test/configs/recstore_config.rdma_test.json
+            --test-binary $<TARGET_FILE:petps_integration_test>
+            --gtest-filter=PetPSIntegrationTest.LaneRebuildResumesServiceSingleShard:PetPSIntegrationTest.RebuildDropsInflightAsyncRpcRepro
+            --rdma-lane-rebuild
+            --client-timeout 60
+            --cluster-timeout 60
+)
+set_tests_properties(
+    petps_lane_rebuild_test
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120
+        LABELS "rdma_integration"
+)
+
 if(ENABLE_RDMA_INTEGRATION_TESTS)
 add_test(
         NAME petps_single_shard_test
@@ -108,6 +128,56 @@ add_test(
         PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 60
+            LABELS "rdma_integration"
+    )
+
+    # Lane rebuild racing the get-payload worker threads. Needs the offload
+    # workers so it is opt-in: the sustained collision takes ~30s.
+    add_test(
+        NAME petps_lane_rebuild_get_workers_test
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/src/test/scripts/run_petps_integration.py
+                --server-count 1
+                --config-path ${PROJECT_SOURCE_DIR}/src/test/configs/recstore_config.rdma_test.json
+                --test-binary $<TARGET_FILE:petps_integration_test>
+                --gtest-filter=PetPSIntegrationTest.RebuildRacesGetPayloadWorkersRepro
+                --rdma-lane-rebuild
+                --rdma-rc-server-get-workers=4
+                --client-timeout 120
+                --cluster-timeout 60
+    )
+    set_tests_properties(
+        petps_lane_rebuild_get_workers_test
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
+            LABELS "rdma_integration"
+    )
+
+    # Deterministic fence proof: stall the GET payload workers so a task
+    # provably straddles a lane rebuild. The driver asserts shard-0 reported
+    # fence events (fence_rejected + dropped_stale > 0); the test itself only
+    # guards that no wrong response leaks through.
+    add_test(
+        NAME petps_lane_rebuild_fence_test
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/src/test/scripts/run_petps_integration.py
+                --server-count 1
+                --config-path ${PROJECT_SOURCE_DIR}/src/test/configs/recstore_config.rdma_test.json
+                --test-binary $<TARGET_FILE:petps_integration_test>
+                --gtest-filter=PetPSIntegrationTest.RebuildRacesGetPayloadWorkersRepro
+                --rdma-lane-rebuild
+                --rdma-rc-server-get-workers=4
+                --rdma-rc-server-get-worker-hold-us=2000000
+                --client-timeout 120
+                --cluster-timeout 60
+                --expect-fence-events
+    )
+    set_tests_properties(
+        petps_lane_rebuild_fence_test
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180
             LABELS "rdma_integration"
     )
 
@@ -165,4 +235,24 @@ add_test(
             TIMEOUT 120
             LABELS "rdma_integration"
     )
+
+    # Fault injection in shard 1 while the test drives the client. The driver
+    # owns the per-scenario flags; it only needs the scenario name.
+    foreach(fault_scenario fast_fail rebuild killed)
+        add_test(
+            NAME petps_fault_injection_${fault_scenario}_test
+            COMMAND ${Python3_EXECUTABLE}
+                    ${PROJECT_SOURCE_DIR}/src/test/scripts/run_petps_fault_injection.py
+                    --scenario ${fault_scenario}
+                    --config-path ${PROJECT_SOURCE_DIR}/src/test/configs/recstore_config.rdma_multishard_test.json
+                    --test-binary $<TARGET_FILE:petps_integration_test>
+        )
+        set_tests_properties(
+            petps_fault_injection_${fault_scenario}_test
+            PROPERTIES
+                SKIP_RETURN_CODE 77
+                TIMEOUT 300
+                LABELS "rdma_integration"
+        )
+    endforeach()
 endif()

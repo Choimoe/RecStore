@@ -1,8 +1,6 @@
 import torch
 import torch as th
 
-import sys
-sys.path.append("/home/xieminhui/RecStore/src/framework_adapters/torch")  # nopep8
 from controller_process import KGCacheControllerWrapperBase
 
 import recstore

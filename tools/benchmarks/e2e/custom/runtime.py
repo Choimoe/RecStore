@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,42 @@ def _server_entries(servers: tuple[ServerSpec, ...]) -> list[dict[str, Any]]:
         {"host": server.ip, "port": int(server.port), "shard": int(server.shard_id)}
         for server in sorted(servers, key=lambda item: item.shard_id)
     ]
+
+
+def _rdma_fabric_node(node_id: int, role: str) -> dict[str, Any]:
+    # petps_server and the trainer's embedded RDMA client both parse the
+    # rdma_deployment section (ParseResolvedRdmaDeploymentConfig) and resolve
+    # their fabric node by node_id. Defaults match the pc160/commA RoCE v2
+    # fabric (mlx5_3 port 1, gid_index 7 is the routable GID); override for
+    # other clusters via RS_DEMO_RDMA_FABRIC
+    # =device:port:gid_index:mode[:hop_limit:traffic_class:flow_label].
+    parts = os.environ.get("RS_DEMO_RDMA_FABRIC", "mlx5_3:1:7:rocev2").split(":")
+    if len(parts) not in (4, 7):
+        raise ValueError(
+            "RS_DEMO_RDMA_FABRIC must be device:port:gid_index:mode"
+            "[:hop_limit:traffic_class:flow_label]"
+        )
+    device, port, gid_index, mode = parts[:4]
+    node: dict[str, Any] = {
+        "node_id": node_id,
+        "role": role,
+        "device": device,
+        "port": int(port),
+        "gid_index": int(gid_index),
+        "mode": mode,
+    }
+    if mode == "rocev2":
+        hop_limit, traffic_class, flow_label = (
+            parts[4:] if len(parts) == 7 else ("64", "0", "0")
+        )
+        node.update(
+            {
+                "hop_limit": int(hop_limit),
+                "traffic_class": int(traffic_class),
+                "flow_label": int(flow_label),
+            }
+        )
+    return node
 
 
 def estimate_runtime_capacity(num_embeddings: int) -> int:
@@ -44,7 +81,7 @@ def build_runtime_config(cfg: BenchmarkConfig, *, transport: str, value_path: Pa
             },
         },
     }
-    return {
+    config = {
         "cache_ps": {
             "ps_type": transport_upper,
             "max_batch_keys_size": 65536,
@@ -61,6 +98,30 @@ def build_runtime_config(cfg: BenchmarkConfig, *, transport: str, value_path: Pa
         },
         "client": servers[0],
     }
+    if transport_upper == "RDMA":
+        # petps_server aborts at startup without this section, and the
+        # trainer's embedded client resolves its identity from it:
+        # RANK/WORLD_SIZE must map onto client nodes at
+        # node_id = num_shards + client_index, and num_clients must equal the
+        # trainer world size (both sides validate this).
+        client_process_count = sum(
+            max(int(client.nproc_per_node), 1) for client in cfg.clients
+        )
+        nodes = [
+            _rdma_fabric_node(index, "server") for index in range(len(servers))
+        ]
+        nodes.extend(
+            _rdma_fabric_node(len(servers) + index, "client")
+            for index in range(client_process_count)
+        )
+        config["rdma_deployment"] = {
+            "deployment_id": f"rs-e2e-{cfg.output_dir.name}",
+            "epoch": 1,
+            "protocol_version": 1,
+            "num_clients": client_process_count,
+            "nodes": nodes,
+        }
+    return config
 
 
 def _wrap_remote(cmd: list[str], *, ssh_host: str, ssh_port: int, cwd: Path) -> list[str]:
@@ -113,6 +174,41 @@ def _rdma_client_env(runner: Any, *, response_mode: str) -> dict[str, str]:
     return env
 
 
+@lru_cache(maxsize=8)
+def _physical_cores(ssh_host: str, ssh_port: int, repo_root: Path, probe: bool) -> int:
+    # Physical, not logical: a hyperthreaded 9-core host reports 18 CPUs, and
+    # the poll threads compete for cores, not for sibling slots.
+    cmd = ["lscpu", "-p=CORE,SOCKET"]
+    if probe and ssh_host not in {"", "local", "localhost"}:
+        cmd = wrap_remote_command(cmd, ssh_host, cwd=repo_root, ssh_port=ssh_port)
+    pairs: set[str] = set()
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        pairs = {line for line in proc.stdout.splitlines() if line and not line.startswith("#")}
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return len(pairs) or max(1, (os.cpu_count() or 2) // 2)
+
+
+def resolve_ps_threads(cfg: BenchmarkConfig, *, probe: bool = True) -> int:
+    """RC poll threads per PS host.
+
+    An explicit --ps-threads wins, then RECSTORE_E2E_RDMA_SERVER_THREADS, then
+    the auto default. Auto keeps the trainer on most of the physical cores:
+    the old fixed 16 oversubscribed a 9-core host and cost ~55% throughput
+    (RecStore#295).
+    """
+    requested = int(cfg.ps_threads)
+    if requested <= 0:
+        env_raw = os.environ.get("RECSTORE_E2E_RDMA_SERVER_THREADS", "").strip()
+        requested = int(env_raw) if env_raw else 0
+    if requested > 0:
+        return requested
+    server = sorted(cfg.servers, key=lambda item: item.shard_id)[0]
+    cores = _physical_cores(server.ssh_host, int(server.ssh_port), server.repo_root, probe)
+    return max(1, min(16, cores // 4))
+
+
 def start_rdma_ps_cluster(
     *,
     cfg: BenchmarkConfig,
@@ -133,6 +229,16 @@ def start_rdma_ps_cluster(
 
     def wrap_server_command(global_id: int, cmd: list[str]) -> list[str]:
         server = sorted_servers[global_id]
+        # The RDMA wire trace is opt-in through the environment; PS servers are
+        # launched through ssh, so the variable has to be re-exported here.
+        wire_trace = os.environ.get("RECSTORE_RDMA_WIRE_TRACE", "")
+        if wire_trace:
+            cmd = [
+                "env",
+                f"RECSTORE_RDMA_WIRE_TRACE={wire_trace}",
+                f"RECSTORE_RDMA_WIRE_TRACE_TAG=ps{global_id}",
+                *cmd,
+            ]
         return _wrap_remote(
             cmd,
             ssh_host=server.ssh_host,
@@ -143,12 +249,16 @@ def start_rdma_ps_cluster(
     value_size = int(cfg.embedding_dim) * 4
     max_kv_num_per_request = max(1, int(cfg.batch_size) * SPARSE_FEATURES_PER_SAMPLE)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    ps_threads = resolve_ps_threads(cfg)
+    server_path = os.environ.get(
+        "RECSTORE_E2E_PETPS_SERVER", str(repo_root / "build/bin/petps_server")
+    )
     runner = PetPSClusterRunner(
-        server_path=str(repo_root / "build/bin/petps_server"),
+        server_path=server_path,
         config_path=str(config_path),
         num_servers=len(cfg.servers),
         num_clients=_rdma_client_process_count(cfg.clients),
-        thread_num=16,
+        thread_num=ps_threads,
         value_size=value_size,
         max_kv_num_per_request=max_kv_num_per_request,
         timeout=180,
@@ -179,6 +289,7 @@ def start_rdma_ps_cluster(
             f"namespace={runner.rdma_namespace}\n"
             f"control_plane={runner.rdma_control_plane_host}:{runner.rdma_control_plane_port}\n"
             f"num_clients={runner.num_clients}\n"
+            f"ps_threads={ps_threads}\n"
         )
     runner._rs_demo_log_path = log_path  # type: ignore[attr-defined]
     cleanup_commands = []
@@ -318,6 +429,16 @@ def build_client_command(
     first_server = sorted(cfg.servers, key=lambda item: item.shard_id)[0]
     env_prefix = ["env", f"CUDA_VISIBLE_DEVICES={_cuda_visible_devices(client)}"]
     env_prefix.extend(f"{key}={value}" for key, value in _recstore_nccl_env().items())
+    # Mirror the server-side hook: clients post the RDMA reads, so tracing them
+    # is what reveals when prefetch traffic actually hits the wire.
+    wire_trace = os.environ.get("RECSTORE_RDMA_WIRE_TRACE", "")
+    if wire_trace:
+        env_prefix.extend(
+            [
+                f"RECSTORE_RDMA_WIRE_TRACE={wire_trace}",
+                f"RECSTORE_RDMA_WIRE_TRACE_TAG=client{client.node_rank}",
+            ]
+        )
     if transport.upper() == "BRPC":
         env_prefix.extend(f"{key}={value}" for key, value in _brpc_rdma_env().items())
     if transport.upper() == "RDMA" and rdma_runner is not None:
@@ -364,6 +485,26 @@ def build_client_command(
             [
                 "--optimization-cache-capacity",
                 str(cfg.optimization_cache_capacity),
+            ]
+        )
+    if cfg.bagpipe_prescan:
+        cmd.append("--optimization-prescan")
+    if cfg.optimization_lookahead > 0:
+        cmd.extend(["--optimization-lookahead", str(cfg.optimization_lookahead)])
+    if cfg.profiler:
+        cmd.extend(
+            [
+                "--recstore-profiler",
+                "--recstore-profiler-warmup",
+                str(cfg.profiler_warmup),
+                "--recstore-profiler-active",
+                str(cfg.profiler_active),
+                "--recstore-profiler-repeat",
+                str(cfg.profiler_repeat),
+                "--recstore-trace-dir",
+                str(cfg.output_dir / "outputs" / run_id / "traces"),
+                "--recstore-event-log",
+                str(cfg.output_dir / "outputs" / run_id / "events.jsonl"),
             ]
         )
     cmd.extend(
@@ -455,4 +596,20 @@ def build_torchrec_command(
         "--rdzv-id",
         rdzv_id or run_id,
     ]
+    if cfg.profiler:
+        cmd.extend(
+            [
+                "--torchrec-profiler",
+                "--torchrec-profiler-warmup",
+                str(cfg.profiler_warmup),
+                "--torchrec-profiler-active",
+                str(cfg.profiler_active),
+                "--torchrec-profiler-repeat",
+                str(cfg.profiler_repeat),
+                "--torchrec-trace-dir",
+                str(cfg.output_dir / "outputs" / run_id / "torchrec_traces"),
+                "--torchrec-trace-csv",
+                str(cfg.output_dir / "outputs" / run_id / "torchrec_trace.csv"),
+            ]
+        )
     return _wrap_remote(cmd, ssh_host=client.ssh_host, ssh_port=client.ssh_port, cwd=client.repo_root)

@@ -8,8 +8,6 @@ searches, in order:
     1. Wheel install location:  recstore/lib/_recstore_ops.so
     2. In-place dev build:      recstore/_recstore_ops.so
     3. Legacy CMake artifacts:  build/lib/lib_recstore_ops.so
-    4. setuptools build dir:   build/lib.*/recstore/_recstore_ops.so
-                                 or build/lib.*/recstore/lib/_recstore_ops.so
 
 Loading is idempotent: if ``torch.ops.recstore_ops`` is already registered
 (e.g. by a prior ``import recstore`` in the same process, or because another
@@ -24,6 +22,8 @@ import sys
 import torch  # must be imported before the native extension
 
 
+# Fallback for source trees that have not been configured by CMake yet; the
+# generated version_info module overrides this below.
 __version__ = "0.1.0"
 
 
@@ -34,9 +34,8 @@ def _find_extension_so(pkg_path: str) -> str | None:
     """Locate the compiled ``_recstore_ops`` extension (.so).
 
     Order: wheel/install under recstore/lib/ -> in-place build under
-    recstore/ -> legacy CMake build/lib/lib_recstore_ops.so -> setuptools
-    build/lib.*/recstore/{lib/,}_recstore_ops.so.  Newest match wins when
-    multiple candidates exist (typical during dev builds).
+    recstore/ -> legacy CMake build/lib/lib_recstore_ops.so.  Newest match
+    wins when multiple candidates exist (typical during dev builds).
     """
     patterns = ("_recstore_ops*.so", "lib_recstore_ops*.so")
     repo_root = os.path.abspath(os.path.join(pkg_path, "..", "..", "..", ".."))
@@ -68,20 +67,6 @@ def _find_extension_so(pkg_path: str) -> str | None:
     legacy = _first_under([os.path.join(repo_root, "build", "lib")])
     if legacy:
         return legacy
-
-    # 4. setuptools build/lib.*/recstore/{lib/,}_recstore_ops.so
-    #    (covers `python setup.py build` without --inplace)
-    build_matches = []
-    for pat in patterns:
-        build_matches.extend(glob.glob(
-            os.path.join(repo_root, "build", "lib.*", "recstore", "lib", pat)
-        ))
-        build_matches.extend(glob.glob(
-            os.path.join(repo_root, "build", "lib.*", "recstore", pat)
-        ))
-    if build_matches:
-        build_matches.sort(key=os.path.getmtime, reverse=True)
-        return build_matches[0]
 
     return None
 
@@ -118,10 +103,9 @@ def _ensure_native_loaded() -> str | None:
     if not lib_path or not os.path.isfile(lib_path):
         raise OSError(
             "RecStore: native extension not found.  Looked under "
-            f"{pkg_path!r}/lib, {pkg_path!r}, the repo's build/lib/, and "
-            "build/lib.*/recstore/{lib/,}.  Build the extension first via "
-            "`python setup.py build_ext --inplace` (or `pip install -e .`), "
-            "or run the CMake build (`cmake --build build`) which produces "
+            f"{pkg_path!r}/lib, {pkg_path!r}, and the repo's build/lib/.  "
+            "Install the package (`pip install .` / `pip install -e .`) or run "
+            "the CMake build (`cmake --build build`), which produces "
             "build/lib/lib_recstore_ops.so."
         )
 
@@ -154,11 +138,15 @@ if os.environ.get("RECSTORE_DEFER_OPS_LOAD") != "1":
 
 
 # ---------------------------------------------------------------------------
-# Build info (generated at build time by setup.py BuildPyCommand)
+# Build info (generated at build time from src/python/version_info.py.in)
 # ---------------------------------------------------------------------------
 try:
     from . import version_info
+
     __build_info__ = version_info.get_version_info()
+    # version_info carries the version from the repository VERSION file, which
+    # is the single source of truth for the package version.
+    __version__ = __build_info__["version"]
 except ImportError:
     __build_info__ = {
         "version": __version__,

@@ -2,11 +2,15 @@
 
 #include <arpa/inet.h>
 
+#include <unistd.h>
+
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -41,6 +45,107 @@ std::string QpCreateError(const RawVerbsConfig& config, int node) {
          ", num_clients=" + std::to_string(config.num_clients) +
          "). Reduce --client-count or --qps-per-client-per-shard.";
 }
+
+// Opt-in RDMA wire trace for offline NIC bandwidth reconstruction.
+//
+// RECSTORE_RDMA_WIRE_TRACE=<path> appends one JSONL record per posted work
+// request; RECSTORE_RDMA_WIRE_TRACE_TAG labels the writer (default: pid). The
+// `node` field is the peer global node id, so client requests and server
+// responses can be separated after the run. Disabled by default: the hot path
+// costs one null check.
+class RdmaWireTrace {
+public:
+  static RdmaWireTrace& Instance() {
+    static RdmaWireTrace instance;
+    return instance;
+  }
+
+  void Record(const char* op, int self, int node, std::size_t bytes) {
+    if (file_ == nullptr) {
+      return;
+    }
+    timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    const auto stamp =
+        static_cast<unsigned long long>(now.tv_sec) * 1000000000ull +
+        static_cast<unsigned long long>(now.tv_nsec);
+    char line[224];
+    const int written = std::snprintf(
+        line,
+        sizeof(line),
+        "{\"t\":%llu,\"tag\":\"%s\",\"pid\":%d,\"op\":\"%s\","
+        "\"self\":%d,\"node\":%d,\"bytes\":%llu}\n",
+        stamp,
+        tag_.c_str(),
+        static_cast<int>(getpid()),
+        op,
+        self,
+        node,
+        static_cast<unsigned long long>(bytes));
+    if (written <= 0) {
+      return;
+    }
+    // snprintf returns the *would-be* length; anything that did not fit in
+    // `line` would read past the buffer here. kMaxTagLen keeps this
+    // unreachable in practice; if it ever trips, drop the record instead of
+    // emitting a truncated (invalid) JSONL line.
+    if (static_cast<std::size_t>(written) >= sizeof(line)) {
+      return;
+    }
+    std::lock_guard<std::mutex> guard(mutex_);
+    buffer_.append(line, static_cast<std::size_t>(written));
+    // The PS server is killed rather than shut down cleanly, so a purely
+    // size-triggered flush silently drops whatever sits in the buffer at
+    // exit. A time budget bounds that loss to kFlushIntervalNs of posts.
+    if (buffer_.size() >= kFlushBytes ||
+        stamp - last_flush_ns_ >= kFlushIntervalNs) {
+      FlushLocked();
+      last_flush_ns_ = stamp;
+    }
+  }
+
+  ~RdmaWireTrace() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    FlushLocked();
+    if (file_ != nullptr) {
+      std::fclose(file_);
+    }
+  }
+
+private:
+  RdmaWireTrace() {
+    const char* path = std::getenv("RECSTORE_RDMA_WIRE_TRACE");
+    if (path == nullptr || *path == '\0') {
+      return;
+    }
+    const char* tag = std::getenv("RECSTORE_RDMA_WIRE_TRACE_TAG");
+    tag_ = (tag != nullptr && *tag != '\0') ? tag : std::to_string(getpid());
+    // Keep every record inside `line[224]` in Record(); the fixed fields
+    // already take ~90 bytes at their widest.
+    if (tag_.size() > kMaxTagLen) {
+      tag_.resize(kMaxTagLen);
+    }
+    file_ = std::fopen(path, "a");
+  }
+
+  void FlushLocked() {
+    if (file_ != nullptr && !buffer_.empty()) {
+      std::fwrite(buffer_.data(), 1, buffer_.size(), file_);
+      std::fflush(file_);
+    }
+    buffer_.clear();
+  }
+
+  static constexpr std::size_t kMaxTagLen  = 64;
+  static constexpr std::size_t kFlushBytes = 256 * 1024;
+  // 100ms worth of posts is negligible to lose at process kill time.
+  static constexpr unsigned long long kFlushIntervalNs = 100ull * 1000 * 1000;
+  std::FILE* file_                                     = nullptr;
+  std::string tag_;
+  std::string buffer_;
+  unsigned long long last_flush_ns_ = 0;
+  std::mutex mutex_;
+};
 
 struct OpenedRawVerbsDevice {
   ibv_context* context = nullptr;
@@ -210,6 +315,20 @@ void ModifyQpToRts(ibv_qp* qp) {
 
 } // namespace
 
+std::string
+DescribeRawVerbsCompletionError(const RawVerbsCompletionError& error) {
+  return std::string("raw verbs CQ error: ") + ibv_wc_status_str(error.status) +
+         " class=" + RawVerbsErrorClassToString(error.error_class) +
+         " wr_id=" + std::to_string(error.wr_id) +
+         " opcode=" + std::to_string(static_cast<int>(error.opcode));
+}
+
+RawVerbsCompletionException::RawVerbsCompletionException(
+    const RawVerbsCompletionError& error, const std::string& context)
+    : std::runtime_error(DescribeRawVerbsCompletionError(error) +
+                         (context.empty() ? std::string() : " " + context)),
+      error_(error) {}
+
 struct RawVerbsTransport::Impl {
   explicit Impl(const RawVerbsConfig& c)
       : config(c), allocator(c.local_region_bytes, c.allocation_start_offset) {}
@@ -229,6 +348,11 @@ struct RawVerbsTransport::Impl {
   std::vector<RawVerbsRemoteMemory> remotes;
   std::vector<ibv_qp*> qps;
   std::vector<std::uint32_t> max_inline_data_per_node;
+  // Per-peer lane generation this side publishes. Indexed by node id.
+  std::vector<std::uint64_t> lane_generations;
+  // One control-plane channel shared by Publish()/Connect()/RefreshPeerMeta().
+  std::unique_ptr<RdmaControlPlaneClient> control_plane;
+  std::mutex cq_mutex; // Serializes CQ access across drains and wait harvests.
   ibv_wc wc_batch[kRawVerbsPollBatchSize] = {};
   RawVerbsCompletionBatchCursor batch_cursor;
 };
@@ -294,6 +418,7 @@ RawVerbsTransport::RawVerbsTransport(const RawVerbsConfig& config)
   impl_->qps.resize(static_cast<std::size_t>(node_count), nullptr);
   impl_->max_inline_data_per_node.assign(
       static_cast<std::size_t>(node_count), 0);
+  impl_->lane_generations.assign(static_cast<std::size_t>(node_count), 0);
   for (int node = 0; node < node_count; ++node) {
     if (!ShouldRawVerbsConnectToNode(config, node)) {
       continue;
@@ -414,7 +539,8 @@ GlobalAddress RawVerbsTransport::LocalAddress(void* ptr) const {
   }
   return GlobalAddress{
       static_cast<std::uint16_t>(impl_->config.global_id),
-      static_cast<std::uint64_t>(addr - base),
+      impl_->config.region_origin_offset +
+          static_cast<std::uint64_t>(addr - base),
   };
 }
 
@@ -423,10 +549,12 @@ void* RawVerbsTransport::LocalPointer(GlobalAddress address) const {
     throw std::runtime_error(
         "raw verbs local pointer requested for remote node");
   }
-  if (address.offset >= impl_->local_bytes) {
+  const std::uint64_t origin = impl_->config.region_origin_offset;
+  if (address.offset < origin ||
+      address.offset - origin >= impl_->local_bytes) {
     throw std::runtime_error("raw verbs local offset outside region");
   }
-  return static_cast<char*>(impl_->local_base) + address.offset;
+  return static_cast<char*>(impl_->local_base) + (address.offset - origin);
 }
 
 RawVerbsNodeMeta RawVerbsTransport::LocalMeta() const {
@@ -446,12 +574,15 @@ RawVerbsNodeMeta RawVerbsTransport::LocalMeta() const {
       impl_->config.global_id < impl_->config.num_servers
           ? impl_->config.global_id
           : impl_->config.global_id - impl_->config.num_servers;
-  meta.lid              = port_attr.lid;
-  meta.psn              = kRawVerbsPsn;
-  meta.rkey             = impl_->local_mr->rkey;
-  meta.base_addr        = reinterpret_cast<std::uint64_t>(impl_->local_base);
-  meta.deployment_id    = impl_->config.deployment_id;
-  meta.deployment_epoch = impl_->config.deployment_epoch;
+  meta.lid  = port_attr.lid;
+  meta.psn  = kRawVerbsPsn;
+  meta.rkey = impl_->local_mr->rkey;
+  // Peers address this lane with global offsets, so publish the base that
+  // makes `base_addr + offset` land inside the locally allocated slice.
+  meta.base_addr = reinterpret_cast<std::uint64_t>(impl_->local_base) -
+                   impl_->config.region_origin_offset;
+  meta.deployment_id        = impl_->config.deployment_id;
+  meta.deployment_epoch     = impl_->config.deployment_epoch;
   meta.configuration_digest = impl_->config.configuration_digest;
   meta.fabric_digest        = impl_->config.fabric_digest;
   meta.protocol_version     = impl_->config.protocol_version;
@@ -471,25 +602,60 @@ RawVerbsNodeMeta RawVerbsTransport::LocalMeta() const {
   return meta;
 }
 
+namespace {
+RdmaControlPlaneEndpoint
+MakeControlPlaneEndpoint(const RawVerbsConfig& config) {
+  return RdmaControlPlaneEndpoint{
+      config.control_plane_host,
+      config.control_plane_port,
+      config.control_plane_timeout_ms,
+      config.deployment_id,
+      config.deployment_epoch,
+      config.protocol_version,
+      config.configuration_digest,
+      config.fabric_digest,
+  };
+}
+
+// Fetches and validates `node`'s published metadata over the transport's shared
+// control-plane channel. Shared by the initial Connect() handshake and the
+// RefreshPeerMeta() re-read.
+RawVerbsNodeMeta FetchPeerMetaFromControlPlane(
+    RdmaControlPlaneClient& control_plane,
+    const RawVerbsConfig& config,
+    int node,
+    int timeout_ms) {
+  const RawVerbsNodeMeta meta = control_plane.GetMeta(
+      node,
+      config.remote_lane,
+      config.global_id,
+      config.local_lane,
+      timeout_ms > 0 ? timeout_ms : config.control_plane_timeout_ms);
+  ValidateRawVerbsPeerMeta(config, node, meta);
+  return meta;
+}
+} // namespace
+
+RdmaControlPlaneClient& RawVerbsTransport::ControlPlane() {
+  if (impl_->control_plane == nullptr) {
+    impl_->control_plane = std::make_unique<RdmaControlPlaneClient>(
+        MakeControlPlaneEndpoint(impl_->config));
+  }
+  return *impl_->control_plane;
+}
+
 void RawVerbsTransport::Publish() {
   const int node_count = impl_->config.num_servers + impl_->config.num_clients;
-  const RawVerbsNodeMeta local = LocalMeta();
-  RdmaControlPlaneClient control_plane({
-      impl_->config.control_plane_host,
-      impl_->config.control_plane_port,
-      impl_->config.control_plane_timeout_ms,
-      impl_->config.deployment_id,
-      impl_->config.deployment_epoch,
-      impl_->config.protocol_version,
-      impl_->config.configuration_digest,
-      impl_->config.fabric_digest,
-  });
+  const RawVerbsNodeMeta local          = LocalMeta();
+  RdmaControlPlaneClient& control_plane = ControlPlane();
   for (int node = 0; node < node_count; ++node) {
     if (!ShouldRawVerbsConnectToNode(impl_->config, node)) {
       continue;
     }
     RawVerbsNodeMeta peer_local = local;
     peer_local.qpn = impl_->qps[static_cast<std::size_t>(node)]->qp_num;
+    peer_local.lane_generation =
+        impl_->lane_generations[static_cast<std::size_t>(node)];
     control_plane.PublishMeta(
         impl_->config.global_id,
         impl_->config.local_lane,
@@ -502,16 +668,6 @@ void RawVerbsTransport::Publish() {
 void RawVerbsTransport::Connect() {
   const int node_count = impl_->config.num_servers + impl_->config.num_clients;
   const RawVerbsNodeMeta local = LocalMeta();
-  RdmaControlPlaneClient control_plane({
-      impl_->config.control_plane_host,
-      impl_->config.control_plane_port,
-      impl_->config.control_plane_timeout_ms,
-      impl_->config.deployment_id,
-      impl_->config.deployment_epoch,
-      impl_->config.protocol_version,
-      impl_->config.configuration_digest,
-      impl_->config.fabric_digest,
-  });
   impl_->metas.assign(static_cast<std::size_t>(node_count), RawVerbsNodeMeta{});
   impl_->remotes.assign(
       static_cast<std::size_t>(node_count), RawVerbsRemoteMemory{});
@@ -529,13 +685,8 @@ void RawVerbsTransport::Connect() {
     if (!ShouldRawVerbsConnectToNode(impl_->config, node)) {
       continue;
     }
-    const RawVerbsNodeMeta meta = control_plane.GetMeta(
-        node,
-        impl_->config.remote_lane,
-        impl_->config.global_id,
-        impl_->config.local_lane,
-        impl_->config.control_plane_timeout_ms);
-    ValidateRawVerbsPeerMeta(impl_->config, node, meta);
+    const RawVerbsNodeMeta meta =
+        FetchPeerMetaFromControlPlane(ControlPlane(), impl_->config, node, -1);
     impl_->metas[static_cast<std::size_t>(node)]   = meta;
     impl_->remotes[static_cast<std::size_t>(node)] = RawVerbsRemoteMemory{
         meta.node_id,
@@ -578,6 +729,93 @@ void RawVerbsTransport::PublishAndConnect() {
   Connect();
 }
 
+void RawVerbsTransport::RebuildQp(std::uint16_t node_id) {
+  if (node_id >= impl_->qps.size() ||
+      impl_->qps[static_cast<std::size_t>(node_id)] == nullptr ||
+      !ShouldRawVerbsConnectToNode(impl_->config, node_id)) {
+    throw std::runtime_error("raw verbs rebuild: node is not connected");
+  }
+  ibv_qp* qp = impl_->qps[static_cast<std::size_t>(node_id)];
+
+  // Serialize with CQ polling. Reset first: the transition flushes every
+  // outstanding WR on the QP (and its receive queue), and the resulting
+  // completions join the earlier failure completions already parked in the CQ.
+  std::lock_guard<std::mutex> guard(impl_->cq_mutex);
+  impl_->batch_cursor.Reset(impl_->wc_batch, 0);
+  ibv_qp_attr reset_attr{};
+  reset_attr.qp_state = IBV_QPS_RESET;
+  if (ibv_modify_qp(qp, &reset_attr, IBV_QP_STATE) != 0) {
+    throw std::runtime_error(IbvError("ibv_modify_qp RESET"));
+  }
+  // Drop those completions so none is misattributed to a fresh submit. Callers
+  // only rebuild a QP whose CQ carries no other poster, so the drain cannot
+  // discard another peer QP's completions.
+  while (true) {
+    const int drained =
+        ibv_poll_cq(impl_->cq, kRawVerbsPollBatchSize, impl_->wc_batch);
+    if (drained < 0) {
+      throw std::runtime_error("ibv_poll_cq failed during raw verbs rebuild");
+    }
+    if (drained == 0) {
+      break;
+    }
+  }
+
+  ModifyQpToInit(qp, impl_->config.port_num);
+  ModifyQpToRtr(
+      qp,
+      impl_->metas[static_cast<std::size_t>(node_id)],
+      impl_->gid_index,
+      impl_->config.port_num,
+      impl_->config.fabric_mode,
+      impl_->config.hop_limit,
+      impl_->config.traffic_class,
+      impl_->config.flow_label);
+  ModifyQpToRts(qp);
+  // Reset flushed the receive queue; re-arm it so incoming doorbells land.
+  for (int i = 0; i < kRawVerbsRecvDepth; ++i) {
+    ibv_recv_wr wr{};
+    ibv_recv_wr* bad_wr = nullptr;
+    wr.wr_id            = static_cast<std::uint64_t>(node_id);
+    wr.sg_list          = nullptr;
+    wr.num_sge          = 0;
+    if (ibv_post_recv(qp, &wr, &bad_wr) != 0) {
+      throw std::runtime_error("ibv_post_recv failed during rebuild");
+    }
+  }
+}
+
+std::uint64_t RawVerbsTransport::LaneGeneration(std::uint16_t node_id) const {
+  if (node_id >= impl_->lane_generations.size()) {
+    throw std::runtime_error("raw verbs generation: node out of range");
+  }
+  return impl_->lane_generations[static_cast<std::size_t>(node_id)];
+}
+
+std::uint64_t RawVerbsTransport::AdvanceLaneGeneration(std::uint16_t node_id) {
+  const std::uint64_t next = LaneGeneration(node_id) + 1;
+  impl_->lane_generations[static_cast<std::size_t>(node_id)] = next;
+  Publish();
+  return next;
+}
+
+RawVerbsNodeMeta
+RawVerbsTransport::RefreshPeerMeta(std::uint16_t node_id, int timeout_ms) {
+  if (node_id >= impl_->qps.size() ||
+      !ShouldRawVerbsConnectToNode(impl_->config, node_id)) {
+    throw std::runtime_error("raw verbs peer meta: node is not connected");
+  }
+  const RawVerbsNodeMeta meta = FetchPeerMetaFromControlPlane(
+      ControlPlane(), impl_->config, node_id, timeout_ms);
+  impl_->metas[static_cast<std::size_t>(node_id)]   = meta;
+  impl_->remotes[static_cast<std::size_t>(node_id)] = RawVerbsRemoteMemory{
+      meta.node_id,
+      meta.base_addr,
+      meta.rkey,
+  };
+  return meta;
+}
+
 void RawVerbsTransport::Write(
     const void* local,
     GlobalAddress remote,
@@ -613,6 +851,8 @@ void RawVerbsTransport::Write(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send write failed");
   }
+  RdmaWireTrace::Instance().Record(
+      "write", impl_->config.global_id, remote.nodeID, bytes);
 }
 
 void RawVerbsTransport::WriteSg(
@@ -649,6 +889,10 @@ void RawVerbsTransport::WriteSg(
   if (verbs_sges.empty()) {
     return;
   }
+  std::size_t total_sg_bytes = 0;
+  for (const auto& sge : verbs_sges) {
+    total_sg_bytes += sge.length;
+  }
   ibv_send_wr wr{};
   wr.wr_id      = wr_id;
   wr.opcode     = IBV_WR_RDMA_WRITE;
@@ -662,6 +906,8 @@ void RawVerbsTransport::WriteSg(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send write-sg failed");
   }
+  RdmaWireTrace::Instance().Record(
+      "write_sg", impl_->config.global_id, remote.nodeID, total_sg_bytes);
 }
 
 void RawVerbsTransport::WriteWithImm(
@@ -698,6 +944,8 @@ void RawVerbsTransport::WriteWithImm(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send write-with-imm failed");
   }
+  RdmaWireTrace::Instance().Record(
+      "write_imm", impl_->config.global_id, remote.nodeID, bytes);
 }
 
 void RawVerbsTransport::Read(
@@ -726,6 +974,8 @@ void RawVerbsTransport::Read(
   if (ibv_post_send(impl_->qps[remote.nodeID], &wr, &bad_wr) != 0) {
     throw std::runtime_error("ibv_post_send read failed");
   }
+  RdmaWireTrace::Instance().Record(
+      "read", impl_->config.global_id, remote.nodeID, bytes);
 }
 
 void RawVerbsTransport::SendDoorbell(
@@ -746,6 +996,49 @@ void RawVerbsTransport::SendDoorbell(
   }
 }
 
+RawVerbsPollOutcome RawVerbsTransport::TryPoll(RawVerbsCompletion* completion,
+                                               RawVerbsCompletionError* error) {
+  std::lock_guard<std::mutex> guard(impl_->cq_mutex);
+  if (!impl_->batch_cursor.HasCachedCompletion()) {
+    const int n =
+        ibv_poll_cq(impl_->cq, kRawVerbsPollBatchSize, impl_->wc_batch);
+    if (n < 0) {
+      throw std::runtime_error("ibv_poll_cq failed");
+    }
+    if (n == 0) {
+      return RawVerbsPollOutcome::kEmpty;
+    }
+    impl_->batch_cursor.Reset(impl_->wc_batch, n);
+  }
+  ibv_wc& wc = *impl_->batch_cursor.TakeCachedCompletion();
+  if (wc.status != IBV_WC_SUCCESS) {
+    error->status      = wc.status;
+    error->wr_id       = wc.wr_id;
+    error->opcode      = wc.opcode;
+    error->error_class = ClassifyRawVerbsCompletionStatus(wc.status);
+    return RawVerbsPollOutcome::kError;
+  }
+  if (completion != nullptr) {
+    completion->wr_id    = wc.wr_id;
+    completion->opcode   = wc.opcode;
+    completion->has_imm  = (wc.wc_flags & IBV_WC_WITH_IMM) != 0;
+    completion->imm_data = completion->has_imm ? ntohl(wc.imm_data) : 0;
+  }
+  if (wc.opcode == IBV_WC_RECV || wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
+    const std::uint16_t node_id = static_cast<std::uint16_t>(wc.wr_id);
+    ibv_recv_wr wr{};
+    ibv_recv_wr* bad_wr = nullptr;
+    wr.wr_id            = node_id;
+    wr.sg_list          = nullptr;
+    wr.num_sge          = 0;
+    if (node_id < impl_->qps.size() &&
+        ibv_post_recv(impl_->qps[node_id], &wr, &bad_wr) != 0) {
+      throw std::runtime_error("ibv_post_recv repost failed");
+    }
+  }
+  return RawVerbsPollOutcome::kCompletion;
+}
+
 bool RawVerbsTransport::Poll(RawVerbsCompletion* completion, int timeout_ms) {
   const auto deadline =
       timeout_ms > 0
@@ -753,45 +1046,18 @@ bool RawVerbsTransport::Poll(RawVerbsCompletion* completion, int timeout_ms) {
                 std::chrono::milliseconds(timeout_ms)
           : std::chrono::steady_clock::time_point::max();
   while (true) {
-    if (!impl_->batch_cursor.HasCachedCompletion()) {
-      const int n =
-          ibv_poll_cq(impl_->cq, kRawVerbsPollBatchSize, impl_->wc_batch);
-      if (n < 0) {
-        throw std::runtime_error("ibv_poll_cq failed");
-      }
-      if (n == 0) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-          return false;
-        }
-        std::this_thread::yield();
-        continue;
-      }
-      impl_->batch_cursor.Reset(impl_->wc_batch, n);
+    RawVerbsCompletionError error;
+    const RawVerbsPollOutcome outcome = TryPoll(completion, &error);
+    if (outcome == RawVerbsPollOutcome::kCompletion) {
+      return true;
     }
-    ibv_wc& wc = *impl_->batch_cursor.TakeCachedCompletion();
-    if (wc.status != IBV_WC_SUCCESS) {
-      throw std::runtime_error(
-          std::string("raw verbs CQ error: ") + ibv_wc_status_str(wc.status));
+    if (outcome == RawVerbsPollOutcome::kError) {
+      throw RawVerbsCompletionException(error);
     }
-    if (completion != nullptr) {
-      completion->wr_id    = wc.wr_id;
-      completion->opcode   = wc.opcode;
-      completion->has_imm  = (wc.wc_flags & IBV_WC_WITH_IMM) != 0;
-      completion->imm_data = completion->has_imm ? ntohl(wc.imm_data) : 0;
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
     }
-    if (wc.opcode == IBV_WC_RECV || wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM) {
-      const std::uint16_t node_id = static_cast<std::uint16_t>(wc.wr_id);
-      ibv_recv_wr wr{};
-      ibv_recv_wr* bad_wr = nullptr;
-      wr.wr_id            = node_id;
-      wr.sg_list          = nullptr;
-      wr.num_sge          = 0;
-      if (node_id < impl_->qps.size() &&
-          ibv_post_recv(impl_->qps[node_id], &wr, &bad_wr) != 0) {
-        throw std::runtime_error("ibv_post_recv repost failed");
-      }
-    }
-    return true;
+    std::this_thread::yield();
   }
 }
 

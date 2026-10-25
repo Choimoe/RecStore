@@ -20,8 +20,6 @@
 #  ARGN - .proto files
 #
 
-message(STATUS "This is in FindGRPC")
-
 function(GRPC_GENERATE_CPP SRCS HDRS DEST)
   if(NOT ARGN)
     message(SEND_ERROR "Error: GRPC_GENERATE_CPP() called without any proto files")

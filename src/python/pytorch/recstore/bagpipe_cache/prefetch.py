@@ -6,9 +6,10 @@ from the benchmark branch (codex/bench-bagpipe-buffer-pool): the PS
 prefetch is issued at enqueue time, ``lookahead`` steps before the batch
 is consumed, so ``wait_and_get`` at consume is near-instant.
 
-全部 per-id 决策走 controller 的扁平 GPU 张量 (_latest_dev/_ttl_dev/
-_cached_dev), 与原版 BagPipe oracle 的 numpy 数组向量化同构 —— enqueue
-路径没有任何逐 fid 的 Python 循环。
+All per-id decisions run on the controller's flat GPU tensors
+(_latest_dev/_ttl_dev/_cached_dev), isomorphic to the original BagPipe
+oracle's vectorized numpy arrays -- the enqueue path has no per-fid
+Python loop.
 """
 
 from __future__ import annotations
@@ -34,7 +35,8 @@ class BagPipePrefetchMixin:
     ``_shared_ids``, ``cache_capacity``, ``_stats``, ``_id_extractor``,
     ``_latest_dev``, ``_ttl_dev``, ``_cached_dev``, ``_to_compact()``,
     ``_to_fused()``, ``_compact_in_range()``,
-    ``_ttl_margin``, ``_max_inflight_prefetch``.
+    ``_ttl_margin``, ``_max_inflight_prefetch``,
+    ``_prescan_batch_ids``, ``_prescan_batch_numels``.
     """
 
     # ------------------------------------------------------------------
@@ -46,9 +48,10 @@ class BagPipePrefetchMixin:
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Extract unique fused IDs + inverse from a sparse batch.
 
-        返回 ``(unique_ids, inverse, raw_count)``; unique_ids/inverse 留在
-        提取器所在设备 (生产路径为 GPU), inverse 供 record_pooled_grad 的
-        prepared 路径复用, 免去 runner 侧第二次 unique。
+        Returns ``(unique_ids, inverse, raw_count)``; unique_ids/inverse
+        stay on the extractor's device (GPU on the production path), and
+        inverse is reused by record_pooled_grad's prepared path, saving a
+        second unique() on the runner side.
         """
         fused_all = self._id_extractor(sparse_features)
         if fused_all.numel() == 0:
@@ -79,6 +82,24 @@ class BagPipePrefetchMixin:
         batch_num = self._next_enqueue_batch
         self._next_enqueue_batch += 1
 
+        # Prescan alignment tripwire: the sync-free aggregation path sizes
+        # its collectives from the prescan per-batch counts, which is only
+        # sound while the training pass consumes batches in the prescan
+        # order.  The unique-ID count is host metadata (no sync) and any
+        # reorder changes it for some batch, so a mismatch fails loudly here
+        # -- far better than a silent collective misalignment mid-training.
+        prescan_numels = getattr(self, "_prescan_batch_numels", None)
+        if prescan_numels:
+            expected = prescan_numels[batch_num % len(prescan_numels)]
+            if int(unique_ids.numel()) != expected:
+                raise RuntimeError(
+                    "BagPipe prescan alignment broken at batch "
+                    f"{batch_num}: {int(unique_ids.numel())} unique IDs, "
+                    f"prescan recorded {expected}.  The training dataloader "
+                    "order diverged from the prescan pass; the prescan "
+                    "sizing metadata can no longer be trusted."
+                )
+
         if unique_ids.numel() == 0:
             self._lookahead_ids.append((batch_num, unique_ids))
             return None
@@ -92,7 +113,8 @@ class BagPipePrefetchMixin:
             raw_count,
         )
         compact = self._compact_in_range(self._to_compact(ids_dev))
-        # enqueue 批号严格递增, 直接 scatter 即等价于 max(旧值, batch)
+        # Enqueue batch numbers increase strictly, so a plain scatter
+        # equals max(old, batch)
         self._latest_dev[compact] = batch_num
         self._preissue_prefetch(batch_num, ids_dev, compact)
         return (ids_dev, inverse_dev, raw_count)
@@ -102,10 +124,19 @@ class BagPipePrefetchMixin:
     # ------------------------------------------------------------------
 
     def prescan_batch(self, batch_num: int, sparse_features: Any) -> None:
-        """Record a batch's unique IDs during a full-dataset pre-scan."""
+        """Record a batch's unique IDs during a full-dataset pre-scan.
+
+        Besides the global union (which builds the shared-ID set at
+        finalize), each batch's unique-ID tensor is kept: finalize exchanges
+        the per-batch shared-ID counts across ranks so the sparse all_gather
+        in update_grads can be sized ahead of time (sync-free aggregation).
+        """
         unique_ids, _, _ = self._compute_unique_fused_ids(sparse_features)
         id_set = unique_ids.tolist() if unique_ids.numel() > 0 else []
         self._prescan_unique_ids.update(id_set)
+        self._prescan_batch_ids.append(
+            unique_ids.detach().to("cpu", dtype=torch.int64)
+        )
         self._stats["bagpipe_prescan_batches"] += 1
         self._stats["bagpipe_prescan_ids"] += float(len(id_set))
 
@@ -121,9 +152,8 @@ class BagPipePrefetchMixin:
         """Fill GPU cache from the pre-issued prefetch handle with TTL tracking.
 
         First consumes the deferred aggregated-gradient barrier (the previous
-        step's dense all_reduce: reduced shared-ID gradients are applied in
-        place to the local cache on every rank, and rank0 issues the PS
-        persistence push), then fills the cache from the handle pre-issued at
+        step's dense all_reduce applies reduced shared-ID gradients in place
+        on every rank), then fills the cache from the handle pre-issued at
         enqueue time.  Because the PS had ``lookahead`` steps to respond,
         ``wait_and_get`` is near-instant.
 
@@ -135,6 +165,7 @@ class BagPipePrefetchMixin:
         self._check_gpu_cache_generation()
 
         if not self._lookahead_ids:
+            self._run_scheduled_cleanup()
             return
         batch_num, unique_ids = self._lookahead_ids.popleft()
         self._current_batch = batch_num
@@ -149,9 +180,16 @@ class BagPipePrefetchMixin:
         all_hits = bool(self._prefetch_all_hits.pop(batch_num, False))
         if slot is not None:
             all_hits = self._fill_from_preissued(slot, compute_device)
-        elif all_hits and unique_ids.numel() > 0:
+
+        # Consume the pre-issued values while expired dirty rows are still
+        # resident.  The no-evict fill cannot overwrite those local updates.
+        # Cleanup may then persist and invalidate them, after which the
+        # forward lookup refetches the newly persisted value from the PS.
+        self._run_scheduled_cleanup(unique_ids)
+
+        if all_hits and unique_ids.numel() > 0:
             # The all-hit decision was taken at enqueue time, but TTL/capacity
-            # eviction, anti-entropy, and the writeback thread can invalidate
+            # eviction and anti-entropy cleanup can invalidate
             # these ids before they are consumed.  Re-validate immediately
             # ahead of the lock-free hit-only lookup; a stale flag would make
             # the lookup read rows that are no longer resident.
@@ -214,13 +252,19 @@ class BagPipePrefetchMixin:
             )
             return
 
-        # 向量化命中判定: 驻留且未过期 (compact 索引)。控制流只用 numel
-        # 元数据判断, 计数走 GPU 热累加器 —— 全程无 .item() 同步。
+        # Expiry is also the anti-entropy refresh trigger.  The prefetch may
+        # read an older PS value, but prefill_gpu_cache_no_evict cannot replace
+        # an expired row while it is still resident.  Cleanup persists dirty
+        # rows before invalidating them, and the forward miss then refetches
+        # the persisted value.
+        # Control flow only uses numel metadata; counters go through the
+        # GPU hot accumulators -- no .item() synchronization anywhere.
         hit = self._cached_dev[compact] & (self._ttl_dev[compact] >= batch_num)
         hit_compact = compact[hit]
         if hit_compact.numel() > 0:
             self._hot_add("bagpipe_prefetch_skip_cached", hit.sum())
-            # 命中续期到「最近使用 + margin」(latest 单调不减, 直接赋值即 max)
+            # Renew hits to "last use + margin" (latest is monotone
+            # non-decreasing, so a plain assign is the max)
             self._ttl_dev[hit_compact] = (
                 self._latest_dev[hit_compact] + self._ttl_margin
             )
@@ -254,11 +298,17 @@ class BagPipePrefetchMixin:
                 return
         self._prefetch_all_hits[batch_num] = False
 
+        # Each target can increase residency by at most one.  Record that
+        # upper-bound transition once here, regardless of whether prefetch or
+        # the synchronous lookup performs the actual no-evict insertion.
+        self._record_cache_insert_attempts(int(targets.numel()))
+
         outstanding = sum(
             1 for h in self._prefetch_handles.values() if h is not None
         )
         if outstanding >= self._max_inflight_prefetch:
-            # 槽池饱和: 该批不预取, 未命中 id 由 lookup 的 C++ miss 回填补齐
+            # Slot pool saturated: skip prefetching this batch; missed
+            # ids are backfilled by the C++ miss path in the lookup
             self._prefetch_handles[batch_num] = None
             self._stats["bagpipe_prefetch_throttled"] += 1.0
             probe_path = os.environ.get("RS_DEMO_BAGPIPE_PROBE_LOG")
@@ -277,7 +327,7 @@ class BagPipePrefetchMixin:
         # keys.  This batch is the latest use, so its TTL is batch + margin.
         targets = targets.contiguous()
         ttl = batch_num + self._ttl_margin
-        # kv_client / GPU cache 的 key 空间是 fused id
+        # The kv_client / GPU cache key space is fused id
         ids_cpu = self._to_fused(targets).cpu()
         issue_ts = time.perf_counter()
 
@@ -334,22 +384,26 @@ class BagPipePrefetchMixin:
             logger.warning("[BagPipe] GPU cache prefill failed: %s", exc)
             return False
 
-        # Only rows that the no-evict kernel actually inserted are resident.
-        # This is the authoritative transition into the flat mirror.
+        # The no-evict result is authoritative post-fill residency.  Existing
+        # rows also return true, but their values were not overwritten.
         compact = self._to_compact(ids_cuda)
         in_range = compact < self._latest_dev.numel()
         compact = compact[in_range]
-        inserted = inserted[in_range]
-        compact = compact[inserted]
-        self._ttl_dev[compact] = slot.ttl
-        self._cached_dev[compact] = True
-        inserted_count = int(inserted.sum().item())
-        if inserted_count < int(inserted.numel()):
-            self._insert_failures += int(inserted.numel()) - inserted_count
+        resident = inserted[in_range]
+        was_cached = self._cached_dev[compact]
+        newly_resident = resident & ~was_cached
+        self._ttl_dev[compact[newly_resident]] = slot.ttl
+        self._cached_dev[compact[resident]] = True
+        resident_count = int(resident.sum().item())
+        failed_count = int(resident.numel()) - resident_count
+        if failed_count:
+            self._insert_failures += failed_count
             self._stats["bagpipe_insert_failures"] = float(
                 self._insert_failures
             )
+        refresh_pending = bool((resident & was_cached).any().item())
         return (
-            inserted_count == int(inserted.numel())
-            and int(inserted.numel()) == int(slot.num_ids)
+            not refresh_pending
+            and resident_count == int(resident.numel())
+            and int(resident.numel()) == int(slot.num_ids)
         )

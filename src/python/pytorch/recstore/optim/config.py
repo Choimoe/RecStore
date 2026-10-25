@@ -22,6 +22,10 @@ class OptimizationConfig:
             at which to evict and write back.
         cache_capacity: GPU cache capacity (number of embedding rows).
         embedding_dim: Embedding dimension.
+        prescan: BagPipe-specific — precompute collective layouts over the
+            configured training steps and keep the full working set resident.
+            Requires a repeatable sequence, one ID per bag, and enough capacity.
+            Without it BagPipe uses dynamic prefetch and eviction.
         plugin_config: Extensible per-plugin config for future strategies.
     """
 
@@ -30,4 +34,5 @@ class OptimizationConfig:
     cleanup_proportion: float = 0.25
     cache_capacity: int = 0
     embedding_dim: int = 128
+    prescan: bool = False
     plugin_config: Dict[str, Any] = field(default_factory=dict)

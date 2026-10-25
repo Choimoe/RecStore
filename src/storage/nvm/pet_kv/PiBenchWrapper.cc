@@ -1,6 +1,5 @@
 #include "pet_hash.h"
-// #include "third_party/HashEvaluation-for-petps/hash/common/hash_api.h"
-#include "/home/xieminhui/HashEvaluation/hash/common/hash_api.h"
+#include "hash_api.h"
 #include "memory/shm_file.h"
 
 #include <memory>

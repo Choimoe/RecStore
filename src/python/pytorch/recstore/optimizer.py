@@ -7,7 +7,7 @@ import torch
 from typing import List, Union, Dict, Tuple, Any, Optional
 from time import perf_counter
 from .single_node_exchange import SparseGradPayload, exchange_sparse_grads
-
+from .gradient_compression import select_topk_rows
 _LOCAL_FAST_PATH_BACKENDS = {"local_shm", "hierkv"}
 
 
@@ -98,6 +98,23 @@ def _get_kv_client_if_needed(params: List[Any]):
         return get_kv_client()
     return None
 
+def _get_sparse_backend_name(kv_client: Any, *, strict: bool = False) -> Optional[str]:
+    """Return the client backend; fail closed when Top-K was requested."""
+    backend_fn = getattr(kv_client, "current_ps_backend", None)
+    if not callable(backend_fn):
+        if strict:
+            raise NotImplementedError(
+                "Top-K compression requires a queryable sparse backend"
+            )
+        return None
+    try:
+        return str(backend_fn()).lower()
+    except Exception as exc:
+        if strict:
+            raise RuntimeError("Could not determine sparse backend for Top-K") from exc
+        return None
+
+
 def _process_dist_embedding_module(mod: DistEmbedding, lr: float):
     """Handles the optimization step for a DistEmbedding module using gradient accumulation."""
     if not mod._trace:
@@ -121,7 +138,9 @@ def _process_dist_embedding_module(mod: DistEmbedding, lr: float):
     updated_weights = current_weights - scaled_grads
     mod.weight[unique_ids] = updated_weights
 
-def _process_generic_module_with_trace(mod: Any, lr: float, kv_client: Any):
+def _process_generic_module_with_trace(
+    mod: Any, lr: float, kv_client: Any, keep_ratio: float = 1.0
+):
     """Handles sparse trace aggregation and backend updates for generic modules."""
     if not mod._trace:
         return []
@@ -140,11 +159,19 @@ def _process_generic_module_with_trace(mod: Any, lr: float, kv_client: Any):
         traces_by_name.setdefault(name, []).append((ids, grads))
 
     module_kv_client = getattr(mod, "kv_client", None) or kv_client
-    current_ps_backend = getattr(module_kv_client, "current_ps_backend", None)
-    try:
-        direct_sgd = callable(current_ps_backend) and current_ps_backend() == "rdma"
-    except Exception:
-        direct_sgd = False
+    backend_name = _get_sparse_backend_name(
+        module_kv_client, strict=keep_ratio < 1.0
+    )
+    direct_sgd = backend_name == "rdma"
+    should_compress = keep_ratio < 1.0
+    if should_compress:
+        if not getattr(mod, "_enable_fusion", False):
+            raise NotImplementedError("Top-K compression requires Embedding Fusion")
+        if backend_name not in ("grpc", "distributed_grpc"):
+            raise NotImplementedError(
+                f"Top-K compression does not support backend: {backend_name}"
+            )
+
     handles = []
     for name, entries in traces_by_name.items():
         if len(entries) == 1:
@@ -163,7 +190,10 @@ def _process_generic_module_with_trace(mod: Any, lr: float, kv_client: Any):
             )
             update_grads.index_add_(0, inverse_indices, all_grads)
             update_ids = unique_ids
-
+            if should_compress:
+                update_ids, update_grads = select_topk_rows(
+                    update_ids, update_grads, keep_ratio
+                )
         # Backend sparse optimizers own learning-rate application for these modules.
         handle = module_kv_client.update_async(name=name, ids=update_ids, grads=update_grads)
         handles.append(
@@ -195,6 +225,48 @@ def _uses_shared_local_shm_single_table(mod: Any) -> bool:
 
 def _can_use_shared_local_shm_direct_fast_path(mod: Any) -> bool:
     return _uses_shared_local_shm_single_table(mod)
+
+
+def _validate_topk_module(mod: Any, default_kv_client: Any) -> None:
+    """Validate Top-K support before SparseSGD submits any sparse updates."""
+    if isinstance(mod, DistEmbedding):
+        raise NotImplementedError("Top-K compression does not support DistEmbedding")
+    if not (hasattr(mod, "_config_names") and hasattr(mod, "_trace")):
+        raise NotImplementedError(
+            f"Top-K compression does not support module: {type(mod).__name__}"
+        )
+    if not getattr(mod, "_enable_fusion", False):
+        raise NotImplementedError("Top-K compression requires Embedding Fusion")
+
+    if _can_use_shared_local_shm_direct_fast_path(mod):
+        if not callable(getattr(mod.kv_client, "local_update_flat", None)):
+            raise NotImplementedError("Top-K compression requires local_update_flat")
+        return
+
+    resolver = getattr(mod, "resolve_fast_path_backend", None)
+    if not callable(resolver):
+        raise NotImplementedError(
+            "Top-K compression requires a callable resolve_fast_path_backend"
+        )
+    fast_path_backend = resolver()
+    if fast_path_backend is not None:
+        if fast_path_backend not in _LOCAL_FAST_PATH_BACKENDS:
+            raise NotImplementedError(
+                f"Top-K compression does not support fast path: {fast_path_backend}"
+            )
+        if not callable(getattr(getattr(mod, "kv_client", None), "local_update_flat", None)):
+            raise NotImplementedError("Top-K compression requires local_update_flat")
+        return
+
+    client = getattr(mod, "kv_client", None) or default_kv_client
+    backend_name = _get_sparse_backend_name(client, strict=True)
+    if backend_name not in ("grpc", "distributed_grpc"):
+        raise NotImplementedError(
+            f"Top-K compression does not support backend: {backend_name}"
+        )
+    for method in ("update_async", "wait"):
+        if not callable(getattr(client, method, None)):
+            raise NotImplementedError(f"Top-K compression requires {method}")
 
 
 def _collect_traces_by_name(mod: Any) -> Dict[str, List[Tuple[torch.Tensor, torch.Tensor]]]:
@@ -231,6 +303,7 @@ def _process_generic_module_with_trace_single_node_distributed(
     mod: Any,
     lr: float,
     backend: str,
+    keep_ratio: float = 1.0,
 ) -> List[Dict[str, Any]]:
     if not mod._trace:
         return []
@@ -240,6 +313,15 @@ def _process_generic_module_with_trace_single_node_distributed(
     world_size = int(dist.get_world_size())
     exchange_backend = dist
     module_kv_client = getattr(mod, "kv_client", None)
+    if keep_ratio < 1.0:
+        if not getattr(mod, "_enable_fusion", False):
+            raise NotImplementedError(
+                "Single-node Top-K compression requires Embedding Fusion"
+            )
+        if backend not in _LOCAL_FAST_PATH_BACKENDS:
+            raise NotImplementedError(
+                f"Top-K compression does not support fast path: {backend}"
+            )
     if module_kv_client is None:
         raise RuntimeError("single-node distributed sparse update requires module kv_client")
     # ponytail: legacy clients may lack current_ps_backend / activate_shard
@@ -259,6 +341,11 @@ def _process_generic_module_with_trace_single_node_distributed(
         all_ids = torch.cat([ids for ids, _ in entries], dim=0)
         all_grads = torch.cat([grads for _, grads in entries], dim=0)
         unique_ids, summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
+
+        if keep_ratio < 1.0:
+            unique_ids, summed_grads = select_topk_rows(
+                unique_ids, summed_grads, keep_ratio
+            )
         normalized_ids = unique_ids.detach().to(dtype=torch.int64)
         normalized_grads = summed_grads.detach().to(dtype=torch.float32)
         destination_ranks = torch.remainder(normalized_ids, world_size)
@@ -343,6 +430,7 @@ def _process_generic_module_with_trace_single_node_distributed(
 def _process_generic_module_with_trace_shared_local_shm_single_table(
     mod: Any,
     lr: float,
+    keep_ratio: float = 1.0,
 ) -> List[Dict[str, Any]]:
     if not mod._trace:
         return []
@@ -376,6 +464,10 @@ def _process_generic_module_with_trace_shared_local_shm_single_table(
         all_ids = torch.cat([ids for ids, _ in entries], dim=0)
         all_grads = torch.cat([grads for _, grads in entries], dim=0)
         local_unique_ids, local_summed_grads = _aggregate_ids_and_grads(all_ids, all_grads)
+        if keep_ratio < 1.0:
+            local_unique_ids, local_summed_grads = select_topk_rows(
+                local_unique_ids, local_summed_grads, keep_ratio
+            )
         module_kv_client.local_update_flat(
             name=name,
             ids=local_unique_ids,
@@ -478,9 +570,28 @@ class SparseOptimizer:
             del self._inflight_handles[:completed]
 
 class SparseSGD(SparseOptimizer):
+    def __init__(self, params, lr, keep_ratio=1.0):
+        if not (0 < keep_ratio <= 1):
+            raise ValueError("keep_ratio must be in (0, 1]")
+        super().__init__(params, lr)
+        self.keep_ratio = keep_ratio
+
+    def validate_config(self) -> None:
+        """Reject unsupported Top-K configurations before any optimizer updates.
+
+        Training loops with dense optimizers should call this before the dense
+        step as well. Validation does not submit updates or consume traces.
+        """
+        if self.keep_ratio < 1.0:
+            for group in self.param_groups:
+                for mod in group["params"]:
+                    _validate_topk_module(mod, self.kv_client)
+
     def step(self):
         """Aggregates sparse gradients and submits them to the backend optimizer."""
         with torch.no_grad():
+            self.validate_config()
+
             self._last_update_payloads = []
             for group in self.param_groups:
                 lr = group["lr"]
@@ -490,19 +601,23 @@ class SparseSGD(SparseOptimizer):
                     elif hasattr(mod, '_config_names') and hasattr(mod, '_trace'):
                         if _can_use_shared_local_shm_direct_fast_path(mod):
                             self._last_update_payloads.extend(
-                                _process_generic_module_with_trace_shared_local_shm_single_table(mod, lr)
+                                _process_generic_module_with_trace_shared_local_shm_single_table(
+                                    mod, lr, keep_ratio=self.keep_ratio
+                                )
                             )
                         else:
                             fast_path_backend = mod.resolve_fast_path_backend()
                             if fast_path_backend is not None:
                                 self._last_update_payloads.extend(
                                     _process_generic_module_with_trace_single_node_distributed(
-                                        mod, lr, fast_path_backend
+                                        mod, lr, fast_path_backend, keep_ratio=self.keep_ratio
                                     )
                                 )
                             else:
                                 self._inflight_handles.extend(
-                                    _process_generic_module_with_trace(mod, lr, self.kv_client)
+                                    _process_generic_module_with_trace(
+                                        mod, lr, self.kv_client, keep_ratio=self.keep_ratio
+                                    )
                                 )
                     else:
                         print(f"Warning: Module type {type(mod).__name__} is not supported by SparseSGD optimizer.")

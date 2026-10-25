@@ -545,6 +545,7 @@ class TestRecStoreRunner(unittest.TestCase):
         _FakeRecStoreEmbeddingBagCollection.last_instance = None
 
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(recstore_runner.recstore, "load_ops_library"))
             stack.enter_context(
                 mock.patch.dict(
                     "sys.modules",
@@ -749,6 +750,14 @@ class TestRecStoreRunner(unittest.TestCase):
         cfg = RunConfig(backend="recstore", prefetch_depth=-1)
 
         with self.assertRaisesRegex(RuntimeError, "--prefetch-depth must be non-negative"):
+            config.validate_recstore_config(cfg)
+
+    def test_retired_bagpipe_planned_name_reports_prescan_migration(self) -> None:
+        cfg = config.parse_config([
+            "--backend", "recstore", "--optimization-plugin", "bagpipe_planned",
+            "--optimization-lookahead", "4", "--optimization-prescan",
+        ])
+        with self.assertRaisesRegex(RuntimeError, "bagpipe.*--optimization-prescan"):
             config.validate_recstore_config(cfg)
 
     def test_validate_recstore_config_rejects_negative_prefetch_issue_depth(self) -> None:
@@ -1067,6 +1076,9 @@ class TestRecStoreRunner(unittest.TestCase):
             def on_step_end(self, step, row) -> None:
                 del step, row
 
+            def consume_stats_into(self, row) -> None:
+                del row
+
             def shutdown(self) -> None:
                 self.shutdown_calls += 1
 
@@ -1096,11 +1108,68 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertFalse(client.gpu_cache_lookup_bypass_enabled)
         self.assertEqual(created_kwargs["master_table_name"], "t_cat_0")
         self.assertEqual(created_kwargs["cache_capacity"], 32)
+        self.assertFalse(created_kwargs["prescan"])
         self.assertEqual(len(plugins), 1)
         self.assertIs(_FakeSparseSGD.last_instance, plugins[0].optimizer)
         self.assertEqual(plugins[0].optimizer.step_calls, 1)
         self.assertEqual(plugins[0].optimizer.flush_calls, 1)
         self.assertEqual(plugins[0].shutdown_calls, 1)
+
+    def test_bagpipe_prescan_runs_full_schedule_and_planned_lifecycle(self) -> None:
+        cfg = config.parse_config([
+            "--backend", "recstore", "--steps", "5", "--warmup-steps", "0",
+            "--batch-size", "1", "--embedding-dim", "4", "--num-embeddings", "16",
+            "--read-mode", "bagpipe", "--optimization-prescan",
+        ])
+        for fail_lookup in (False, True):
+            with self.subTest(fail_lookup=fail_lookup):
+                plugin = mock.Mock(is_enabled=True, lookahead_depth=1, prefetch_buffer_depth=1)
+                optimizer = _FakeSparseSGD([], lr=0.01)
+                plugin.create_sparse_optimizer.return_value = optimizer
+                plugin.on_prepare.return_value = None
+                plugin._controller.consume_stats.return_value = {}
+                if fail_lookup:
+                    plugin._controller.lookup.side_effect = RuntimeError("lookup failed")
+                rows = []
+                with mock.patch("torch.cuda.is_available", return_value=False), mock.patch.object(
+                    recstore_runner.OptimizationPluginRegistry, "create", return_value=plugin,
+                ) as create, mock.patch.object(
+                    recstore_runner, "_build_train_dataloader_for_mode",
+                    wraps=recstore_runner._build_train_dataloader_for_mode,
+                ) as build_loader:
+                    def run():
+                        return self._run_local_worker_with_fake_embedding_module(
+                            cfg, use_run=True, num_batches=2, captured_rows=rows,
+                            build_kjt=lambda *args, **kwargs: (None, _FakeKeyedSparseFeatures([3])),
+                        )
+                    if fail_lookup:
+                        with self.assertRaisesRegex(RuntimeError, "lookup failed"):
+                            run()
+                    else:
+                        run()
+
+                self.assertEqual(create.call_args.args, ("bagpipe",))
+                self.assertTrue(create.call_args.kwargs["prescan"])
+                client = create.call_args.kwargs["kv_client"]
+                self.assertEqual(client.enable_gpu_cache_calls, [])
+                self.assertEqual([c.args[0] for c in plugin.prescan_batch.call_args_list], list(range(5)))
+                plugin.finalize_prescan.assert_called_once_with()
+                self.assertEqual(build_loader.call_count, 2)
+                self.assertEqual(build_loader.call_args_list[0], build_loader.call_args_list[1])
+                self.assertEqual(_FakeRecStoreEmbeddingBagCollection.last_instance.forward_features, [])
+                if fail_lookup:
+                    plugin._controller.shutdown.assert_called_once_with(flush=False)
+                    plugin.shutdown.assert_not_called()
+                else:
+                    self.assertEqual(plugin._controller.lookup.call_count, 5)
+                    self.assertEqual(optimizer.step_calls, 5)
+                    self.assertEqual(len(rows), 5)
+                    plugin._controller._wait_pending.assert_called_once_with()
+                    plugin.shutdown.assert_called_once_with()
+                    self.assertLess(
+                        plugin.mock_calls.index(mock.call._controller._wait_pending()),
+                        plugin.mock_calls.index(mock.call.shutdown()),
+                    )
 
     def test_direct_mode_skips_async_issue(self) -> None:
         cfg = RunConfig(

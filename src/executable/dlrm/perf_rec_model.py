@@ -21,8 +21,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.profiler import profile, record_function, ProfilerActivity
 
 
-import sys
-sys.path.append("/home/xieminhui/RecStore/src/python/pytorch")  # nopep8
 import recstore
 from recstore import BasePerfSampler
 from rec_dataloader import RecDatasetLoader
@@ -51,23 +49,19 @@ DIFF_TEST = False
 
 
 class RecModelSampler(BasePerfSampler):
-    def __init__(self, rank, L, batch_size, dataset_name, backmode,
+    def __init__(self, rank, L, batch_size, dataset_name, dataset_path, backmode,
                  ) -> None:
 
         if dataset_name == "criteo":
             nr_ids_one_sample = 26
-            self.dataset = RecDatasetLoader(
-                "/home/xieminhui/RecStoreDataset/criteo_binary", dist.get_world_size(), rank, batch_size)
         elif dataset_name == "avazu":
             nr_ids_one_sample = 21
-            self.dataset = RecDatasetLoader(
-                "/home/xieminhui/RecStoreDataset/avazu_binary", dist.get_world_size(), rank, batch_size)
         elif dataset_name == "criteoTB":
             nr_ids_one_sample = 26
-            self.dataset = RecDatasetLoader(
-                "/home/xieminhui/RecStoreDataset/criteoTB", dist.get_world_size(), rank, batch_size)
         else:
             assert False
+        self.dataset = RecDatasetLoader(
+            dataset_path, dist.get_world_size(), rank, batch_size)
 
         super().__init__(rank, L, batch_size * nr_ids_one_sample, backmode)
 
@@ -125,6 +119,7 @@ def get_run_config():
 
         argparser.add_argument('--dataset', choices=['criteo', 'avazu', 'criteoTB'],
                                default='criteo')
+        argparser.add_argument('--dataset_path', required=True)
 
         argparser.add_argument('--with_nn', type=str, default="256,")
         return vars(argparser.parse_args())
@@ -335,6 +330,7 @@ def routine_local_cache_helper(worker_id, args):
                                    L=args['L'],
                                    batch_size=args['batch_size'],
                                    dataset_name=args['dataset'],
+                                   dataset_path=args['dataset_path'],
                                    backmode=args['backwardMode'],
                                    )
     logging.info("Construct RecModelSampler done")
