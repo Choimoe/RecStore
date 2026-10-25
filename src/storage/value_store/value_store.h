@@ -115,6 +115,9 @@ public:
     if (keys.size() != specs.size()) {
       throw std::invalid_argument("BatchAllocAndWrite size mismatch");
     }
+    if (GetLayoutId().plain()) {
+      return BatchAllocAndWrite(specs);
+    }
     std::vector<uint64_t> handles;
     handles.reserve(keys.size());
     for (size_t i = 0; i < keys.size(); ++i) {
