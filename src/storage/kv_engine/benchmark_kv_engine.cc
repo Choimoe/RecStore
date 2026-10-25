@@ -392,12 +392,14 @@ BaseKVConfig BuildConfig() {
     if (FLAGS_ssd_layout_mapping.empty()) {
       throw std::invalid_argument("ssd_layout_mapping is required");
     }
-    config.json_config_["value"]["type"] = "SSD_STATIC_LAYOUT_VALUE_STORE";
-    config.json_config_["value"]["path"] = FLAGS_ssd_path + "/value.db";
-    config.json_config_["value"]["io"] = {
-        {"type", FLAGS_ssd_io_backend},
-        {"queue_depth", FLAGS_ssd_queue_depth},
-        {"base_offset_bytes", 0}};
+    if (FLAGS_value_store_type != "TIERED_VALUE_STORE") {
+      config.json_config_["value"]["type"] = "SSD_STATIC_LAYOUT_VALUE_STORE";
+      config.json_config_["value"]["path"] = FLAGS_ssd_path + "/value.db";
+      config.json_config_["value"]["io"] = {
+          {"type", FLAGS_ssd_io_backend},
+          {"queue_depth", FLAGS_ssd_queue_depth},
+          {"base_offset_bytes", 0}};
+    }
     config.json_config_["value"]["ssd_layout"] = {
         {"strategy", FLAGS_ssd_layout_strategy},
         {"mapping_path", FLAGS_ssd_layout_mapping}};
