@@ -171,6 +171,9 @@ Artifact Finish(Strategy strategy,
           copy.byte_offset % row_size != 0) {
         Fail("SSD layout slot is outside its page");
       }
+      if (copy.page_id >= std::numeric_limits<uint32_t>::max()) {
+        Fail("SSD layout page id exceeds uint32 range");
+      }
       page_count = std::max(page_count, static_cast<uint32_t>(copy.page_id + 1));
       const uint64_t slot =
           (copy.page_id << 32) | static_cast<uint64_t>(copy.byte_offset);
