@@ -144,7 +144,7 @@ void ValidateFlags() {
   CHECK_GT(FLAGS_batch_keys, 0);
   CHECK(FLAGS_op == "all" || FLAGS_op == "put" || FLAGS_op == "get" ||
         FLAGS_op == "async_get" || FLAGS_op == "async_stream" ||
-        FLAGS_op == "mixed")
+        FLAGS_op == "adapter_get" || FLAGS_op == "mixed")
       << "Invalid --op: " << FLAGS_op;
   CHECK_GT(FLAGS_async_depth, 0);
   CHECK_GE(FLAGS_get_ratio, 0);
@@ -175,24 +175,32 @@ void ValidateFlags() {
   }
 }
 
-void VerifyFlatOutput(const BenchmarkInput& input,
-                      const std::vector<float>& output,
-                      const std::string& op,
-                      int iteration,
-                      int output_index = 0) {
+// `expect_status_word` is false for paths that hand the caller's exactly-sized
+// buffer to the client: those report the verdict through the return value, so
+// there is no trailing status word to read.
+void VerifyFlatOutput(
+    const BenchmarkInput& input,
+    const std::vector<float>& output,
+    const std::string& op,
+    int iteration,
+    int output_index        = 0,
+    bool expect_status_word = true) {
   if (!FLAGS_verify_values) {
     return;
   }
   const int dim = FLAGS_value_size / sizeof(float);
   const std::size_t value_count =
       input.keys.size() * static_cast<std::size_t>(dim);
-  CHECK_GE(output.size(), value_count + 1);
-  const auto* status = reinterpret_cast<const std::int32_t*>(
-      reinterpret_cast<const char*>(output.data()) +
-      input.keys.size() * static_cast<std::size_t>(FLAGS_value_size));
-  CHECK_EQ(*status, static_cast<std::int32_t>(petps::RpcStatus::kOk))
-      << "GET status mismatch op=" << op << " iteration=" << iteration
-      << " output_index=" << output_index;
+  CHECK_GE(output.size(), value_count + (expect_status_word ? 1 : 0))
+      << "output buffer too small op=" << op << " iteration=" << iteration;
+  if (expect_status_word) {
+    const auto* status = reinterpret_cast<const std::int32_t*>(
+        reinterpret_cast<const char*>(output.data()) +
+        input.keys.size() * static_cast<std::size_t>(FLAGS_value_size));
+    CHECK_EQ(*status, static_cast<std::int32_t>(petps::RpcStatus::kOk))
+        << "GET status mismatch op=" << op << " iteration=" << iteration
+        << " output_index=" << output_index;
+  }
   const std::size_t row_stride =
       static_cast<std::size_t>(FLAGS_verify_value_row_stride);
   for (std::size_t row = 0; row < input.keys.size(); row += row_stride) {
@@ -505,6 +513,32 @@ int main(int argc, char** argv) {
             VerifyFlatOutput(input, output, "get", iteration);
             raw->RevokeRPCResource(rpc_id);
             (void)iteration;
+          },
+          input.keys.size());
+    }
+
+    if (ShouldRunOp(FLAGS_op, "adapter_get")) {
+      const int dim = FLAGS_value_size / sizeof(float);
+      // Exactly sized, like the tensor the ops layer hands over: this path
+      // has no room for the trailing status word the raw client paths use.
+      std::vector<float> output(
+          input.keys.size() * static_cast<std::size_t>(dim), 0.0f);
+      base::RecTensor output_view(
+          output.data(),
+          {static_cast<int64_t>(input.keys.size()), static_cast<int64_t>(dim)});
+      RunOperation(
+          "adapter_get",
+          [&](int iteration) {
+            CHECK_EQ(adapter->GetParameter(input.key_array, output_view), 0)
+                << "RDMA RC adapter GetParameter failed at iteration="
+                << iteration;
+            VerifyFlatOutput(
+                input,
+                output,
+                "adapter_get",
+                iteration,
+                0,
+                /*expect_status_word=*/false);
           },
           input.keys.size());
     }
