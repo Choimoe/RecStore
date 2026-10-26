@@ -227,10 +227,10 @@ bool LocalIndexedKV::WriteIndexedState(const std::filesystem::path& state_path,
          ++block) {
       const int64_t rows =
           std::min<int64_t>(remaining_rows, kAdamSlotBlockRows);
-      const auto& values = squared ? adam_slot_blocks[block]->exp_avg_sq
-                                   : adam_slot_blocks[block]->exp_avg;
+      const float* values = squared ? adam_slot_blocks[block]->exp_avg_sq.get()
+                                    : adam_slot_blocks[block]->exp_avg.get();
       const size_t count = static_cast<size_t>(rows) * static_cast<size_t>(dim);
-      ok                 = write(values.data(), count * sizeof(float));
+      ok                 = write(values, count * sizeof(float));
       remaining_rows -= rows;
     }
     ok = ok && remaining_rows == 0;
@@ -536,10 +536,10 @@ bool LocalIndexedKV::LoadCheckpoint(const std::string& checkpoint,
   for (size_t block = 0; remaining_rows > 0; ++block) {
     const int64_t rows = std::min<int64_t>(remaining_rows, kAdamSlotBlockRows);
     const size_t count = static_cast<size_t>(rows) * static_cast<size_t>(dim);
-    std::memcpy(restored_slot_blocks[block]->exp_avg.data(),
+    std::memcpy(restored_slot_blocks[block]->exp_avg.get(),
                 state.exp_avg.data() + offset,
                 count * sizeof(float));
-    std::memcpy(restored_slot_blocks[block]->exp_avg_sq.data(),
+    std::memcpy(restored_slot_blocks[block]->exp_avg_sq.get(),
                 state.exp_avg_sq.data() + offset,
                 count * sizeof(float));
     offset += count;

@@ -97,6 +97,33 @@ TEST_F(ConcurrentSlabMemoryPoolTest, SingleSlabMultithreadedNewFree) {
   EXPECT_EQ(pool_->total_malloc(), 0u);
 }
 
+TEST_F(ConcurrentSlabMemoryPoolTest, TotalMallocTracksCrossThreadFreeAndReset) {
+  std::vector<char*> ptrs;
+  std::thread allocator([this, &ptrs]() {
+    for (int i = 0; i < 257; ++i) {
+      ptrs.push_back(pool_->New(64));
+    }
+  });
+  allocator.join();
+
+  ASSERT_EQ(ptrs.size(), 257u);
+  EXPECT_EQ(pool_->total_malloc(), ptrs.size());
+  for (char* ptr : ptrs) {
+    ASSERT_TRUE(pool_->Free(ptr));
+  }
+  EXPECT_EQ(pool_->total_malloc(), 0u);
+
+  ASSERT_NE(pool_->New(128), nullptr);
+  EXPECT_EQ(pool_->total_malloc(), 1u);
+  pool_->Initialize();
+  EXPECT_EQ(pool_->total_malloc(), 0u);
+  char* reused = pool_->New(128);
+  ASSERT_NE(reused, nullptr);
+  EXPECT_EQ(pool_->total_malloc(), 1u);
+  EXPECT_TRUE(pool_->Free(reused));
+  EXPECT_EQ(pool_->total_malloc(), 0u);
+}
+
 TEST_F(ConcurrentSlabMemoryPoolTest, MultiSlabPerThreadHotChunks) {
   const auto payload_sizes = FactoryPayloadSizes();
   std::atomic<int> failures{0};

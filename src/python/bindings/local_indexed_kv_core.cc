@@ -30,7 +30,8 @@ LocalIndexedKV::LocalIndexedKV(
       dim(embedding_dim),
       storage_dim(embedding_dim +
                   static_cast<int64_t>(sizeof(int64_t) / sizeof(float))),
-      num_threads(std::max(1, num_threads)) {
+      num_threads(std::max(1, num_threads)),
+      index_prefetch(index_prefetch) {
   if (embedding_dim <= 0) {
     throw std::invalid_argument("embedding_dim must be positive");
   }
@@ -47,12 +48,32 @@ LocalIndexedKV::LocalIndexedKV(
 }
 
 int LocalIndexedKV::EffectiveWorkers(size_t rows) const {
-  constexpr size_t kMinRowsPerWorker = 4096;
   if (rows == 0)
     return 1;
+  const size_t rows_per_worker = static_cast<size_t>(
+      std::max(1, min_rows_per_worker.load(std::memory_order_relaxed)));
   const size_t useful_workers =
-      (rows + kMinRowsPerWorker - 1) / kMinRowsPerWorker;
+      (rows + rows_per_worker - 1) / rows_per_worker;
   return std::max(1, std::min(num_threads, static_cast<int>(useful_workers)));
+}
+
+py::dict LocalIndexedKV::SetMinRowsPerWorker(int rows) {
+  if (rows <= 0) {
+    throw std::invalid_argument("min_rows_per_worker must be positive");
+  }
+  std::lock_guard<std::mutex> lock(mu);
+  min_rows_per_worker.store(rows, std::memory_order_relaxed);
+  return WorkerPolicy();
+}
+
+py::dict LocalIndexedKV::WorkerPolicy() const {
+  py::dict policy;
+  policy["num_threads"]         = num_threads;
+  policy["min_rows_per_worker"] =
+      min_rows_per_worker.load(std::memory_order_relaxed);
+  policy["index_prefetch"]      = index_prefetch;
+  policy["worker_scaling"]      = "ceil(rows / min_rows_per_worker)";
+  return policy;
 }
 
 int64_t LocalIndexedKV::AllocateRowIndex() {
@@ -369,15 +390,24 @@ py::dict LocalIndexedKV::BulkInsertIndexed(
   const auto pack_end = clock::now();
 
   const auto engine_start = clock::now();
+  uint64_t slot_prepare_ns = 0;
   std::vector<BaseKV::BulkLoadStats> worker_stats(static_cast<size_t>(workers));
   std::vector<uint8_t> worker_ok(static_cast<size_t>(workers), 1);
   {
     std::lock_guard<std::mutex> lock(mu);
     auto insert = [&]() {
-    // This path is intentionally restricted to unique keys that a
-    // preceding lookup reserved as missing. Each worker owns a disjoint
-    // range, so the engine can allocate values and build the index in
-    // parallel without generic overwrite/retire bookkeeping.
+      if (eager_adam_slots) {
+        const auto slot_prepare_start = clock::now();
+        EnsureAdamSlotRows(max_row_index + 1);
+        slot_prepare_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - slot_prepare_start)
+                .count());
+      }
+      // This path is intentionally restricted to unique keys that a
+      // preceding lookup reserved as missing. Each worker owns a disjoint
+      // range, so the engine can allocate values and build the index in
+      // parallel without generic overwrite/retire bookkeeping.
 #pragma omp parallel for num_threads(workers) schedule(static)
       for (int worker = 0; worker < workers; ++worker) {
         const size_t begin = keys.size() * static_cast<size_t>(worker) /
@@ -423,6 +453,7 @@ py::dict LocalIndexedKV::BulkInsertIndexed(
   profile["arg_convert_ns"]   = ns(convert_end - total_start);
   profile["pack_ns"]          = ns(pack_end - convert_end);
   profile["engine_insert_ns"] = ns(engine_end - engine_start);
+  profile["slot_prepare_ns"]   = static_cast<double>(slot_prepare_ns);
   for (const auto& field : {
            std::make_pair("prepare", &BaseKV::BulkLoadStats::prepare_ns),
            std::make_pair(

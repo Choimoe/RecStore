@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -15,16 +17,20 @@ namespace recstore::python {
 struct LocalIndexedKV {
   static constexpr int64_t kAdamSlotBlockRows = 65536;
   struct AdamSlotBlock {
-    explicit AdamSlotBlock(int64_t dim)
-        : exp_avg(static_cast<size_t>(kAdamSlotBlockRows) *
-                      static_cast<size_t>(dim),
-                  0.0f),
-          exp_avg_sq(static_cast<size_t>(kAdamSlotBlockRows) *
-                         static_cast<size_t>(dim),
-                     0.0f) {}
+    explicit AdamSlotBlock(int64_t dim, bool initialize = true)
+        : elements(static_cast<size_t>(kAdamSlotBlockRows) *
+                   static_cast<size_t>(dim)),
+          exp_avg(new float[elements]),
+          exp_avg_sq(new float[elements]) {
+      if (initialize) {
+        std::memset(exp_avg.get(), 0, elements * sizeof(float));
+        std::memset(exp_avg_sq.get(), 0, elements * sizeof(float));
+      }
+    }
 
-    std::vector<float> exp_avg;
-    std::vector<float> exp_avg_sq;
+    size_t elements;
+    std::unique_ptr<float[]> exp_avg;
+    std::unique_ptr<float[]> exp_avg_sq;
   };
   struct AdamUpdateStats {
     uint64_t index_lookup_ns     = 0;
@@ -49,14 +55,21 @@ struct LocalIndexedKV {
   int64_t dim;
   int64_t storage_dim;
   int num_threads;
+  std::atomic<int> min_rows_per_worker{256};
+  int index_prefetch       = 1;
   int64_t next_row_index = 0;
   std::vector<int64_t> free_row_indices;
   uint64_t adam_step = 0;
   float adam_beta1_t = 1.0f;
   float adam_beta2_t = 1.0f;
+  bool adam_vectorized = false;
+  int adam_prefetch_distance = 0;
+  bool eager_adam_slots = false;
   std::vector<std::unique_ptr<AdamSlotBlock>> adam_slot_blocks;
   std::vector<std::vector<BaseKV::DirectFixedRow>> worker_rows_scratch;
   std::vector<int64_t> row_indices_scratch;
+  std::vector<uint64_t> merged_keys_scratch;
+  std::vector<float> merged_grads_scratch;
   std::mutex mu;
   LocalIndexedKV(int64_t capacity_arg,
                  int64_t embedding_dim,
@@ -67,10 +80,13 @@ struct LocalIndexedKV {
                  int num_threads,
                  int index_prefetch);
   int EffectiveWorkers(size_t rows) const;
+  py::dict SetMinRowsPerWorker(int rows);
+  py::dict WorkerPolicy() const;
   int64_t AllocateRowIndex();
   void ClearAdamSlotRow(int64_t row_index);
   void EnsureAdamSlotRows(int64_t rows);
   float* AdamSlotPtr(int64_t row_index, bool squared);
+  void EnableAdamSlots();
   bool ApplySgdUpdateParallel(
       const Int64KeyView& keys, const float* grads, float lr);
   bool ApplyAdamWTFUpdateParallel(
@@ -217,7 +233,23 @@ struct LocalIndexedKV {
       double eps,
       double weight_decay,
       bool release_gil);
+  py::dict AdamWTFUpdateIndexedTwoBatches(
+      const py::array_t<int64_t, py::array::c_style | py::array::forcecast>&
+          ids_a,
+      const py::array_t<float, py::array::c_style | py::array::forcecast>&
+          grads_a,
+      const py::array_t<int64_t, py::array::c_style | py::array::forcecast>&
+          ids_b,
+      const py::array_t<float, py::array::c_style | py::array::forcecast>&
+          grads_b,
+      double lr,
+      double beta1,
+      double beta2,
+      double eps,
+      double weight_decay,
+      bool release_gil);
   py::dict OptimizerStateStats() const;
+  py::dict SetAdamExecution(bool vectorized, int prefetch_distance);
   py::dict StorageStats();
 };
 

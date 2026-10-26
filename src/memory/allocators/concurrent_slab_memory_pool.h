@@ -323,7 +323,6 @@ public:
     } else if (was_full) {
       TryEnqueuePartial(slab_size, chunk);
     }
-    total_malloc_.fetch_sub(1, std::memory_order_relaxed);
     return true;
   }
 
@@ -364,7 +363,6 @@ public:
     tls_generation_ =
         next_tls_generation_.fetch_add(1, std::memory_order_relaxed);
     PoolTls().hot_by_slab.clear();
-    total_malloc_.store(0, std::memory_order_relaxed);
   }
 
   char* BackingData() const override { return shm_file_->Data(); }
@@ -413,7 +411,11 @@ public:
   }
 
   uint64_t total_malloc() const override {
-    return static_cast<uint64_t>(total_malloc_.load(std::memory_order_relaxed));
+    uint64_t total = 0;
+    for (const auto* chunk : chunks_) {
+      total += static_cast<uint64_t>(chunk->AllocatedEntryNumber());
+    }
+    return total;
   }
 
   bool Healthy() const override { return true; }
@@ -453,7 +455,6 @@ private:
       if (hot != nullptr && !hot->Full()) {
         char* ptr = hot->Malloc();
         if (ptr != nullptr) {
-          total_malloc_.fetch_add(1, std::memory_order_relaxed);
           return ptr;
         }
         // Another thread filled the chunk after the Full() check.
@@ -463,7 +464,6 @@ private:
       SlabChunk* chunk = AcquireChunk(slab_size, &hot);
       char* ptr        = chunk->Malloc();
       if (ptr != nullptr) {
-        total_malloc_.fetch_add(1, std::memory_order_relaxed);
         return ptr;
       }
       // The selected chunk became full after AcquireChunk() released the slab
@@ -522,7 +522,7 @@ private:
     LOG(FATAL) << fmt::format(
         "ConcurrentSlabMemoryPool OOM, slab_size={}, total_malloc={}",
         slab_size,
-        total_malloc_.load(std::memory_order_relaxed));
+        total_malloc());
     return nullptr;
   }
 
@@ -541,7 +541,6 @@ private:
   base::Lock free_chunks_lock_;
   std::unordered_map<int, SlabState> slab_states_;
   std::set<int> allocated_slab_sizes_;
-  std::atomic<int64> total_malloc_{0};
   inline static std::atomic<uint64_t> next_tls_generation_{1};
   uint64_t tls_generation_ =
       next_tls_generation_.fetch_add(1, std::memory_order_relaxed);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <limits>
@@ -79,6 +80,20 @@ public:
     char* data = allocator_->New(static_cast<int>(size));
     if (data == nullptr) {
       return kValueHandleNone;
+    }
+    // Bulk insertion allocates rows from several OpenMP workers. The state is
+    // monotonic: the first successful size initializes the baseline, and any
+    // later mismatch permanently disables the uniform-capacity fast path.
+    size_t expected = 0;
+    if (uniform_row_bytes_.load(std::memory_order_relaxed) == 0) {
+      if (!uniform_row_bytes_.compare_exchange_strong(
+              expected, size, std::memory_order_release,
+              std::memory_order_relaxed) &&
+          expected != size) {
+        uniform_row_size_.store(false, std::memory_order_release);
+      }
+    } else if (uniform_row_bytes_.load(std::memory_order_acquire) != size) {
+      uniform_row_size_.store(false, std::memory_order_release);
     }
     return EncodeOffset(allocator_->GetMallocOffset(data));
   }
@@ -246,6 +261,12 @@ public:
     const size_t row_bytes = sizeof(int64_t) + value_bytes;
     uint64_t missing       = 0;
     auto* dst              = static_cast<char*>(values);
+    const bool uniform_capacity =
+        uniform_row_size_.load(std::memory_order_acquire) &&
+        uniform_row_bytes_.load(std::memory_order_acquire) == row_bytes;
+    if (num_rows != 0) {
+      std::memset(found, 1, num_rows * sizeof(bool));
+    }
     for (size_t row = 0; row < num_rows; ++row) {
       char* row_dst = dst + row * value_bytes;
       if (handles[row] == kValueHandleNone) {
@@ -259,17 +280,18 @@ public:
       if (src == nullptr) {
         return false;
       }
-      // Reuse the resolved pointer. The offset overload would resolve the
-      // same handle again before reading exactly this allocation's metadata.
-      const int capacity = allocator_->GetMallocSize(src);
-      if (capacity < 0 || static_cast<size_t>(capacity) < row_bytes) {
-        return false;
+      if (!uniform_capacity) {
+        // Reuse the resolved pointer. The offset overload would resolve the
+        // same handle again before reading exactly this allocation's metadata.
+        const int capacity = allocator_->GetMallocSize(src);
+        if (capacity < 0 || static_cast<size_t>(capacity) < row_bytes) {
+          return false;
+        }
       }
       // A fixed-size memcpy compiles to a load/store without imposing extra
       // alignment or aliasing requirements on allocator-owned row storage.
       std::memcpy(indices + row, src, sizeof(int64_t));
       std::memcpy(row_dst, src + sizeof(int64_t), value_bytes);
-      found[row] = true;
     }
     if (missing_rows != nullptr)
       *missing_rows = missing;
@@ -395,6 +417,8 @@ private:
 
   std::unique_ptr<base::MallocApi> allocator_;
   std::unique_ptr<base::ThreadSafeDelayedRecycle> recycler_;
+  std::atomic<size_t> uniform_row_bytes_{0};
+  std::atomic<bool> uniform_row_size_{true};
   static constexpr int64 kRecycleDelayUs = 1000;
 };
 

@@ -1074,7 +1074,8 @@ private:
 
   void TrackKeys(base::ConstArray<uint64_t> keys, unsigned tid) {
     auto& thread_keys = CheckpointKeysForThread(tid);
-    thread_keys.reserve(thread_keys.size() + static_cast<size_t>(keys.Size()));
+    // Let push_back grow geometrically; reserving exactly each batch's total
+    // repeatedly copies all previously tracked keys during incremental inserts.
     for (int i = 0; i < keys.Size(); ++i) {
       thread_keys.push_back(keys[i]);
     }

@@ -97,6 +97,7 @@ void BindLocalIndexedKV(py::module_& m) {
            py::arg("path"),
            py::arg("expected_metadata"))
       .def("put_indexed", &LocalIndexedKV::PutIndexed)
+      .def("enable_adam_slots", &LocalIndexedKV::EnableAdamSlots)
       .def("bulk_insert_indexed",
            &LocalIndexedKV::BulkInsertIndexed,
            py::arg("ids"),
@@ -119,7 +120,27 @@ void BindLocalIndexedKV(py::module_& m) {
            py::arg("eps"),
            py::arg("weight_decay"),
            py::arg("release_gil") = true)
+      .def("adamw_tf_update_indexed_two_batches",
+           &LocalIndexedKV::AdamWTFUpdateIndexedTwoBatches,
+           py::arg("ids_a"),
+           py::arg("grads_a"),
+           py::arg("ids_b"),
+           py::arg("grads_b"),
+           py::arg("lr"),
+           py::arg("beta1"),
+           py::arg("beta2"),
+           py::arg("eps"),
+           py::arg("weight_decay"),
+           py::arg("release_gil") = true)
       .def("optimizer_state_stats", &LocalIndexedKV::OptimizerStateStats)
+      .def("set_adam_execution",
+           &LocalIndexedKV::SetAdamExecution,
+           py::arg("vectorized") = false,
+           py::arg("prefetch_distance") = 0)
+      .def("set_min_rows_per_worker",
+           &LocalIndexedKV::SetMinRowsPerWorker,
+           py::arg("rows"))
+      .def("worker_policy", &LocalIndexedKV::WorkerPolicy)
       .def("storage_stats", &LocalIndexedKV::StorageStats);
 }
 

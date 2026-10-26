@@ -9,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <unistd.h>
@@ -16,6 +17,81 @@
 #include "storage/index/utils/hash.h"
 
 namespace recstore::python {
+namespace {
+
+enum class MissingAllocationProof { None, SignedInt64, PartitionUInt64 };
+
+const char* MissingAllocationProofName(MissingAllocationProof proof) {
+  switch (proof) {
+  case MissingAllocationProof::SignedInt64:
+    return "signed_int64";
+  case MissingAllocationProof::PartitionUInt64:
+    return "quanta_partition_uint64";
+  default:
+    return "none";
+  }
+}
+
+// Strict ordering under either bijection proves missing-key uniqueness.
+// Quanta ids_partition_kernel.cu sorts rotR16(key) through a uint64_t pointer;
+// flipping the sign bit separately recognizes ordinary signed-int64 order.
+// Found keys do not affect either proof. Neither transform reorders the input.
+MissingAllocationProof AllocateMissingRowIndices(
+    LocalIndexedKV& store,
+    const Int64KeyView& keys,
+    const bool* found,
+    int64_t* indices,
+    size_t reserve_count = 0) {
+  bool have_previous       = false;
+  bool signed_sorted       = true;
+  bool partition_sorted    = true;
+  uint64_t previous_signed = 0;
+  uint64_t previous_part   = 0;
+  for (size_t i = 0; i < keys.size(); ++i) {
+    if (found[i])
+      continue;
+    const uint64_t key           = keys[i];
+    const uint64_t signed_key    = key ^ (uint64_t{1} << 63);
+    const uint64_t partition_key = (key << 48) | (key >> 16);
+    if (have_previous) {
+      signed_sorted &= signed_key > previous_signed;
+      partition_sorted &= partition_key > previous_part;
+      if (!signed_sorted && !partition_sorted)
+        break;
+    }
+    previous_signed = signed_key;
+    previous_part   = partition_key;
+    have_previous   = true;
+  }
+  if (!have_previous)
+    return MissingAllocationProof::None;
+
+  if (signed_sorted || partition_sorted) {
+    // Keep allocation in input order, including free-list LIFO reuse and the
+    // original partial-reservation behavior when row capacity is exhausted.
+    for (size_t i = 0; i < keys.size(); ++i) {
+      if (!found[i])
+        indices[i] = store.AllocateRowIndex();
+    }
+    return signed_sorted ? MissingAllocationProof::SignedInt64
+                         : MissingAllocationProof::PartitionUInt64;
+  }
+
+  std::unordered_map<uint64_t, int64_t> new_indices;
+  if (reserve_count != 0)
+    new_indices.reserve(reserve_count);
+  for (size_t i = 0; i < keys.size(); ++i) {
+    if (found[i])
+      continue;
+    auto it = new_indices.find(keys[i]);
+    if (it == new_indices.end())
+      it = new_indices.emplace(keys[i], store.AllocateRowIndex()).first;
+    indices[i] = it->second;
+  }
+  return MissingAllocationProof::None;
+}
+
+} // namespace
 
 py::tuple LocalIndexedKV::LookupIndexedImpl(
     const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& ids,
@@ -68,7 +144,6 @@ py::tuple LocalIndexedKV::LookupIndexedImpl(
     throw std::runtime_error("BatchGetDirectFixedRows failed");
   }
   const auto engine_end = clock::now();
-  std::unordered_map<uint64_t, int64_t> new_indices;
   const size_t row_bytes = static_cast<size_t>(storage_dim) * sizeof(float);
   int invalid_row        = 0;
 #pragma omp parallel for num_threads(workers) schedule(static)                 \
@@ -102,15 +177,18 @@ py::tuple LocalIndexedKV::LookupIndexedImpl(
   if (invalid_row != 0) {
     throw std::runtime_error("LocalIndexedKV stored row has invalid size");
   }
+  auto missing_allocate_proof = MissingAllocationProof::None;
+  uint64_t missing_allocate_ns    = 0;
   if (allocate_missing) {
-    for (size_t i = 0; i < keys.size(); ++i) {
-      if (found_ptr[i])
-        continue;
-      auto it = new_indices.find(keys[i]);
-      if (it == new_indices.end()) {
-        it = new_indices.emplace(keys[i], AllocateRowIndex()).first;
-      }
-      index_ptr[i] = it->second;
+    const auto allocation_start = profile != nullptr ? clock::now()
+                                                    : clock::time_point{};
+    missing_allocate_proof =
+        AllocateMissingRowIndices(*this, keys, found_ptr, index_ptr);
+    if (profile != nullptr) {
+      missing_allocate_ns = static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              clock::now() - allocation_start)
+              .count());
     }
   }
   const auto unpack_end = clock::now();
@@ -131,6 +209,12 @@ py::tuple LocalIndexedKV::LookupIndexedImpl(
     }
     (*profile)["engine_index_lookup_ns"] = static_cast<double>(index_lookup_ns);
     (*profile)["unpack_copy_ns"]         = ns(unpack_end - engine_end);
+    (*profile)["missing_allocate_ns"] =
+        static_cast<double>(missing_allocate_ns);
+    (*profile)["missing_allocate_fast_path"] =
+        missing_allocate_proof != MissingAllocationProof::None;
+    (*profile)["missing_allocate_proof"] =
+        MissingAllocationProofName(missing_allocate_proof);
     (*profile)["total_ns"]               = ns(unpack_end - total_start);
     (*profile)["missing_rows"]           = static_cast<double>(missing_rows);
     (*profile)["rows"]                   = static_cast<double>(keys.size());
@@ -260,6 +344,8 @@ py::dict LocalIndexedKV::LookupIndexedIntoRawImpl(
   clock::time_point lock_end;
   clock::time_point engine_end;
   uint64_t missing_rows = 0;
+  uint64_t missing_allocate_ns = 0;
+  auto missing_allocate_proof = MissingAllocationProof::None;
 
   auto execute = [&]() {
     lock_start = clock::now();
@@ -354,16 +440,15 @@ py::dict LocalIndexedKV::LookupIndexedIntoRawImpl(
     }
 
     if (allocate_missing && missing_rows != 0) {
-      std::unordered_map<uint64_t, int64_t> new_indices;
-      new_indices.reserve(static_cast<size_t>(missing_rows));
-      for (size_t i = 0; i < keys.size(); ++i) {
-        if (found_ptr[i])
-          continue;
-        auto it = new_indices.find(keys[i]);
-        if (it == new_indices.end()) {
-          it = new_indices.emplace(keys[i], AllocateRowIndex()).first;
-        }
-        index_ptr[i] = it->second;
+      const auto allocation_start = collect_profile ? clock::now()
+                                                    : clock::time_point{};
+      missing_allocate_proof = AllocateMissingRowIndices(
+          *this, keys, found_ptr, index_ptr, static_cast<size_t>(missing_rows));
+      if (collect_profile) {
+        missing_allocate_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock::now() - allocation_start)
+                .count());
       }
     }
     engine_end = clock::now();
@@ -431,6 +516,11 @@ py::dict LocalIndexedKV::LookupIndexedIntoRawImpl(
     profile["row_copy_max_ns"] = static_cast<double>(copy_max_ns);
   }
   profile["engine_get_unpack_ns"] = ns(engine_end - lock_end);
+  profile["missing_allocate_ns"] = static_cast<double>(missing_allocate_ns);
+  profile["missing_allocate_fast_path"] =
+      missing_allocate_proof != MissingAllocationProof::None;
+  profile["missing_allocate_proof"] =
+      MissingAllocationProofName(missing_allocate_proof);
   profile["total_ns"]             = ns(total_end - total_start);
   return profile;
 }
