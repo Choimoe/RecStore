@@ -35,7 +35,7 @@ from ..runtime.worker_common import (
     write_rows as _write_rows,
 )
 from python.pytorch.recstore.analysis.profiler import ProfilerConfig, build_torchrec_profiler
-from .base import BenchmarkRunner
+from .base import BenchmarkRunner, build_rank_dataloader, wrap_dense_module_for_dist
 
 
 def ensure_torchrec_available() -> None:
@@ -187,29 +187,15 @@ def _zero_embedding_parameters(module, torch) -> None:
             param.zero_()
 
 
-def _build_train_dataloader_for_mode(
-    repo_root: Path,
-    cfg: RunConfig,
-    rank: int,
-    torch,
-):
-    from ..data.dlrm_source import build_train_dataloader
-
-    world_size = cfg.nnodes * cfg.nproc_per_node
-    fair_remote_mode = _is_fair_remote_mode(cfg, world_size)
-    shuffle = not fair_remote_mode
-    seed = cfg.seed
-    return build_train_dataloader(
-        repo_root=repo_root,
-        data_dir_rel=cfg.data_dir,
-        train_ratio=cfg.train_ratio,
-        num_embeddings=cfg.num_embeddings,
-        num_embeddings_per_feature=cfg.num_embeddings_per_feature,
-        batch_size=cfg.batch_size,
-        shuffle=shuffle,
-        seed=seed,
-        rank=rank if (world_size > 1 and not fair_remote_mode) else None,
-        world_size=world_size if (world_size > 1 and not fair_remote_mode) else None,
+def _build_train_dataloader_for_mode(repo_root: Path, cfg: RunConfig, rank: int):
+    # fair_remote keeps every trainer on the full dataset, unsharded.
+    fair_remote_mode = _is_fair_remote_mode(cfg, cfg.nnodes * cfg.nproc_per_node)
+    return build_rank_dataloader(
+        repo_root,
+        cfg,
+        rank,
+        shuffle=not fair_remote_mode,
+        partition=not fair_remote_mode,
     )
 
 
@@ -219,17 +205,10 @@ def _maybe_wrap_dense_module_for_dist(
     local_rank: int,
     use_dist: bool,
     fair_remote_mode: bool,
-    torch,
 ):
-    if not use_dist or fair_remote_mode:
-        return dense_module
-    if device.type == "cuda":
-        return torch.nn.parallel.DistributedDataParallel(
-            dense_module,
-            device_ids=[local_rank],
-            output_device=local_rank,
-        )
-    return torch.nn.parallel.DistributedDataParallel(dense_module)
+    return wrap_dense_module_for_dist(
+        dense_module, device, local_rank, use_dist, enabled=not fair_remote_mode
+    )
 
 
 def _run_single_or_dist_worker(
@@ -292,7 +271,6 @@ def _run_single_or_dist_worker(
         repo_root=repo_root,
         cfg=cfg,
         rank=rank,
-        torch=torch,
     )
     data_iter = iter(dataloader)
     num_embeddings_per_feature = resolve_num_embeddings_per_feature(
@@ -370,7 +348,6 @@ def _run_single_or_dist_worker(
         local_rank=local_rank,
         use_dist=use_dist,
         fair_remote_mode=fair_remote_mode,
-        torch=torch,
     )
 
     _dispatch_module = dense_module.module if isinstance(

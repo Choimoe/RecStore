@@ -23,7 +23,6 @@ from ..config import (
 )
 from ..data.dlrm_source import (
     build_kjt_batch_from_dense_sparse_labels,
-    build_train_dataloader,
     convert_kjt_ids_to_fused_ids,
     convert_kjt_ids_to_fused_ids_device,
     get_default_cat_names,
@@ -50,7 +49,11 @@ from ..runtime.worker_common import (
     read_worker_context as _read_worker_context,
     write_rows as _write_rows,
 )
-from .base import BenchmarkRunner
+from .base import (
+    BenchmarkRunner,
+    build_rank_dataloader as _build_train_dataloader_for_mode,
+    wrap_dense_module_for_dist as _maybe_wrap_dense_module_for_dist,
+)
 
 from recstore.embedding_read_path import (
     BagPipeReadPath,
@@ -202,34 +205,6 @@ def _maybe_warmup_gpu_local_shm_fast_path(
     if client.current_ps_backend() != "local_shm":
         client.set_ps_backend("local_shm")
     return bool(client.warmup_local_lookup_flat_cuda_region())
-
-
-def _build_train_dataloader_for_mode(repo_root: Path, cfg: RunConfig, rank: int):
-    world_size = cfg.nnodes * cfg.nproc_per_node
-    return build_train_dataloader(
-        repo_root=repo_root,
-        data_dir_rel=cfg.data_dir,
-        train_ratio=cfg.train_ratio,
-        num_embeddings=cfg.num_embeddings,
-        num_embeddings_per_feature=cfg.num_embeddings_per_feature,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        seed=cfg.seed,
-        rank=rank if world_size > 1 else None,
-        world_size=world_size if world_size > 1 else None,
-    )
-
-
-def _maybe_wrap_dense_module_for_dist(
-    dense_module: torch.nn.Module, device: torch.device, local_rank: int, use_dist: bool
-) -> torch.nn.Module:
-    if not use_dist:
-        return dense_module
-    if device.type == "cuda":
-        return torch.nn.parallel.DistributedDataParallel(
-            dense_module, device_ids=[local_rank], output_device=local_rank
-        )
-    return torch.nn.parallel.DistributedDataParallel(dense_module)
 
 
 class RecStoreRunner(BenchmarkRunner):

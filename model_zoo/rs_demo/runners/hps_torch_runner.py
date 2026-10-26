@@ -14,7 +14,6 @@ from ..config import (
 )
 from ..data.dlrm_source import (
     build_kjt_batch_from_dense_sparse_labels,
-    build_train_dataloader,
     get_default_cat_names,
     inject_project_paths,
 )
@@ -31,7 +30,7 @@ from ..models.utils import (
     run_hybrid_backward,
 )
 from python.pytorch.recstore.benchmark.report import finalize_torchrec_row, write_stage_csv
-from .base import BenchmarkRunner
+from .base import BenchmarkRunner, build_rank_dataloader
 from ..runtime.timing import stage_timer
 from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
@@ -70,26 +69,6 @@ def _rank_config_path(cfg: RunConfig, rank: int) -> Path:
     if rank == 0:
         return base
     return base.with_name(f"{base.stem}_rank{rank}{base.suffix}")
-
-
-def _build_train_dataloader_for_rank(
-    repo_root: Path,
-    cfg: RunConfig,
-    rank: int,
-    world_size: int,
-):
-    return build_train_dataloader(
-        repo_root=repo_root,
-        data_dir_rel=cfg.data_dir,
-        train_ratio=cfg.train_ratio,
-        num_embeddings=cfg.num_embeddings,
-        num_embeddings_per_feature=cfg.num_embeddings_per_feature,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        seed=cfg.seed,
-        rank=rank if world_size > 1 else None,
-        world_size=world_size if world_size > 1 else None,
-    )
 
 
 class HpsTorchRunner(BenchmarkRunner):
@@ -209,11 +188,8 @@ class HpsTorchRunner(BenchmarkRunner):
             torch.distributed.init_process_group(backend="nccl")
         torch.manual_seed(int(cfg.seed) + int(rank))
 
-        dataset, dataloader = _build_train_dataloader_for_rank(
-            repo_root=repo_root,
-            cfg=cfg,
-            rank=rank,
-            world_size=world_size,
+        dataset, dataloader = build_rank_dataloader(
+            repo_root, cfg, rank, world_size=world_size
         )
         del dataset
         num_embeddings_per_feature = resolve_num_embeddings_per_feature(

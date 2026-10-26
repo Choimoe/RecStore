@@ -583,7 +583,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
+                    "model_zoo.rs_demo.data.dlrm_source.build_train_dataloader",
                     lambda **kwargs: (dataset, dataloader),
                 )
             )
@@ -870,7 +870,7 @@ class TestRecStoreRunner(unittest.TestCase):
         fake_dataset = [1, 2, 3]
 
         with mock.patch(
-            "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
+            "model_zoo.rs_demo.data.dlrm_source.build_train_dataloader",
             return_value=(fake_dataset, "loader"),
         ) as build_loader:
             dataset, dataloader = _build_train_dataloader_for_mode(

@@ -624,7 +624,6 @@ class TestTorchRecDispatch(unittest.TestCase):
                     torchrec_dist_mode="fair_remote",
                 ),
                 rank=1,
-                torch=torch,
             )
 
         self.assertEqual(dataset, fake_dataset)
@@ -649,7 +648,6 @@ class TestTorchRecDispatch(unittest.TestCase):
                     torchrec_dist_mode="replicated",
                 ),
                 rank=3,
-                torch=torch,
             )
 
         self.assertEqual(dataset, fake_dataset)
@@ -675,7 +673,6 @@ class TestTorchRecDispatch(unittest.TestCase):
                 local_rank=1,
                 use_dist=True,
                 fair_remote_mode=False,
-                torch=torch,
             )
 
         self.assertIs(wrapped, fake_ddp)

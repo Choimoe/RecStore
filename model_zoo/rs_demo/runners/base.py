@@ -7,8 +7,56 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from ..config import RunConfig, dump_run_config, ensure_shared_dir
 from ..runtime.worker_common import build_worker_env, merge_rank_outputs
+
+
+def build_rank_dataloader(
+    repo_root: Path,
+    cfg: RunConfig,
+    rank: int,
+    *,
+    world_size: int | None = None,
+    shuffle: bool = True,
+    partition: bool = True,
+) -> tuple[Any, Any]:
+    """Build the DLRM dataloader, sharding it across ranks unless told not to."""
+    # Imported here so tests can patch data.dlrm_source.build_train_dataloader.
+    from ..data.dlrm_source import build_train_dataloader
+
+    world_size = world_size or cfg.nnodes * cfg.nproc_per_node
+    distributed = world_size > 1 and partition
+    return build_train_dataloader(
+        repo_root=repo_root,
+        data_dir_rel=cfg.data_dir,
+        train_ratio=cfg.train_ratio,
+        num_embeddings=cfg.num_embeddings,
+        num_embeddings_per_feature=cfg.num_embeddings_per_feature,
+        batch_size=cfg.batch_size,
+        shuffle=shuffle,
+        seed=cfg.seed,
+        rank=rank if distributed else None,
+        world_size=world_size if distributed else None,
+    )
+
+
+def wrap_dense_module_for_dist(
+    dense_module: Any,
+    device: Any,
+    local_rank: int,
+    use_dist: bool,
+    *,
+    enabled: bool = True,
+) -> Any:
+    if not use_dist or not enabled:
+        return dense_module
+    if device.type == "cuda":
+        return torch.nn.parallel.DistributedDataParallel(
+            dense_module, device_ids=[local_rank], output_device=local_rank
+        )
+    return torch.nn.parallel.DistributedDataParallel(dense_module)
 
 
 class BenchmarkRunner(ABC):
