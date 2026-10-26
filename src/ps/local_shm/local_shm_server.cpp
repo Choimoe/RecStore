@@ -114,10 +114,13 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
           header->table_name_len > header->input_bytes) {
         throw std::invalid_argument("Invalid SHM training payload");
       }
-      const std::string table(reinterpret_cast<char*>(payload), header->table_name_len);
-      const std::string data(reinterpret_cast<char*>(payload) + header->table_name_len,
-                             header->input_bytes - header->table_name_len);
-      const int64_t committed = cache_ps_->TrainingStep(table, data, worker_tid_);
+      const std::string table(
+          reinterpret_cast<char*>(payload), header->table_name_len);
+      const std::string data(
+          reinterpret_cast<char*>(payload) + header->table_name_len,
+          header->input_bytes - header->table_name_len);
+      const int64_t committed =
+          cache_ps_->TrainingStep(table, data, worker_tid_);
       std::memcpy(payload, &committed, sizeof(committed));
       header->output_bytes = sizeof(committed);
       FinishWithStatus(header, LocalStatusCode::kOk);

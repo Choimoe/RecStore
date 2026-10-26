@@ -31,11 +31,11 @@ inline constexpr std::uint32_t kRcFlagGetDirectSg          = 1U << 0;
 inline constexpr std::uint32_t kRcFlagGetAllowFallbackCopy = 1U << 1;
 
 enum class RcOp : std::uint16_t {
-  kGet        = 1,
-  kPut        = 2,
-  kUpdate     = 3,
-  kInitTable  = 4,
-  kUpdateFlat = 5,
+  kGet          = 1,
+  kPut          = 2,
+  kUpdate       = 3,
+  kInitTable    = 4,
+  kUpdateFlat   = 5,
   kTrainingStep = 6,
 };
 

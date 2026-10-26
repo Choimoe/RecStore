@@ -486,22 +486,31 @@ public:
 
   /// optimizer interface
 
-  int64_t TrainingStep(const std::string& table, const std::string& payload,
-                       unsigned tid) {
-    const auto h = recstore::DecodeTrainingStep(payload);
+  int64_t TrainingStep(
+      const std::string& table, const std::string& payload, unsigned tid) {
+    const auto h    = recstore::DecodeTrainingStep(payload);
     const auto* sgd = dynamic_cast<SGD*>(optimizer_.get());
     if (!sgd || sgd->LearningRate() != h.learning_rate) {
-      throw std::runtime_error("BagPipe requires matching client/PS SGD learning rates");
+      throw std::runtime_error(
+          "BagPipe requires matching client/PS SGD learning rates");
     }
     const auto config = table_configs_.find(table);
-    if (config == table_configs_.end() || config->second.embedding_dim != h.dim) {
+    if (config == table_configs_.end() ||
+        config->second.embedding_dim != h.dim) {
       throw std::runtime_error("Training step table or dimension mismatch");
     }
-    return training_steps_.Exchange(table, payload,
-        [&](const std::vector<uint64_t>& keys, const std::vector<float>& grads) {
-          if (!UpdateParameterFlat(table,
+    return training_steps_.Exchange(
+        table,
+        payload,
+        [&](const std::vector<uint64_t>& keys,
+            const std::vector<float>& grads) {
+          if (!UpdateParameterFlat(
+                  table,
                   base::ConstArray<uint64_t>(keys.data(), keys.size()),
-                  grads.data(), keys.size(), h.dim, tid)) {
+                  grads.data(),
+                  keys.size(),
+                  h.dim,
+                  tid)) {
             throw std::runtime_error("Training step optimizer failed");
           }
         });

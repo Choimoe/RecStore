@@ -674,45 +674,50 @@ int LocalShmPSClient::UpdateParameterFlat(
   return ok ? 0 : -1;
 }
 
-int64_t LocalShmPSClient::ExchangeTrainingStep(
-    const std::string& table, const std::string& data) {
-  if (!region_.IsOpen() || table.size() + data.size() > region_.slot_buffer_bytes()) {
+int64_t LocalShmPSClient::ExchangeTrainingStep(const std::string& table,
+                                               const std::string& data) {
+  if (!region_.IsOpen() ||
+      table.size() + data.size() > region_.slot_buffer_bytes()) {
     throw std::runtime_error("Training step exceeds SHM slot");
   }
   const int slot = AcquireSlot();
-  if (slot < 0) throw std::runtime_error("No SHM training slot");
-  auto* header = region_.slot_header(slot);
-  auto* payload = region_.slot_payload(slot);
+  if (slot < 0)
+    throw std::runtime_error("No SHM training slot");
+  auto* header              = region_.slot_header(slot);
+  auto* payload             = region_.slot_payload(slot);
   const uint64_t request_id = NextRequestId();
-  header->opcode = static_cast<uint32_t>(LocalOpcode::kTrainingStep);
-  header->status_code = static_cast<uint32_t>(LocalStatusCode::kOk);
-  header->client_id = client_id_;
-  header->request_id = request_id;
-  header->client_pid = static_cast<int64_t>(::getpid());
-  header->table_name_len = table.size();
-  header->key_count = 0;
-  header->embedding_dim = 0;
-  header->input_bytes = table.size() + data.size();
-  header->output_bytes = 0;
+  header->opcode            = static_cast<uint32_t>(LocalOpcode::kTrainingStep);
+  header->status_code       = static_cast<uint32_t>(LocalStatusCode::kOk);
+  header->client_id         = client_id_;
+  header->request_id        = request_id;
+  header->client_pid        = static_cast<int64_t>(::getpid());
+  header->table_name_len    = table.size();
+  header->key_count         = 0;
+  header->embedding_dim     = 0;
+  header->input_bytes       = table.size() + data.size();
+  header->output_bytes      = 0;
   header->server_seen_epoch = region_.control()->server_epoch;
   header->error_message_len = 0;
   header->client_enqueue_timestamp_ns = SteadyNowNs();
   header->server_dequeue_timestamp_ns = 0;
-  header->server_backend_duration_us = 0;
+  header->server_backend_duration_us  = 0;
   std::memcpy(payload, table.data(), table.size());
   std::memcpy(payload + table.size(), data.data(), data.size());
   header->state.store(static_cast<uint32_t>(LocalSlotState::kReady));
   const auto queue = CurrentReadyQueueId();
-  auto* ready = region_.ready_queue_header(queue);
+  auto* ready      = region_.ready_queue_header(queue);
   CHECK(LocalShmQueueEnqueue(ready, region_.ready_queue_cells(queue), slot));
   FutexWakeOne(&ready->enqueue_pos);
-  const bool ok = WaitForSlot(slot, request_id) &&
+  const bool ok =
+      WaitForSlot(slot, request_id) &&
       header->status_code == static_cast<uint32_t>(LocalStatusCode::kOk) &&
       header->output_bytes == sizeof(int64_t);
   int64_t committed = -1;
-  if (ok) std::memcpy(&committed, payload, sizeof(committed));
+  if (ok)
+    std::memcpy(&committed, payload, sizeof(committed));
   ReleaseSlot(slot);
-  if (!ok) throw std::runtime_error("SHM training step failed");
+  if (!ok)
+    throw std::runtime_error("SHM training step failed");
   return committed;
 }
 
@@ -807,21 +812,25 @@ LocalShmPSClient::PrefetchParameter(const base::ConstArray<uint64_t>& keys) {
   const auto dim = table_embedding_dims_.begin()->second;
   for (const auto& table : table_embedding_dims_) {
     if (table.second != dim) {
-      throw std::runtime_error("SHM prefetch requires a uniform embedding dimension");
+      throw std::runtime_error(
+          "SHM prefetch requires a uniform embedding dimension");
     }
   }
   std::vector<uint64_t> owned;
-  if (keys.Size()) owned.assign(keys.Data(), keys.Data() + keys.Size());
+  if (keys.Size())
+    owned.assign(keys.Data(), keys.Data() + keys.Size());
   const auto id = NextRequestId();
   // Reuse the chunked GET path so a large prefetch cannot retain all SHM slots
   // and prevent the next training-step submission from making progress.
-  auto result = std::async(std::launch::async, [this, owned = std::move(owned), dim]() {
-    base::RecTensor values({static_cast<int64_t>(owned.size()), dim}, base::DataType::FLOAT32);
-    if (GetParameter(base::ConstArray<uint64_t>(owned), values) != 0) {
-      throw std::runtime_error("SHM prefetch GET failed");
-    }
-    return values;
-  });
+  auto result =
+      std::async(std::launch::async, [this, owned = std::move(owned), dim]() {
+        base::RecTensor values(
+            {static_cast<int64_t>(owned.size()), dim}, base::DataType::FLOAT32);
+        if (GetParameter(base::ConstArray<uint64_t>(owned), values) != 0) {
+          throw std::runtime_error("SHM prefetch GET failed");
+        }
+        return values;
+      });
   std::lock_guard<std::mutex> lock(prefetch_mu_);
   prefetch_map_.emplace(id, std::move(result));
   return id;
@@ -831,7 +840,8 @@ bool LocalShmPSClient::IsPrefetchDone(uint64_t id) {
   std::lock_guard<std::mutex> lock(prefetch_mu_);
   const auto it = prefetch_map_.find(id);
   return it != prefetch_map_.end() &&
-         it->second.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+         it->second.wait_for(std::chrono::seconds(0)) ==
+             std::future_status::ready;
 }
 
 void LocalShmPSClient::WaitForPrefetch(uint64_t id) {
@@ -844,12 +854,14 @@ bool LocalShmPSClient::GetPrefetchResult(uint64_t id, base::RecTensor& values) {
   {
     std::lock_guard<std::mutex> lock(prefetch_mu_);
     auto it = prefetch_map_.find(id);
-    if (it == prefetch_map_.end()) return false;
+    if (it == prefetch_map_.end())
+      return false;
     result = std::move(it->second);
     prefetch_map_.erase(it);
   }
   auto output = result.get();
-  if (values.dim() == 2 && values.shape(1) != output.shape(1)) return false;
+  if (values.dim() == 2 && values.shape(1) != output.shape(1))
+    return false;
   values = std::move(output);
   return true;
 }

@@ -489,11 +489,18 @@ void KVClientOp::EmbUpdate(const std::string& table_name,
 #  endif
 }
 
-int64_t KVClientOp::TrainingStep(const std::string& table, TrainingStepHeader header,
-                                const base::RecTensor& keys, const base::RecTensor& grads) {
-  if (!ps_client_) throw std::runtime_error("PS client is not initialized");
-  return ps_client_->TrainingStep(table, header,
-      base::ConstArray<uint64_t>(keys.data_as<uint64_t>(), keys.shape(0)), grads);
+int64_t KVClientOp::TrainingStep(
+    const std::string& table,
+    TrainingStepHeader header,
+    const base::RecTensor& keys,
+    const base::RecTensor& grads) {
+  if (!ps_client_)
+    throw std::runtime_error("PS client is not initialized");
+  return ps_client_->TrainingStep(
+      table,
+      header,
+      base::ConstArray<uint64_t>(keys.data_as<uint64_t>(), keys.shape(0)),
+      grads);
 }
 
 uint64_t KVClientOp::EmbUpdateAsync(const std::string& table_name,

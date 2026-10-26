@@ -15,7 +15,8 @@ namespace framework {
 
 void SynchronizeCurrentCudaStreamForTensor(const torch::Tensor& tensor);
 // Record on the caller's stream; the returned wait may run on a CPU worker.
-std::function<void()> RecordCudaCompletionForTensor(const torch::Tensor& tensor);
+std::function<void()>
+RecordCudaCompletionForTensor(const torch::Tensor& tensor);
 
 bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes);
 

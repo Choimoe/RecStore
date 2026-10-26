@@ -823,8 +823,8 @@ int BRPCParameterClient::InitEmbeddingTable(
   return response.success() ? response.tag() : -1;
 }
 
-int64_t BRPCParameterClient::ExchangeTrainingStep(
-    const std::string& table, const std::string& payload) {
+int64_t BRPCParameterClient::ExchangeTrainingStep(const std::string& table,
+                                                  const std::string& payload) {
   recstoreps_brpc::TrainingStepRequest request;
   recstoreps_brpc::TrainingStepResponse response;
   request.set_table_name(table);
@@ -833,7 +833,8 @@ int64_t BRPCParameterClient::ExchangeTrainingStep(
   recstoreps_brpc::ParameterService_Stub stub(channel_.get());
   stub.TrainingStep(&controller, &request, &response, nullptr);
   if (controller.Failed() || !response.error().empty()) {
-    throw std::runtime_error("TrainingStep: " +
+    throw std::runtime_error(
+        "TrainingStep: " +
         (controller.Failed() ? controller.ErrorText() : response.error()));
   }
   return response.committed_step();

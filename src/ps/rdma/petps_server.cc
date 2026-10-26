@@ -1418,7 +1418,8 @@ private:
         }
         const int64_t committed = cache_ps_->TrainingStep(
             std::string(petps::DescriptorTableName(*descriptor)),
-            std::string(payload, descriptor->payload_bytes), thread_id);
+            std::string(payload, descriptor->payload_bytes),
+            thread_id);
         std::memcpy(response.payload, &committed, sizeof(committed));
         response.status->status = static_cast<int32_t>(petps::RpcStatus::kOk);
         response.status->response_bytes = sizeof(committed);

@@ -15,11 +15,11 @@ enum class LocalQueueKind : uint32_t {
 };
 
 enum class LocalOpcode : uint32_t {
-  kInvalid    = 0,
-  kInitTable  = 1,
-  kGet        = 2,
-  kPut        = 3,
-  kUpdateFlat = 4,
+  kInvalid      = 0,
+  kInitTable    = 1,
+  kGet          = 2,
+  kPut          = 3,
+  kUpdateFlat   = 4,
   kTrainingStep = 5,
 };
 

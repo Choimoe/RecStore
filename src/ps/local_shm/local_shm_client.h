@@ -56,7 +56,9 @@ public:
   int64_t ExchangeTrainingStep(const std::string& table,
                                const std::string& payload) override;
   size_t TrainingStepPayloadLimit() const override {
-    return region_.slot_buffer_bytes() > 4096 ? region_.slot_buffer_bytes() - 4096 : 0;
+    return region_.slot_buffer_bytes() > 4096
+             ? region_.slot_buffer_bytes() - 4096
+             : 0;
   }
 
   int GetParameter(const base::ConstArray<uint64_t>& keys,

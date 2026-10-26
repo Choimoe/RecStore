@@ -457,7 +457,8 @@ public:
     return 0;
   }
 
-  int64_t TrainingStep(const std::string& table, TrainingStepHeader h,
+  int64_t TrainingStep(const std::string& table,
+                       TrainingStepHeader h,
                        const base::ConstArray<uint64_t>& keys,
                        const base::RecTensor& grads) override {
     std::vector<std::vector<uint64_t>> shard_keys(clients_.size());
@@ -472,9 +473,16 @@ public:
     for (size_t i = 0; i < clients_.size(); ++i) {
       base::RecTensor part({static_cast<int64_t>(indices[i].size()), h.dim},
                            base::DataType::FLOAT32);
-      if (!indices[i].empty()) GatherEmbeddingRows(grads, indices[i], part);
-      committed = std::min(committed, clients_[i]->TrainingStep(table, h,
-          base::ConstArray<uint64_t>(shard_keys[i].data(), shard_keys[i].size()), part));
+      if (!indices[i].empty())
+        GatherEmbeddingRows(grads, indices[i], part);
+      committed = std::min(
+          committed,
+          clients_[i]->TrainingStep(
+              table,
+              h,
+              base::ConstArray<uint64_t>(
+                  shard_keys[i].data(), shard_keys[i].size()),
+              part));
     }
     return committed;
   }

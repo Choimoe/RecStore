@@ -7,7 +7,8 @@
 namespace recstore {
 namespace framework {
 
-std::function<void()> RecordCudaCompletionForTensor(const torch::Tensor& tensor) {
+std::function<void()>
+RecordCudaCompletionForTensor(const torch::Tensor& tensor) {
   TORCH_CHECK(!tensor.is_cuda(), "CUDA staging requires a CUDA build");
   return [] {};
 }

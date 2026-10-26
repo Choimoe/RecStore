@@ -39,7 +39,8 @@ public:
   explicit RDMAPSClientAdapter(json config);
   ~RDMAPSClientAdapter() override = default;
 
-  int64_t TrainingStep(const std::string& table, TrainingStepHeader h,
+  int64_t TrainingStep(const std::string& table,
+                       TrainingStepHeader h,
                        const base::ConstArray<uint64_t>& keys,
                        const base::RecTensor& grads) override;
 

@@ -1418,13 +1418,13 @@ size_t PetPSClient::TrainingStepPayloadLimit() const {
   return PutPayloadBudget(FLAGS_rdma_rc_request_slot_bytes);
 }
 
-int64_t PetPSClient::ExchangeTrainingStep(
-    const std::string& table, const std::string& data) {
+int64_t PetPSClient::ExchangeTrainingStep(const std::string& table,
+                                          const std::string& data) {
   return WaitTrainingStep(SubmitTrainingStep(table, data));
 }
 
-int PetPSClient::SubmitTrainingStep(
-    const std::string& table, const std::string& data) {
+int PetPSClient::SubmitTrainingStep(const std::string& table,
+                                    const std::string& data) {
   {
     std::lock_guard<std::mutex> guard(mu_);
     EnsureThreadInitializedLocked();
@@ -1434,21 +1434,28 @@ int PetPSClient::SubmitTrainingStep(
     const auto slot_handle = AcquireIdleSlot();
     auto& slot = SlotAt(slot_handle.qp_index, slot_handle.slot_in_qp);
     RequestDescriptor descriptor;
-    FillUpdateFlatDescriptor(&descriptor, slot.next_seq++, 0, data.size(), 0,
-                              table, slot.view);
-    descriptor.op = static_cast<uint16_t>(RcOp::kTrainingStep);
+    FillUpdateFlatDescriptor(
+        &descriptor, slot.next_seq++, 0, data.size(), 0, table, slot.view);
+    descriptor.op             = static_cast<uint16_t>(RcOp::kTrainingStep);
     descriptor.response_bytes = sizeof(int64_t);
-    return SubmitRpcLocked(&slot, descriptor, data.data(), data.size(),
-                            nullptr, 0, sizeof(int64_t));
+    return SubmitRpcLocked(
+        &slot,
+        descriptor,
+        data.data(),
+        data.size(),
+        nullptr,
+        0,
+        sizeof(int64_t));
   }
 }
 
 int64_t PetPSClient::WaitTrainingStep(int rpc) {
   try {
-    size_t bytes = 0;
-    int32_t status = 0;
+    size_t bytes       = 0;
+    int32_t status     = 0;
     const auto* result = BorrowGetResultPayload(rpc, nullptr, &bytes, &status);
-    if (status != static_cast<int32_t>(RpcStatus::kOk) || bytes != sizeof(int64_t)) {
+    if (status != static_cast<int32_t>(RpcStatus::kOk) ||
+        bytes != sizeof(int64_t)) {
       throw std::runtime_error("RDMA training step failed");
     }
     int64_t committed;

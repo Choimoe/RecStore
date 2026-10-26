@@ -417,7 +417,8 @@ private:
     return Status::OK;
   }
 
-  Status TrainingStep(ServerContext*, const recstoreps::TrainingStepRequest* request,
+  Status TrainingStep(ServerContext*,
+                      const recstoreps::TrainingStepRequest* request,
                       recstoreps::TrainingStepResponse* reply) override {
     try {
       reply->set_committed_step(cache_ps_->TrainingStep(

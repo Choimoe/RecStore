@@ -917,8 +917,8 @@ void recstore::BRPCParameterServiceImpl::TrainingStep(
     google::protobuf::Closure* done) {
   brpc::ClosureGuard guard(done);
   try {
-    reply->set_committed_step(cache_ps_->TrainingStep(
-        request->table_name(), request->payload(), 0));
+    reply->set_committed_step(
+        cache_ps_->TrainingStep(request->table_name(), request->payload(), 0));
   } catch (const std::exception& error) {
     reply->set_error(error.what());
   }
