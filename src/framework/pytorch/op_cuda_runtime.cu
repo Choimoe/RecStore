@@ -1,6 +1,7 @@
 #include "framework/pytorch/op_cuda_runtime.h"
 
 #include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime_api.h>
@@ -14,6 +15,14 @@
 
 namespace recstore {
 namespace framework {
+
+std::function<void()> RecordCudaCompletionForTensor(const torch::Tensor& tensor) {
+  if (!tensor.is_cuda()) return [] {};
+  c10::cuda::CUDAGuard guard(tensor.device());
+  auto event = std::make_shared<at::cuda::CUDAEvent>();
+  event->record(at::cuda::getCurrentCUDAStream());
+  return [event] { event->synchronize(); };
+}
 
 void SynchronizeCurrentCudaStreamForTensor(const torch::Tensor& tensor) {
   if (!tensor.is_cuda()) {

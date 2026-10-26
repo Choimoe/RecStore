@@ -1,12 +1,106 @@
 #include "framework/pytorch/op_bagpipe.h"
 
 #include <torch/extension.h>
+#include <future>
+#include <thread>
 
 #include "framework/pytorch/op_internal.h"
 
 namespace recstore {
 namespace framework {
 namespace {
+
+std::mutex training_mu;
+int64_t next_training_handle = 1;
+std::unordered_map<int64_t, std::future<void>> training_work;
+
+TrainingStepHeader TrainingHeader(int64_t session, int64_t step, int64_t rank,
+                                  int64_t world, int64_t dim, double lr,
+                                  int64_t divisor, int64_t kind) {
+  TORCH_CHECK(session > 0 && step >= 0 && rank >= 0 && world > rank &&
+              world <= 65536 && dim > 0 && dim <= 65536 && kind >= 0 && kind <= 3,
+              "Invalid BagPipe training metadata");
+  TrainingStepHeader h;
+  h.session = session; h.step = step; h.rank = rank; h.world = world;
+  h.dim = dim; h.learning_rate = lr; h.divisor = divisor; h.kind = kind;
+  DecodeTrainingStep(PackTrainingStep(h));
+  return h;
+}
+
+int64_t bagpipe_step_async(const std::string& table, const torch::Tensor& ids,
+                           const torch::Tensor& grads, int64_t session,
+                           int64_t step, int64_t rank, int64_t world,
+                           double lr, int64_t divisor) {
+  TORCH_CHECK(ids.dim() == 1 && ids.scalar_type() == torch::kInt64 &&
+              grads.dim() == 2 && grads.scalar_type() == torch::kFloat32 &&
+              ids.numel() == grads.size(0), "Invalid BagPipe gradients");
+  auto h = TrainingHeader(session, step, rank, world, grads.size(1), lr, divisor, 0);
+  auto keys = ids.is_cuda() ? StageCudaTensorToPinnedCpuAsyncNoCast(ids) : ids.contiguous().clone();
+  auto keys_ready = RecordCudaCompletionForTensor(ids);
+  auto values = grads.is_cuda() ? StageCudaTensorToPinnedCpuAsyncNoCast(grads) : grads.contiguous().clone();
+  auto grads_ready = RecordCudaCompletionForTensor(grads);
+  auto client = GetConcreteKVClientOp();
+  auto work = std::async(std::launch::async, [client, table, h, keys, values,
+                                            keys_ready, grads_ready, ids, grads]() mutable {
+    try {
+      // Keep source tensors alive and wait only for their producer/copy events.
+      keys_ready();
+      grads_ready();
+      auto k = ToRecTensor(keys, base::DataType::UINT64);
+      auto g = ToRecTensor(values, base::DataType::FLOAT32);
+      int64_t committed = client->TrainingStep(table, h, k, g);
+      h.kind = 1;
+      auto empty_keys = torch::empty({0}, torch::kInt64);
+      auto empty_grads = torch::empty({0, int64_t(h.dim)}, torch::kFloat32);
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+      while (committed < h.step) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          throw std::runtime_error("BagPipe PS commit timed out");
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        committed = client->TrainingStep(table, h,
+            ToRecTensor(empty_keys, base::DataType::UINT64),
+            ToRecTensor(empty_grads, base::DataType::FLOAT32));
+      }
+    } catch (...) {
+      // Fail peers promptly; never retry a possibly partially applied optimizer.
+      try {
+        h.kind = 3;
+        auto k = torch::empty({0}, torch::kInt64);
+        auto g = torch::empty({0, int64_t(h.dim)}, torch::kFloat32);
+        client->TrainingStep(table, h, ToRecTensor(k, base::DataType::UINT64),
+                             ToRecTensor(g, base::DataType::FLOAT32));
+      } catch (...) {}
+      throw;
+    }
+  });
+  std::lock_guard<std::mutex> guard(training_mu);
+  const int64_t handle = next_training_handle++;
+  training_work.emplace(handle, std::move(work));
+  return handle;
+}
+
+void bagpipe_step_wait(int64_t handle) {
+  std::future<void> work;
+  {
+    std::lock_guard<std::mutex> guard(training_mu);
+    auto it = training_work.find(handle);
+    TORCH_CHECK(it != training_work.end(), "Unknown BagPipe update handle");
+    work = std::move(it->second);
+    training_work.erase(it);
+  }
+  work.get();
+}
+
+void bagpipe_step_close(const std::string& table, int64_t session, int64_t step,
+                        int64_t rank, int64_t world, int64_t dim, double lr,
+                        int64_t divisor, bool abort) {
+  auto h = TrainingHeader(session, step, rank, world, dim, lr, divisor, abort ? 3 : 2);
+  auto keys = torch::empty({0}, torch::kInt64);
+  auto grads = torch::empty({0, dim}, torch::kFloat32);
+  GetConcreteKVClientOp()->TrainingStep(table, h,
+      ToRecTensor(keys, base::DataType::UINT64), ToRecTensor(grads, base::DataType::FLOAT32));
+}
 
 // GPU-cache-accelerated flat lookup that works with ANY backend (BRPC, GRPC,
 // RDMA, local_shm).  Cache hits are served from the GPU cache; misses are
@@ -570,6 +664,9 @@ void update_gpu_cache_torch(const torch::Tensor& keys,
 } // namespace
 
 void RegisterBagpipeOps(torch::Library& m) {
+  m.def("bagpipe_step_async", bagpipe_step_async);
+  m.def("bagpipe_step_wait", bagpipe_step_wait);
+  m.def("bagpipe_step_close", bagpipe_step_close);
   m.def("gpu_cache_lookup_flat", gpu_cache_lookup_flat_torch);
   m.def("gpu_cache_lookup_flat_no_evict", gpu_cache_lookup_flat_no_evict_torch);
   m.def("emb_write_values", emb_write_values_torch);

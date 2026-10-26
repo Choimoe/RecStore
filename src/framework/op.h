@@ -129,6 +129,8 @@ public:
   void EmbUpdate(const std::string& table_name,
                  const base::RecTensor& keys,
                  const base::RecTensor& grads) override;
+  int64_t TrainingStep(const std::string& table, TrainingStepHeader header,
+                       const base::RecTensor& keys, const base::RecTensor& grads);
   uint64_t EmbUpdateAsync(const std::string& table_name,
                           const base::RecTensor& keys,
                           const base::RecTensor& grads);
