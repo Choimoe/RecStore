@@ -21,6 +21,7 @@ from model_zoo.rs_demo.runners.recstore_runner import (
     _build_train_dataloader_for_mode,
     _maybe_wrap_dense_module_for_dist,
 )
+from model_zoo.rs_demo.runtime.worker_common import merge_rank_outputs
 from recstore.embedding_read_path import LookaheadPrefetcher
 
 
@@ -582,7 +583,7 @@ class TestRecStoreRunner(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch(
-                    "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
+                    "model_zoo.rs_demo.data.dlrm_source.build_train_dataloader",
                     lambda **kwargs: (dataset, dataloader),
                 )
             )
@@ -869,7 +870,7 @@ class TestRecStoreRunner(unittest.TestCase):
         fake_dataset = [1, 2, 3]
 
         with mock.patch(
-            "model_zoo.rs_demo.runners.recstore_runner.build_train_dataloader",
+            "model_zoo.rs_demo.data.dlrm_source.build_train_dataloader",
             return_value=(fake_dataset, "loader"),
         ) as build_loader:
             dataset, dataloader = _build_train_dataloader_for_mode(
@@ -1379,7 +1380,7 @@ class TestRecStoreRunner(unittest.TestCase):
                 ],
             )
 
-            rows = recstore_runner._merge_rank_outputs([rank1, rank0], out_csv)
+            rows = merge_rank_outputs([rank1, rank0], out_csv)
 
             self.assertEqual([(row["rank"], row["step"]) for row in rows], [(0, 0), (0, 1), (1, 0)])
             self.assertTrue(out_csv.exists())

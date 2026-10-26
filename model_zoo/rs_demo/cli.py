@@ -46,12 +46,6 @@ def repo_root_from_this_file() -> Path:
 
 
 
-def estimate_recstore_kv_capacity(num_embeddings: int, table_count: int = 26) -> int:
-    # Keep the runtime capacity close to the benchmark scale so ps_server
-    # initialization does not reserve the oversized repository default.
-    return max(int(num_embeddings) * int(table_count) * 2, 100_000)
-
-
 def estimate_recstore_kv_capacity_for_tables(
     num_embeddings_per_feature: list[int],
 ) -> int:
