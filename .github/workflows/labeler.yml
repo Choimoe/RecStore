@@ -2,6 +2,10 @@ name: "Pull Request Labeler"
 on:
 - pull_request_target
 
+concurrency:
+  group: pr-labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   triage:
     permissions:
@@ -21,3 +25,18 @@ jobs:
         m_label: 'size/L'
         m_max_size: '500'
         l_label: 'size/XL'
+        # The shared helper below owns the warning and skips unchanged comments.
+        message_if_xl: ''
+
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.base.sha }}
+        persist-credentials: false
+        sparse-checkout: .github/scripts/ci
+
+    - name: Warn about large PRs
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { notifySize } = require('./.github/scripts/ci/notifications.js');
+          await notifySize(github, context);
