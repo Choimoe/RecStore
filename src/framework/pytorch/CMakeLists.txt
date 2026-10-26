@@ -7,10 +7,10 @@ add_library(recstore_torch_ops SHARED
     op_base.cc
     op_flat.cc
     op_prefetch.cc
-    op_gpu_cache.cc
+    cache/cache_bindings.cc
     op_sparse_gradient_commit.cc
-    tensor_adapter.cc
-    bagpipe_bindings.cc
+    cache/tensor_adapter.cc
+    cache/bagpipe_bindings.cc
     op_profile.cc
     ../op.cc
     ../common/local_shm_kv_client_op.cc
@@ -80,6 +80,7 @@ target_link_libraries(recstore_torch_ops PRIVATE
 )
 
 if(TARGET framework_gpu_cache)
+    target_sources(recstore_torch_ops PRIVATE cache/gpu_cache_adapter.cu)
     target_compile_definitions(recstore_torch_ops PRIVATE RECSTORE_ENABLE_GPU_CACHE)
     target_link_libraries(recstore_torch_ops PRIVATE framework_gpu_cache)
 endif()

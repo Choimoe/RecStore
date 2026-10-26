@@ -597,6 +597,24 @@ void KVClientOp::EmbWriteCached(
     framework::CacheAwareOp::ClearNoThrow(cache.clear);
 }
 
+int KVClientOp::InitEmbeddingTableCached(
+    const std::string& table_name,
+    const EmbeddingTableConfig& config,
+    const framework::CacheUpdateActions& cache) {
+  const auto tag = InitEmbeddingTable(table_name, config);
+  framework::CacheAwareOp::AfterReload(tag >= 0, cache);
+  return tag;
+}
+
+bool KVClientOp::LoadCheckpointCached(
+    const std::string& path,
+    const std::string& metadata,
+    const framework::CacheUpdateActions& cache) {
+  const bool loaded = LoadCheckpoint(path, metadata);
+  framework::CacheAwareOp::AfterReload(loaded, cache);
+  return loaded;
+}
+
 int KVClientOp::InitEmbeddingTable(const std::string& table_name,
                                    const EmbeddingTableConfig& config) {
   if (IsHierKVBackendName(ps_backend_name_)) {

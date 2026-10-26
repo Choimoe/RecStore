@@ -47,7 +47,7 @@ C++ standard library. Input arrays are borrowed during each call; results are
 ordinary vectors. It owns no tensors, embedding values, PS clients, or device
 state. `test_bagpipe_metadata` exercises this policy without linking Torch.
 
-`src/framework/pytorch/bagpipe_bindings.cc` validates tensor dtype/device/shape
+`src/framework/pytorch/cache/bagpipe_bindings.cc` validates tensor dtype/device/shape
 and adapts these arrays and results to PyTorch. The Python-visible class remains
 `BagPipeCacheMetadata`; the controller retains PyTorch planning, tensor gathers,
 autograd integration, and communication scheduling. Python exchanges compact
@@ -101,26 +101,49 @@ coherence decisions. The former `op_bagpipe.cc` has been removed.
 The execution paths are split by responsibility:
 
 - `framework/op.{h,cc}` exposes sparse commit submission/wait/close and cached
-  update/write operations using `RecTensor` views.
+  update/write operations using `RecTensor` views. Successful table initialization
+  and checkpoint restore also clear cached values through this common API.
 - `framework/common/sparse_gradient_commit_runtime.h` owns asynchronous work,
   input readiness, committed-step polling, timeout, and peer abort. Adapters
   supply a readiness callback that retains source/staging buffers until the
   operation finishes; no Torch types enter the runtime.
-- `framework/common/cache_aware_op.h` owns the shared query/read-misses/fill/
+- `framework/cache/cache_aware_op.h` owns the shared query/read-misses/fill/
   scatter pipeline, low-hit bypass, fallback, and invalidation after transport
   completion. Its device actions are callbacks; the same policy is exercised
   by C++ tests without Torch or CUDA.
-- `framework/pytorch/tensor_adapter.cc` supplies Tensor allocation and device
+- `framework/pytorch/cache/tensor_adapter.cc` supplies Tensor allocation and device
   operations for those callbacks. `emb_read`, `local_lookup_flat`, and
   `gpu_cache_lookup_flat` share the common pipeline. Existing GPU cache
-  primitives remain in `framework/gpu/`.
+  primitives are adapted in `framework/pytorch/cache/gpu_cache_adapter.cu`.
+- `framework/cache/gpu_embedding_cache.{h,cu}` owns the GPU cache lifecycle,
+  cross-stream ordering, generation, residency operations, and cache SGD.
+  Its public API accepts typed device pointers, sizes, a device ordinal, and
+  a CUDA stream. Callers own the buffers and retain them through stream
+  completion. Query returns a synchronized miss count; hit-only reads and
+  ordinary mutations enqueue work. Clear/disable wait for the last operation
+  before destroying cache storage on the host.
+- Strict cache SGD groups duplicate keys with CUDA/Thrust and sums their
+  gradients before updating each row once. If any requested key is missing,
+  it invalidates the requested keys and returns false. Best-effort SGD keeps
+  the existing asynchronous kernel and skips absent keys.
+- Explicit enable/disable/reset also reset the calling thread's bypass
+  state. Internal cache clearing preserves that state so fallback and bypass
+  transitions remain owned by `cache_aware_op.h`.
 - Local flat reads expose a common transport lease. The Tensor adapter retains
   borrowed host storage until its H2D stream callback completes. Generic host
   memory registration lives in `framework/gpu/host_memory.cu`.
 
-The Python operator names are unchanged by this extraction. The new
+Cache files are grouped under `framework/cache/` (shared implementation) and
+`framework/pytorch/cache/` (Tensor adapters and registration, including BagPipe
+metadata bindings). Host-memory utilities remain in `framework/gpu/`.
+`framework_gpu_cache` has no Torch/Python include or link dependencies.
+
+The Python operator names are unchanged by this extraction.
 `test_framework_op_runtime` checks readiness/lifetime, timeout and abort,
 cache bypass/fallback, and completion-before-invalidation without Torch.
+`test_framework_gpu_cache` links only the CUDA cache and ordinary C++ test
+dependencies, and exercises caller-owned buffers, duplicate-key SGD, partial
+miss failure, cross-stream updates, and lifecycle reset without Torch.
 
 ## Sparse gradient commit protocol and failure behavior
 

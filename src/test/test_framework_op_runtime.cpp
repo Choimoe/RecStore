@@ -1,4 +1,4 @@
-#include "framework/common/cache_aware_op.h"
+#include "framework/cache/cache_aware_op.h"
 #include "framework/common/sparse_gradient_commit_runtime.h"
 #include <gtest/gtest.h>
 #include <atomic>
@@ -164,5 +164,10 @@ TEST(CacheAwareOp, AsyncCompletionPrecedesInvalidationAndFailureClearsCache) {
   EXPECT_TRUE(order.empty());
   g_cache_aware_op.AfterUpdate(1, actions, true);
   EXPECT_EQ(order, "i");
+  order.clear();
+  CacheAwareOp::AfterReload(false, actions);
+  EXPECT_TRUE(order.empty());
+  CacheAwareOp::AfterReload(true, actions);
+  EXPECT_EQ(order, "c");
   g_cache_aware_op.SetBypassEnabled(true);
 }

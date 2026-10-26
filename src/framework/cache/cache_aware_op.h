@@ -46,6 +46,11 @@ public:
     }
   }
 
+  static void AfterReload(bool success, const CacheUpdateActions& io) {
+    if (success && io.enabled && io.enabled())
+      ClearNoThrow(io.clear);
+  }
+
   void
   Lookup(int64_t rows, const CacheLookupActions& io, bool no_evict = false) {
     if (no_evict && !io.usable)

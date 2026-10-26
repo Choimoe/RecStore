@@ -2,7 +2,7 @@
 
 #include "base/tensor.h"
 #include "framework/common/op_runtime_support.h"
-#include "framework/common/cache_aware_op.h"
+#include "framework/cache/cache_aware_op.h"
 #include "framework/common/sparse_gradient_commit_runtime.h"
 #include "ps/base/base_client.h"
 #include <cstddef>
@@ -158,6 +158,12 @@ public:
                       const base::RecTensor& values,
                       const framework::CacheUpdateActions& cache,
                       bool per_key = false);
+  int InitEmbeddingTableCached(const std::string& table_name,
+                               const EmbeddingTableConfig& config,
+                               const framework::CacheUpdateActions& cache);
+  bool LoadCheckpointCached(const std::string& path,
+                             const std::string& metadata,
+                             const framework::CacheUpdateActions& cache);
   int InitEmbeddingTable(const std::string& table_name,
                          const EmbeddingTableConfig& config) override;
   bool EmbExists(const base::RecTensor& keys) override;

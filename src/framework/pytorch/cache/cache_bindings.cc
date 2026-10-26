@@ -1,4 +1,4 @@
-#include "framework/pytorch/op_gpu_cache.h"
+#include "framework/pytorch/cache/cache_bindings.h"
 #include "framework/pytorch/op_internal.h"
 
 namespace recstore {
@@ -28,11 +28,7 @@ void emb_write_values_torch(const torch::Tensor& keys,
 
 bool enable_gpu_cache_torch(int64_t capacity, int64_t embedding_dim) {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-  const bool enabled = gpu::EnableGpuCache(capacity, embedding_dim);
-  if (enabled) {
-    g_cache_aware_op.Reset();
-  }
-  return enabled;
+  return torch_cache::EnableGpuCache(capacity, embedding_dim);
 #else
   (void)capacity;
   (void)embedding_dim;
@@ -42,15 +38,13 @@ bool enable_gpu_cache_torch(int64_t capacity, int64_t embedding_dim) {
 
 void disable_gpu_cache_torch() {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-  gpu::DisableGpuCache();
-  g_cache_aware_op.Reset();
+  torch_cache::DisableGpuCache();
 #endif
 }
 
 void clear_gpu_cache_torch() {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-  gpu::ClearGpuCache();
-  g_cache_aware_op.Reset();
+  torch_cache::ResetGpuCache();
 #endif
 }
 
@@ -62,7 +56,7 @@ void prefill_gpu_cache_torch(const torch::Tensor& keys,
     return;
   }
   auto [k, v] = CudaCacheRows(keys, values);
-  gpu::FillGpuCache(k, v);
+  torch_cache::FillGpuCache(k, v);
 #else
   (void)keys;
   (void)values;
@@ -77,7 +71,7 @@ torch::Tensor prefill_gpu_cache_no_evict_torch(const torch::Tensor& keys,
     return torch::empty({0}, torch::TensorOptions().dtype(torch::kBool));
   }
   auto [k, v] = CudaCacheRows(keys, values);
-  return gpu::FillGpuCacheNoEvict(k, v);
+  return torch_cache::FillGpuCacheNoEvict(k, v);
 #else
   (void)keys;
   (void)values;
@@ -87,7 +81,7 @@ torch::Tensor prefill_gpu_cache_no_evict_torch(const torch::Tensor& keys,
 
 torch::Tensor contains_gpu_cache_torch(const torch::Tensor& keys) {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-  return gpu::ContainsGpuCache(keys);
+  return torch_cache::ContainsGpuCache(keys);
 #else
   (void)keys;
   TORCH_CHECK(false, "GPU cache support is unavailable");
@@ -96,7 +90,7 @@ torch::Tensor contains_gpu_cache_torch(const torch::Tensor& keys) {
 
 int64_t get_gpu_cache_generation_torch() {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-  return static_cast<int64_t>(gpu::GetGpuCacheGeneration());
+  return static_cast<int64_t>(torch_cache::GetGpuCacheGeneration());
 #else
   return 0;
 #endif
@@ -115,7 +109,7 @@ void invalidate_gpu_cache_torch(const torch::Tensor& keys) {
   if (!keys_cuda.is_contiguous()) {
     keys_cuda = keys_cuda.contiguous();
   }
-  gpu::InvalidateGpuCache(keys_cuda);
+  torch_cache::InvalidateGpuCache(keys_cuda);
 #else
   (void)keys;
 #endif
@@ -135,7 +129,7 @@ torch::Tensor invalidate_gpu_cache_with_mask_torch(const torch::Tensor& keys) {
   if (!keys_cuda.is_contiguous()) {
     keys_cuda = keys_cuda.contiguous();
   }
-  return gpu::InvalidateGpuCacheWithMask(keys_cuda);
+  return torch_cache::InvalidateGpuCacheWithMask(keys_cuda);
 #else
   (void)keys;
   TORCH_CHECK(false, "GPU cache support is unavailable");
@@ -153,7 +147,7 @@ gpu_cache_lookup_flat_assuming_hits_torch(const torch::Tensor& keys,
   TORCH_CHECK(keys.is_cuda(),
               "gpu_cache_lookup_flat_assuming_hits requires CUDA keys");
   TORCH_CHECK(embedding_dim > 0, "Embedding dimension must be positive");
-  return gpu::LookupGpuCacheAssumingHits(keys, embedding_dim);
+  return torch_cache::LookupGpuCacheAssumingHits(keys, embedding_dim);
 #else
   (void)keys;
   (void)embedding_dim;
@@ -169,7 +163,7 @@ bool apply_sgd_update_gpu_cache_torch(const torch::Tensor& keys,
   if (!keys.numel())
     return true;
   auto [k, v] = CudaCacheRows(keys, grads);
-  return gpu::ApplySgdUpdateGpuCache(k, v, learning_rate);
+  return torch_cache::ApplySgdUpdateGpuCache(k, v, learning_rate);
 #else
   (void)keys;
   (void)grads;
@@ -192,7 +186,7 @@ void apply_sgd_update_gpu_cache_best_effort_torch(
     return;
   }
   auto [k, v] = CudaCacheRows(keys, grads);
-  gpu::ApplySgdUpdateBestEffortGpuCache(k, v, learning_rate);
+  torch_cache::ApplySgdUpdateBestEffortGpuCache(k, v, learning_rate);
 #else
   (void)keys;
   (void)grads;
@@ -234,7 +228,7 @@ void reset_gpu_cache_bypass_state_torch() {
 std::tuple<torch::Tensor, torch::Tensor>
 query_gpu_cache_torch(const torch::Tensor& keys, int64_t embedding_dim) {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-  if (!gpu::IsGpuCacheEnabled() || keys.numel() == 0) {
+  if (!torch_cache::IsGpuCacheEnabled() || keys.numel() == 0) {
     auto opts = torch::TensorOptions().dtype(torch::kFloat32);
     auto dev  = keys.is_cuda() ? keys.device() : torch::kCPU;
     return {torch::empty({0, embedding_dim}, opts.device(dev)),
@@ -244,7 +238,7 @@ query_gpu_cache_torch(const torch::Tensor& keys, int64_t embedding_dim) {
   TORCH_CHECK(keys.scalar_type() == torch::kInt64,
               "keys must have dtype int64");
   auto keys_contig = keys.is_contiguous() ? keys : keys.contiguous();
-  auto result      = gpu::QueryGpuCache(keys_contig, embedding_dim);
+  auto result      = torch_cache::QueryGpuCache(keys_contig, embedding_dim);
   return {result.values, result.missing_keys_cpu};
 #else
   (void)keys;
@@ -262,7 +256,7 @@ void update_gpu_cache_torch(const torch::Tensor& keys,
     return;
   CheckRows(keys, values, false);
   auto [k, v] = CudaCacheRows(keys, values);
-  gpu::UpdateGpuCache(k, v);
+  torch_cache::UpdateGpuCache(k, v);
 #else
   (void)keys;
   (void)values;

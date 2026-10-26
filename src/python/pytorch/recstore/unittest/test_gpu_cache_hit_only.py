@@ -204,6 +204,28 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
         after = self.client.get_gpu_cache_generation()
         self.assertGreater(after, before)
 
+    def test_strict_sgd_sums_duplicates_and_invalidates_on_miss(self) -> None:
+        ops = self.client.ops
+        keys = torch.tensor([5, 7], dtype=torch.int64, device="cuda")
+        initial = torch.full((2, 4), 10.0, device="cuda")
+        ops.prefill_gpu_cache(keys, initial)
+        repeated = keys[[0, 1, 0, 1, 0]]
+        grads = torch.arange(20, dtype=torch.float32, device="cuda").view(5, 4) / 7
+        summed = torch.zeros_like(initial)
+        summed.index_add_(0, torch.tensor([0, 1, 0, 1, 0], device="cuda"), grads)
+
+        self.assertTrue(ops.apply_sgd_update_gpu_cache(repeated, grads, 0.03))
+        actual, miss = ops.gpu_cache_lookup_flat_assuming_hits(keys, 4)
+        self.assertFalse(bool(miss.any()))
+        torch.testing.assert_close(actual, initial - summed * 0.03)
+
+        absent = torch.tensor([5, 999], dtype=torch.int64, device="cuda")
+        self.assertFalse(ops.apply_sgd_update_gpu_cache(absent, initial, 0.03))
+        self.assertEqual(ops.contains_gpu_cache(keys).tolist(), [False, True])
+        remaining, miss = ops.gpu_cache_lookup_flat_assuming_hits(keys[1:], 4)
+        self.assertFalse(bool(miss.any()))
+        torch.testing.assert_close(remaining, actual[1:])
+
     def test_invalidate_with_mask_reports_authoritative_removal(self) -> None:
         table_name = f"gpu_cache_invalidate_mask_{time.time_ns()}"
         self.client.init_data(

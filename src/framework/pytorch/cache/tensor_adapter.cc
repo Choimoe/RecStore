@@ -29,11 +29,13 @@ CudaCacheRows(const torch::Tensor& keys, const torch::Tensor& values) {
 
 CacheUpdateActions CacheActions(const torch::Tensor& keys, int64_t dim) {
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-  return {[] { return gpu::IsGpuCacheEnabled(); },
-          [keys, dim] { return gpu::CanUseGpuCache(keys, dim); },
-          [keys] { gpu::InvalidateGpuCache(keys); },
+  return {[] { return torch_cache::IsGpuCacheEnabled(); },
+          [keys, dim] {
+            return keys.defined() && torch_cache::CanUseGpuCache(keys, dim);
+          },
+          [keys] { torch_cache::InvalidateGpuCache(keys); },
           [] {
-            gpu::ClearGpuCache();
+            torch_cache::ClearGpuCache();
             gpu::ResetLastGpuCacheProfile();
           }};
 #else
@@ -134,11 +136,11 @@ std::tuple<torch::Tensor, torch::Tensor> CachedReadTorch(
   };
 #ifdef RECSTORE_ENABLE_GPU_CACHE
   gpu::ResetLastGpuCacheProfile();
-  gpu::GpuCacheLookupResult cached;
+  torch_cache::GpuCacheLookupResult cached;
   torch::Tensor miss_keys, miss_values, inserted;
-  io.usable = gpu::CanUseGpuCache(keys, dim);
+  io.usable = torch_cache::CanUseGpuCache(keys, dim);
   io.query  = [&] {
-    cached = gpu::QueryGpuCache(keys, dim);
+    cached = torch_cache::QueryGpuCache(keys, dim);
     output = cached.values;
     return cached.missing_count;
   };
@@ -151,18 +153,18 @@ std::tuple<torch::Tensor, torch::Tensor> CachedReadTorch(
   };
   io.fill = [&] {
     if (no_evict)
-      inserted = gpu::FillGpuCacheNoEvict(miss_keys, miss_values);
+      inserted = torch_cache::FillGpuCacheNoEvict(miss_keys, miss_values);
     else
-      gpu::FillGpuCache(miss_keys, miss_values);
+      torch_cache::FillGpuCache(miss_keys, miss_values);
   };
   io.scatter = [&] {
-    gpu::ScatterMissValues(&output, cached.missing_positions_cpu, miss_values);
+    torch_cache::ScatterMissValues(&output, cached.missing_positions_cpu, miss_values);
     if (no_evict)
       resident.index_put_(
           {cached.missing_positions_cpu.to(keys.device())}, inserted);
   };
   io.clear = [] {
-    gpu::ClearGpuCache();
+    torch_cache::ClearGpuCache();
     gpu::ResetLastGpuCacheProfile();
   };
 #endif

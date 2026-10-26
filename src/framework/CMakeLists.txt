@@ -5,9 +5,9 @@ option(RECSTORE_ENABLE_GPU_CACHE "Build RecStore framework GPU cache" ON)
 find_package(Python 3.10 COMPONENTS Interpreter Development REQUIRED)
 
 if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER AND RECSTORE_ENABLE_GPU_CACHE)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/gpu)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/cache)
 else()
-    message(STATUS "Skipping framework/gpu because CUDA is disabled, nvcc is unavailable, or RECSTORE_ENABLE_GPU_CACHE is OFF")
+    message(STATUS "Skipping framework/cache because CUDA is disabled, nvcc is unavailable, or RECSTORE_ENABLE_GPU_CACHE is OFF")
 endif()
 
 set(_recstore_libtorch_lib_dir "${PROJECT_SOURCE_DIR}/third_party/libtorch/libtorch/lib")

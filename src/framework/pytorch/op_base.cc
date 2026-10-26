@@ -81,15 +81,8 @@ int64_t init_embedding_table_torch(
   cfg.embedding_dim  = static_cast<uint64_t>(embedding_dim);
   cfg.table_id       = static_cast<uint64_t>(table_id);
 
-  auto kv_op        = GetConcreteKVClientOp();
-  const int64_t tag = kv_op->InitEmbeddingTable(table_name, cfg);
-#ifdef RECSTORE_ENABLE_GPU_CACHE
-  if (tag >= 0 && gpu::IsGpuCacheEnabled()) {
-    CacheAwareOp::ClearNoThrow([] { gpu::ClearGpuCache(); });
-    gpu::ResetLastGpuCacheProfile();
-  }
-#endif
-  return tag;
+  return GetConcreteKVClientOp()->InitEmbeddingTableCached(
+      table_name, cfg, CacheActions());
 }
 
 bool save_checkpoint_torch(const std::string& path,
@@ -103,14 +96,7 @@ bool load_checkpoint_torch(const std::string& path,
                            const std::string& metadata) {
   TORCH_CHECK(!path.empty(), "checkpoint path must be non-empty");
   TORCH_CHECK(!metadata.empty(), "checkpoint metadata must be non-empty");
-  const bool ok = GetKVClientOp()->LoadCheckpoint(path, metadata);
-#ifdef RECSTORE_ENABLE_GPU_CACHE
-  if (ok && gpu::IsGpuCacheEnabled()) {
-    CacheAwareOp::ClearNoThrow([] { gpu::ClearGpuCache(); });
-    gpu::ResetLastGpuCacheProfile();
-  }
-#endif
-  return ok;
+  return GetConcreteKVClientOp()->LoadCheckpointCached(path, metadata, CacheActions());
 }
 
 void emb_write_torch(const torch::Tensor& keys, const torch::Tensor& values) {

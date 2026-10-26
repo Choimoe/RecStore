@@ -15,13 +15,14 @@
 #include "base/tensor.h"
 #include "framework/op.h"
 #include "framework/common/op_profile.h"
+#include "framework/cache/cache_profile.h"
 #include "framework/pytorch/op_cuda_runtime.h"
 #include "ps/local_shm/local_shm_client.h"
 
 #include <glog/logging.h>
 
 #ifdef RECSTORE_ENABLE_GPU_CACHE
-#  include "framework/gpu/gpu_embedding_cache.h"
+#  include "framework/pytorch/cache/gpu_cache_adapter.h"
 #endif
 
 namespace recstore {
@@ -74,7 +75,7 @@ void CheckRows(const torch::Tensor& keys,
                bool contiguous = true);
 std::pair<torch::Tensor, torch::Tensor>
 CudaCacheRows(const torch::Tensor& keys, const torch::Tensor& values);
-CacheUpdateActions CacheActions(const torch::Tensor& keys, int64_t dim);
+CacheUpdateActions CacheActions(const torch::Tensor& keys = {}, int64_t dim = 0);
 std::tuple<torch::Tensor, torch::Tensor> CachedReadTorch(
     const torch::Tensor& keys,
     int64_t dim,

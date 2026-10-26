@@ -13,7 +13,7 @@
 
 #include <torch/extension.h>
 
-#include "framework/pytorch/op_gpu_cache.h"
+#include "framework/pytorch/cache/cache_bindings.h"
 #include "framework/pytorch/op_sparse_gradient_commit.h"
 #include "framework/pytorch/op_base.h"
 #include "framework/pytorch/op_flat.h"
