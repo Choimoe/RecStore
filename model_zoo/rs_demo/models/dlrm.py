@@ -142,12 +142,6 @@ def build_hybrid_dense_arch(
 class DlrmModelPlugin:
     """Default DLRM model plugin (dense arch + BCE loss)."""
 
-    #: CLI dests this plugin owns (routed into ``cfg.model_args``); DLRM has none.
-    ARG_DESTS: tuple[str, ...] = ()
-
-    def add_arguments(self, parser) -> None:  # noqa: D401 - no extra CLI args
-        return None
-
     def build_dense_module(self, cfg, *, num_sparse_features, embedding_dim, device):
         module = build_hybrid_dense_arch(
             torch=torch,
