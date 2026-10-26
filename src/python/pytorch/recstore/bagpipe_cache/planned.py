@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import secrets
 import time
-from collections import OrderedDict, deque
+from collections import deque
 from dataclasses import dataclass
 
 import torch
@@ -59,7 +59,6 @@ class BagPipeCacheController:
         self._session = int(session.item())
         self._prescan = []
         self._plans = []
-        self._last_update = {}
         self._queue = deque()
         self._enqueued = 0
         self._updated = 0
@@ -70,9 +69,10 @@ class BagPipeCacheController:
         self._pending = None
         self._closed = False
         self._stats = {}
-        self._slots = OrderedDict()
-        self._free = []
-        self._next_slot = 0
+        from .. import load_ops_library
+
+        load_ops_library()
+        self._metadata = torch.classes.recstore_ops.BagPipeCacheMetadata(self._capacity_rows)
         self._values = torch.empty((self._capacity_rows, self.embedding_dim),
                                    dtype=torch.float32, device=self.device)
 
@@ -107,8 +107,7 @@ class BagPipeCacheController:
         per_rank = [torch.unique(ids) for ids in rank_ids]
         active, counts = torch.unique(torch.cat(per_rank), return_counts=True)
         local_rows = torch.searchsorted(active, unique_ids)
-        previous = torch.tensor([self._last_update.get(key, -1) for key in unique_ids.tolist()], dtype=torch.int64)
-        self._last_update.update((key, step) for key in active.tolist())
+        previous = self._metadata.previous(step, unique_ids, active)
         return _Plan(raw_ids, unique_ids, inverse, active, local_rows,
                      counts[local_rows] == 1, previous)
 
@@ -131,7 +130,7 @@ class BagPipeCacheController:
             torch.set_num_threads(threads)
         self._prescan.clear()
         self._use_prescan = True
-        self._last_update.clear()
+        self._metadata.clear_plan()
         self._add("bagpipe_plan_build_ms", (time.perf_counter() - start) * 1e3)
         self._add("bagpipe_plan_batches", len(self._plans))
         self._add("bagpipe_plan_metadata_bytes", sum(t.numel() * t.element_size()
@@ -160,13 +159,11 @@ class BagPipeCacheController:
         prefetch = None
         inflight = sum(item[4] is not None for item in self._queue)
         if inflight < self.max_inflight_prefetch:
-            safe = plan.previous_update <= self._committed_step
-            candidates = [key for key, ready in zip(plan.unique_ids.tolist(), safe.tolist())
-                          if ready and key not in self._slots]
-            if candidates:
-                ids = torch.tensor(candidates, dtype=torch.int64)
+            ids = self._metadata.prefetch(plan.unique_ids, plan.previous_update,
+                                          self._committed_step)
+            if ids.numel():
                 prefetch = (ids, self.kv_client.prefetch(ids))
-                self._add("bagpipe_prefetch_ids", len(candidates))
+                self._add("bagpipe_prefetch_ids", ids.numel())
         self._queue.append((step, sparse_features, plan, (ids_dev, inverse_dev), prefetch))
         self._enqueued += 1
         return ids_dev, inverse_dev, int(plan.raw_ids.numel())
@@ -185,24 +182,14 @@ class BagPipeCacheController:
         self.kv_client.training_step_wait(handle)
         self._pending = None
         self._committed_step = step
-        if self.aggregation == "ps":
-            # Local-only rows can be updated without a PS value round trip.
-            local_set = set(plan.unique_ids[plan.exclusive].tolist())
-            for key in plan.active_ids.tolist():
-                if key not in local_set and key in self._slots:
-                    self._free.append(self._slots.pop(key))
-                    self._add("bagpipe_invalidated_ids", 1)
-            local_keys = plan.unique_ids
-        else:
-            local_keys = plan.active_ids
-        slots, rows = [], []
-        for row, key in enumerate(local_keys.tolist()):
-            if key in self._slots:
-                slots.append(self._slots[key])
-                rows.append(row)
-        if slots:
-            slot_ids = torch.tensor(slots, device=self.device)
-            row_ids = torch.tensor(rows, device=grads.device)
+        # Local-only rows can be updated without a PS value round trip.
+        slots, rows, invalidated = self._metadata.commit(
+            plan.active_ids, plan.unique_ids, plan.exclusive,
+            self.aggregation == "ps")
+        self._add("bagpipe_invalidated_ids", invalidated)
+        if slots.numel():
+            slot_ids = slots.to(self.device)
+            row_ids = rows.to(grads.device)
             local_grads = grads.index_select(0, row_ids)
             if self.aggregation == "ps":
                 local_grads.div_(self._world)
@@ -224,55 +211,37 @@ class BagPipeCacheController:
         self._queue.popleft()
         self._current_batch, self._current_plan = step, plan
         self._current_ticket = ticket
-        keys = plan.unique_ids.tolist()
-        rows = torch.empty((len(keys), self.embedding_dim), device=self.device)
-        hit_positions, hit_slots, missing = [], [], []
-        for row, key in enumerate(keys):
-            if key in self._slots:
-                hit_positions.append(row)
-                hit_slots.append(self._slots[key])
-                self._slots.move_to_end(key)
-            else:
-                missing.append(row)
-        if hit_slots:
-            rows.index_copy_(0, torch.tensor(hit_positions, device=self.device),
-                             self._values.index_select(0, torch.tensor(hit_slots, device=self.device)))
-        self._add("bagpipe_cache_hit_ids", len(hit_slots))
-        prefetched = {}
+        rows = torch.empty((plan.unique_ids.numel(), self.embedding_dim), device=self.device)
+        hit_positions, hit_slots, missing = self._metadata.lookup(plan.unique_ids)
+        if hit_slots.numel():
+            rows.index_copy_(0, hit_positions.to(self.device),
+                             self._values.index_select(0, hit_slots.to(self.device)))
+        self._add("bagpipe_cache_hit_ids", hit_slots.numel())
+        demand = missing
         if prefetch is not None:
             pref_ids, handle = prefetch
             values = self.kv_client.wait_and_get(handle, self.embedding_dim, device=self.device)
-            prefetched = {key: row for row, key in enumerate(pref_ids.tolist())}
-            positions = [row for row in missing if keys[row] in prefetched]
-            if positions:
-                source = torch.tensor([prefetched[keys[row]] for row in positions], device=values.device)
-                rows.index_copy_(0, torch.tensor(positions, device=self.device), values.index_select(0, source).to(self.device))
-        demand = [row for row in missing if keys[row] not in prefetched]
-        if demand:
+            missing_ids = plan.unique_ids[missing]
+            source = torch.searchsorted(pref_ids, missing_ids).clamp_max(pref_ids.numel() - 1)
+            ready = pref_ids[source] == missing_ids
+            positions = missing[ready]
+            if positions.numel():
+                rows.index_copy_(0, positions.to(self.device),
+                                 values.index_select(0, source[ready].to(values.device)).to(self.device))
+            demand = missing[~ready]
+        if demand.numel():
             ids = plan.unique_ids[demand]
             values = self.kv_client.pull(self.master_table_name, ids)
-            if values.shape != (len(demand), self.embedding_dim) or values.dtype != torch.float32:
+            if values.shape != (demand.numel(), self.embedding_dim) or values.dtype != torch.float32:
                 raise RuntimeError("PS returned invalid embedding shape or dtype")
-            rows.index_copy_(0, torch.tensor(demand, device=self.device), values.to(self.device))
-            self._add("bagpipe_demand_ids", len(demand))
+            rows.index_copy_(0, demand.to(self.device), values.to(self.device))
+            self._add("bagpipe_demand_ids", demand.numel())
         # The batch tensor also serves oversized batches; admission is bounded.
-        destinations = {}
-        for row in missing:
-            key = keys[row]
-            if self._free:
-                slot = self._free.pop()
-            elif self._next_slot < self._capacity_rows:
-                slot = self._next_slot
-                self._next_slot += 1
-            else:
-                _, slot = self._slots.popitem(last=False)
-                self._add("bagpipe_evicted_ids", 1)
-            self._slots[key] = slot
-            destinations[slot] = row
-        if destinations:
-            slots = torch.tensor(list(destinations), device=self.device)
-            positions = torch.tensor(list(destinations.values()), device=self.device)
-            self._values.index_copy_(0, slots, rows.index_select(0, positions))
+        slots, sources, evicted = self._metadata.admit(plan.unique_ids[missing])
+        self._add("bagpipe_evicted_ids", evicted)
+        if slots.numel():
+            self._values.index_copy_(0, slots.to(self.device),
+                                     rows.index_select(0, missing[sources].to(self.device)))
         self._current_rows = rows
         self._add("bagpipe_prefill_ms", (time.perf_counter() - start) * 1e3)
 
@@ -328,7 +297,7 @@ class BagPipeCacheController:
                  "ps_gradient_bytes")
         stats = {"bagpipe_" + name: self._stats.get("bagpipe_" + name, 0.0)
                  for name in names}
-        stats.update(bagpipe_cache_entries=float(len(self._slots)),
+        stats.update(bagpipe_cache_entries=float(self._metadata.size()),
                      bagpipe_resident_bytes=float(self._values.numel() * 4),
                      bagpipe_lookahead=float(self.lookahead_value))
         if reset:

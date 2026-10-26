@@ -31,7 +31,7 @@ def export_validation_state(path, embedding_module, dense_module, planned_contro
         planned_controller._wait_pending()
         plans = planned_controller._plans
         ids = (torch.unique(torch.cat([p.active_ids for p in plans])) if plans
-               else torch.tensor(sorted(planned_controller._last_update), dtype=torch.int64))
+               else planned_controller._metadata.updated_ids().sort().values)
         values = torch.cat([
             planned_controller.kv_client.pull(planned_controller.master_table_name, chunk).cpu()
             for chunk in ids.split(4096)

@@ -143,7 +143,7 @@ def _distributed_reference(rank, rendezvous, server, aggregation, prescan):
             for source in range(2):
                 for key in all_ids[source][step]:
                     reference[key] -= 0.1 * (source + step + 1) / 2
-            assert len(controller._slots) <= 64
+            assert controller._metadata.size() <= 64
             assert controller._values.shape == (64, 2)
             assert set(controller.consume_stats()) == stat_fields
         controller.shutdown()
@@ -155,6 +155,63 @@ def _distributed_reference(rank, rendezvous, server, aggregation, prescan):
 
 
 class TestPlannedBagPipe(unittest.TestCase):
+    def test_validation_snapshot_includes_evicted_updated_rows(self):
+        from types import SimpleNamespace
+        from model_zoo.rs_demo.runtime.validation import export_validation_state
+
+        embedding = SimpleNamespace(_fusion_k=20, _embedding_bag_configs=[
+            SimpleNamespace(name="f0", num_embeddings=512, embedding_dim=2)])
+        batches = [_Features(range(80)), _Features([7, 95])]
+        expected_ids = torch.unique(torch.cat([batch.ids for batch in batches]))
+        for prescan in (False, True):
+            with self.subTest(prescan=prescan), tempfile.TemporaryDirectory() as directory:
+                controller = _controller(prescan=prescan)
+                try:
+                    if prescan:
+                        for step, batch in enumerate(batches):
+                            controller.prescan_batch(step, batch)
+                        controller.finalize_prescan()
+                    for step, batch in enumerate(batches):
+                        ids, _, _ = controller.enqueue(batch)
+                        controller.prefill_cache(batch, "cpu")
+                        controller.update_grads("table", ids, torch.ones((ids.numel(), 2)), .1, step)
+                    path = export_validation_state(Path(directory) / "state.pt",
+                                                   embedding, torch.nn.Linear(2, 1), controller)
+                    state = torch.load(path, weights_only=True)
+                    torch.testing.assert_close(state["global_ids"], expected_ids)
+                    torch.testing.assert_close(state["values"], controller.kv_client.pull("table", expected_ids))
+                    self.assertEqual(controller._committed_step, 1)
+                    self.assertLess(controller._metadata.size(), expected_ids.numel())
+                finally:
+                    controller.shutdown()
+
+    def test_native_metadata_lru_oversized_admission_and_remote_updates(self):
+        from recstore import load_ops_library
+
+        load_ops_library()
+        metadata = torch.classes.recstore_ops.BagPipeCacheMetadata(2)
+        ids = lambda values: torch.tensor(values, dtype=torch.int64)
+        slots, sources, evicted = metadata.admit(ids([3, 7, 9]))
+        self.assertEqual(evicted, 1)
+        self.assertEqual(slots.unique().numel(), slots.numel())
+        self.assertEqual(set(sources.tolist()), {1, 2})
+        metadata.lookup(ids([7]))  # Touch 7, so the next admission evicts 9.
+        metadata.admit(ids([11]))
+        positions, _, missing = metadata.lookup(ids([3, 7, 9, 11]))
+        self.assertEqual(positions.tolist(), [1, 3])
+        self.assertEqual(missing.tolist(), [0, 2])
+        slots, rows, invalidated = metadata.commit(
+            ids([7, 11]), ids([7]), torch.tensor([True]), True)
+        self.assertEqual(invalidated, 1)  # Remote-only 11 must be invalidated.
+        self.assertEqual(rows.tolist(), [0])
+        self.assertEqual(metadata.size(), 1)
+        slots, rows, invalidated = metadata.commit(
+            ids([7]), ids([7]), torch.tensor([False]), True)
+        self.assertEqual((invalidated, slots.numel(), metadata.size()), (1, 0, 0))
+        self.assertEqual(metadata.previous(0, ids([3]), ids([3, 7])).tolist(), [-1])
+        self.assertEqual(metadata.previous(1, ids([3, 9]), ids([9])).tolist(), [0, -1])
+        self.assertEqual(metadata.prefetch(ids([3, 9]), ids([0, -1]), -1).tolist(), [9])
+
     def test_single_runtime_for_both_planning_modes(self):
         self.assertEqual([name for name in OptimizationPluginRegistry.available() if name.startswith("bagpipe")], ["bagpipe"])
         for prescan in (False, True):
