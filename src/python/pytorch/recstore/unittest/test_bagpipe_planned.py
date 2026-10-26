@@ -81,12 +81,12 @@ class _PS:
     def wait_and_get(self, handle, dim, device="cpu"):
         return self.prefetches.pop(handle).to(device)
 
-    def training_step_async(self, name, ids, grads, **kwargs):
+    def sparse_gradient_commit_async(self, name, ids, grads, **kwargs):
         self.server.submit(ids.cpu().tolist(), grads.cpu().tolist(),
                            **{k: kwargs[k] for k in ("step", "rank", "world", "lr", "divisor")})
         return kwargs["step"]
 
-    def training_step_wait(self, step):
+    def sparse_gradient_commit_wait(self, step):
         if self.fail_wait:
             raise OSError("simulated commit failure")
         deadline = time.monotonic() + 20
@@ -95,7 +95,7 @@ class _PS:
                 raise TimeoutError("test PS commit timed out")
             time.sleep(.001)
 
-    def training_step_close(self, *args, **kwargs):
+    def sparse_gradient_commit_close(self, *args, **kwargs):
         pass
 
 

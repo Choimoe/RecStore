@@ -58,17 +58,17 @@ message InitEmbeddingTableResponse{
   optional int32 tag = 2;
 };
 
-message TrainingStepRequest {
+message SparseGradientCommitRequest {
   string table_name = 1;
   bytes payload = 2;
 }
-message TrainingStepResponse {
+message SparseGradientCommitResponse {
   int64 committed_step = 1;
   string error = 2;
 }
 
 service ParameterService {
-  rpc TrainingStep(TrainingStepRequest) returns (TrainingStepResponse);
+  rpc SparseGradientCommit(SparseGradientCommitRequest) returns (SparseGradientCommitResponse);
   rpc GetParameter(GetParameterRequest) returns (GetParameterResponse);
   rpc Command(CommandRequest) returns (CommandResponse);
   rpc PutParameter(PutParameterRequest) returns (PutParameterResponse);

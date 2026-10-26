@@ -489,14 +489,14 @@ void KVClientOp::EmbUpdate(const std::string& table_name,
 #  endif
 }
 
-int64_t KVClientOp::TrainingStep(
+int64_t KVClientOp::SparseGradientCommit(
     const std::string& table,
-    TrainingStepHeader header,
+    SparseGradientCommitHeader header,
     const base::RecTensor& keys,
     const base::RecTensor& grads) {
   if (!ps_client_)
     throw std::runtime_error("PS client is not initialized");
-  return ps_client_->TrainingStep(
+  return ps_client_->SparseGradientCommit(
       table,
       header,
       base::ConstArray<uint64_t>(keys.data_as<uint64_t>(), keys.shape(0)),

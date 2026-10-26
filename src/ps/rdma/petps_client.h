@@ -29,11 +29,12 @@ public:
   void Barrier(const std::string& ss, int k);
   void InitThread();
 
-  int64_t ExchangeTrainingStep(const std::string& table,
-                               const std::string& payload) override;
-  size_t TrainingStepPayloadLimit() const override;
-  int SubmitTrainingStep(const std::string& table, const std::string& payload);
-  int64_t WaitTrainingStep(int rpc_id);
+  int64_t ExchangeSparseGradientCommit(const std::string& table,
+                                       const std::string& payload) override;
+  size_t SparseGradientCommitPayloadLimit() const override;
+  int SubmitSparseGradientCommit(const std::string& table,
+                                 const std::string& payload);
+  int64_t WaitSparseGradientCommit(int rpc_id);
 
   int GetParameter(const base::ConstArray<uint64_t>& keys,
                    base::RecTensor& values) override;

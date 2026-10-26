@@ -11,11 +11,11 @@ namespace recstore {
 namespace framework {
 namespace {
 
-std::mutex training_mu;
-int64_t next_training_handle = 1;
-std::unordered_map<int64_t, std::future<void>> training_work;
+std::mutex sparse_commit_mu;
+int64_t next_sparse_commit_handle = 1;
+std::unordered_map<int64_t, std::future<void>> sparse_commit_work;
 
-TrainingStepHeader TrainingHeader(
+SparseGradientCommitHeader SparseGradientHeader(
     int64_t session,
     int64_t step,
     int64_t rank,
@@ -27,8 +27,8 @@ TrainingStepHeader TrainingHeader(
   TORCH_CHECK(
       session > 0 && step >= 0 && rank >= 0 && world > rank && world <= 65536 &&
           dim > 0 && dim <= 65536 && kind >= 0 && kind <= 3,
-      "Invalid BagPipe training metadata");
-  TrainingStepHeader h;
+      "Invalid sparse gradient commit metadata");
+  SparseGradientCommitHeader h;
   h.session       = session;
   h.step          = step;
   h.rank          = rank;
@@ -37,11 +37,11 @@ TrainingStepHeader TrainingHeader(
   h.learning_rate = lr;
   h.divisor       = divisor;
   h.kind          = kind;
-  DecodeTrainingStep(PackTrainingStep(h));
+  DecodeSparseGradientCommit(PackSparseGradientCommit(h));
   return h;
 }
 
-int64_t bagpipe_step_async(
+int64_t sparse_gradient_commit_async(
     const std::string& table,
     const torch::Tensor& ids,
     const torch::Tensor& grads,
@@ -54,9 +54,9 @@ int64_t bagpipe_step_async(
   TORCH_CHECK(ids.dim() == 1 && ids.scalar_type() == torch::kInt64 &&
                   grads.dim() == 2 && grads.scalar_type() == torch::kFloat32 &&
                   ids.numel() == grads.size(0),
-              "Invalid BagPipe gradients");
-  auto h =
-      TrainingHeader(session, step, rank, world, grads.size(1), lr, divisor, 0);
+              "Invalid sparse gradients");
+  auto h = SparseGradientHeader(
+      session, step, rank, world, grads.size(1), lr, divisor, 0);
   auto keys       = ids.is_cuda() ? StageCudaTensorToPinnedCpuAsyncNoCast(ids)
                                   : ids.contiguous().clone();
   auto keys_ready = RecordCudaCompletionForTensor(ids);
@@ -82,7 +82,7 @@ int64_t bagpipe_step_async(
           grads_ready();
           auto k            = ToRecTensor(keys, base::DataType::UINT64);
           auto g            = ToRecTensor(values, base::DataType::FLOAT32);
-          int64_t committed = client->TrainingStep(table, h, k, g);
+          int64_t committed = client->SparseGradientCommit(table, h, k, g);
           h.kind            = 1;
           auto empty_keys   = torch::empty({0}, torch::kInt64);
           auto empty_grads = torch::empty({0, int64_t(h.dim)}, torch::kFloat32);
@@ -90,10 +90,10 @@ int64_t bagpipe_step_async(
               std::chrono::steady_clock::now() + std::chrono::seconds(60);
           while (committed < h.step) {
             if (std::chrono::steady_clock::now() >= deadline) {
-              throw std::runtime_error("BagPipe PS commit timed out");
+              throw std::runtime_error("Sparse gradient commit timed out");
             }
             std::this_thread::sleep_for(std::chrono::microseconds(100));
-            committed = client->TrainingStep(
+            committed = client->SparseGradientCommit(
                 table,
                 h,
                 ToRecTensor(empty_keys, base::DataType::UINT64),
@@ -106,7 +106,7 @@ int64_t bagpipe_step_async(
             h.kind = 3;
             auto k = torch::empty({0}, torch::kInt64);
             auto g = torch::empty({0, int64_t(h.dim)}, torch::kFloat32);
-            client->TrainingStep(
+            client->SparseGradientCommit(
                 table,
                 h,
                 ToRecTensor(k, base::DataType::UINT64),
@@ -116,25 +116,26 @@ int64_t bagpipe_step_async(
           throw;
         }
       });
-  std::lock_guard<std::mutex> guard(training_mu);
-  const int64_t handle = next_training_handle++;
-  training_work.emplace(handle, std::move(work));
+  std::lock_guard<std::mutex> guard(sparse_commit_mu);
+  const int64_t handle = next_sparse_commit_handle++;
+  sparse_commit_work.emplace(handle, std::move(work));
   return handle;
 }
 
-void bagpipe_step_wait(int64_t handle) {
+void sparse_gradient_commit_wait(int64_t handle) {
   std::future<void> work;
   {
-    std::lock_guard<std::mutex> guard(training_mu);
-    auto it = training_work.find(handle);
-    TORCH_CHECK(it != training_work.end(), "Unknown BagPipe update handle");
+    std::lock_guard<std::mutex> guard(sparse_commit_mu);
+    auto it = sparse_commit_work.find(handle);
+    TORCH_CHECK(it != sparse_commit_work.end(),
+                "Unknown sparse gradient commit handle");
     work = std::move(it->second);
-    training_work.erase(it);
+    sparse_commit_work.erase(it);
   }
   work.get();
 }
 
-void bagpipe_step_close(
+void sparse_gradient_commit_close(
     const std::string& table,
     int64_t session,
     int64_t step,
@@ -144,11 +145,11 @@ void bagpipe_step_close(
     double lr,
     int64_t divisor,
     bool abort) {
-  auto h = TrainingHeader(
+  auto h = SparseGradientHeader(
       session, step, rank, world, dim, lr, divisor, abort ? 3 : 2);
   auto keys  = torch::empty({0}, torch::kInt64);
   auto grads = torch::empty({0, dim}, torch::kFloat32);
-  GetConcreteKVClientOp()->TrainingStep(
+  GetConcreteKVClientOp()->SparseGradientCommit(
       table,
       h,
       ToRecTensor(keys, base::DataType::UINT64),
@@ -727,9 +728,9 @@ void RegisterBagpipeOps(torch::Library& m) {
       .def("lookup", &BagPipeCacheMetadata::lookup)
       .def("commit", &BagPipeCacheMetadata::commit)
       .def("admit", &BagPipeCacheMetadata::admit);
-  m.def("bagpipe_step_async", bagpipe_step_async);
-  m.def("bagpipe_step_wait", bagpipe_step_wait);
-  m.def("bagpipe_step_close", bagpipe_step_close);
+  m.def("sparse_gradient_commit_async", sparse_gradient_commit_async);
+  m.def("sparse_gradient_commit_wait", sparse_gradient_commit_wait);
+  m.def("sparse_gradient_commit_close", sparse_gradient_commit_close);
   m.def("gpu_cache_lookup_flat", gpu_cache_lookup_flat_torch);
   m.def("gpu_cache_lookup_flat_no_evict", gpu_cache_lookup_flat_no_evict_torch);
   m.def("emb_write_values", emb_write_values_torch);

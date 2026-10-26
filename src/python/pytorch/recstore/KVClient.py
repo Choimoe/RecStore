@@ -800,18 +800,18 @@ class RecStoreClient:
         handle = self.update_async(name, ids, grads)
         self.wait(handle)
 
-    def training_step_async(self, name, ids, grads, *, session, step, rank,
+    def sparse_gradient_commit_async(self, name, ids, grads, *, session, step, rank,
                             world, lr, divisor):
         ids = self._normalize_ids(ids, preserve_device=True, name=name)
-        return int(self.ops.bagpipe_step_async(
+        return int(self.ops.sparse_gradient_commit_async(
             name, ids, grads, session, step, rank, world, lr, divisor))
 
-    def training_step_wait(self, handle):
-        self.ops.bagpipe_step_wait(int(handle))
+    def sparse_gradient_commit_wait(self, handle):
+        self.ops.sparse_gradient_commit_wait(int(handle))
 
-    def training_step_close(self, name, *, session, step, rank, world, dim,
+    def sparse_gradient_commit_close(self, name, *, session, step, rank, world, dim,
                             lr, divisor, abort=False):
-        self.ops.bagpipe_step_close(
+        self.ops.sparse_gradient_commit_close(
             name, session, step, rank, world, dim, lr, divisor, abort)
 
     def update_async(self, name: str, ids: torch.Tensor, grads: torch.Tensor) -> int:

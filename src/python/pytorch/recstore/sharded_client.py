@@ -917,17 +917,17 @@ class ShardedRecstoreClient:
             "local_update_stage_wait_ms": float(values[4]) if len(values) > 4 else 0.0,
         }
 
-    def training_step_async(self, name, ids, grads, **kwargs):
+    def sparse_gradient_commit_async(self, name, ids, grads, **kwargs):
         if not (self._uses_native_distributed_backend() or self._num_shards == 1
                 or self.is_shared_local_shm_table()):
             raise RuntimeError("BagPipe requires native PS routing or a shared SHM table")
-        return self._client.training_step_async(name, ids, grads, **kwargs)
+        return self._client.sparse_gradient_commit_async(name, ids, grads, **kwargs)
 
-    def training_step_wait(self, handle):
-        self._client.training_step_wait(handle)
+    def sparse_gradient_commit_wait(self, handle):
+        self._client.sparse_gradient_commit_wait(handle)
 
-    def training_step_close(self, name, **kwargs):
-        self._client.training_step_close(name, **kwargs)
+    def sparse_gradient_commit_close(self, name, **kwargs):
+        self._client.sparse_gradient_commit_close(name, **kwargs)
 
     def emb_update_table(self, table_name: str, keys: torch.Tensor, grads: torch.Tensor) -> None:
         if keys.numel() == 0:

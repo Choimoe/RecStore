@@ -169,7 +169,7 @@ class BagPipeCacheController:
         return ids_dev, inverse_dev, int(plan.raw_ids.numel())
 
     def _submit(self, ids, grads, step, lr):
-        return self.kv_client.training_step_async(
+        return self.kv_client.sparse_gradient_commit_async(
             self.master_table_name, ids, grads, session=self._session, step=step,
             rank=self._rank, world=self._world, lr=lr,
             divisor=self._world if self.aggregation == "ps" else 1)
@@ -179,7 +179,7 @@ class BagPipeCacheController:
             return
         handle, plan, grads, lr, step = self._pending
         start = time.perf_counter()
-        self.kv_client.training_step_wait(handle)
+        self.kv_client.sparse_gradient_commit_wait(handle)
         self._pending = None
         self._committed_step = step
         # Local-only rows can be updated without a PS value round trip.
@@ -311,14 +311,14 @@ class BagPipeCacheController:
             self._wait_pending()
         elif self._pending is not None:
             try:
-                self.kv_client.training_step_close(
+                self.kv_client.sparse_gradient_commit_close(
                     self.master_table_name, session=self._session, step=self._updated - 1,
                     rank=self._rank, world=self._world, dim=self.embedding_dim, lr=self.lr,
                     divisor=self._world if self.aggregation == "ps" else 1, abort=True)
             except Exception:
                 pass
             try:
-                self.kv_client.training_step_wait(self._pending[0])
+                self.kv_client.sparse_gradient_commit_wait(self._pending[0])
             except Exception:
                 pass
             self._pending = None
@@ -331,7 +331,7 @@ class BagPipeCacheController:
                     if flush:
                         raise
         if flush and self._updated:
-            self.kv_client.training_step_close(
+            self.kv_client.sparse_gradient_commit_close(
                 self.master_table_name, session=self._session, step=self._updated - 1,
                 rank=self._rank, world=self._world, dim=self.embedding_dim, lr=self.lr,
                 divisor=self._world if self.aggregation == "ps" else 1)

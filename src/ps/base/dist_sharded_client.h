@@ -457,10 +457,10 @@ public:
     return 0;
   }
 
-  int64_t TrainingStep(const std::string& table,
-                       TrainingStepHeader h,
-                       const base::ConstArray<uint64_t>& keys,
-                       const base::RecTensor& grads) override {
+  int64_t SparseGradientCommit(const std::string& table,
+                               SparseGradientCommitHeader h,
+                               const base::ConstArray<uint64_t>& keys,
+                               const base::RecTensor& grads) override {
     std::vector<std::vector<uint64_t>> shard_keys(clients_.size());
     std::vector<std::vector<size_t>> indices(clients_.size());
     for (size_t i = 0; i < keys.Size(); ++i) {
@@ -477,7 +477,7 @@ public:
         GatherEmbeddingRows(grads, indices[i], part);
       committed = std::min(
           committed,
-          clients_[i]->TrainingStep(
+          clients_[i]->SparseGradientCommit(
               table,
               h,
               base::ConstArray<uint64_t>(

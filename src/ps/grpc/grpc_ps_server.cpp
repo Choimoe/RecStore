@@ -417,11 +417,12 @@ private:
     return Status::OK;
   }
 
-  Status TrainingStep(ServerContext*,
-                      const recstoreps::TrainingStepRequest* request,
-                      recstoreps::TrainingStepResponse* reply) override {
+  Status SparseGradientCommit(
+      ServerContext*,
+      const recstoreps::SparseGradientCommitRequest* request,
+      recstoreps::SparseGradientCommitResponse* reply) override {
     try {
-      reply->set_committed_step(cache_ps_->TrainingStep(
+      reply->set_committed_step(cache_ps_->SparseGradientCommit(
           request->table_name(), request->payload(), 0));
     } catch (const std::exception& error) {
       reply->set_error(error.what());

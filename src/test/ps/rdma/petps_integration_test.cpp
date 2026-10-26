@@ -222,38 +222,38 @@ TEST(PetPSIntegrationTest, UpdateGetRoundTripSingleShard) {
   }
 }
 
-TEST(PetPSIntegrationTest, TrainingStepCommitSingleShard) {
+TEST(PetPSIntegrationTest, SparseGradientCommitCommitSingleShard) {
   auto& client               = SingleShardClient();
-  const std::string table    = "training_step";
+  const std::string table    = "sparse_gradient_commit";
   std::vector<uint64_t> keys = {601, 602};
   std::vector<float> initial(8, 1.0f), gradients(8, 2.0f);
   base::RecTensor values(initial.data(), {2, 4});
   base::RecTensor grads(gradients.data(), {2, 4});
   ASSERT_EQ(client.InitEmbeddingTable(table, 1024, 4), 0);
   ASSERT_EQ(client.PutParameter(keys, values), 0);
-  recstore::TrainingStepHeader header;
+  recstore::SparseGradientCommitHeader header;
   header.session = 7123;
   header.world   = 2;
   header.divisor = 2;
   header.dim     = 4;
-  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), -1);
+  EXPECT_EQ(client.SparseGradientCommit(table, header, keys, grads), -1);
   base::RecTensor actual({2, 4}, base::DataType::FLOAT32);
   ASSERT_EQ(client.GetParameter(keys, actual), 0);
   for (int i = 0; i < 8; ++i)
     EXPECT_FLOAT_EQ(actual.data_as<float>()[i], 1.0f);
   header.rank = 1;
-  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  EXPECT_EQ(client.SparseGradientCommit(table, header, keys, grads), 0);
   // Repeating a committed submission must not apply SGD again.
-  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  EXPECT_EQ(client.SparseGradientCommit(table, header, keys, grads), 0);
   header.kind = 1;
-  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  EXPECT_EQ(client.SparseGradientCommit(table, header, keys, grads), 0);
   ASSERT_EQ(client.GetParameter(keys, actual), 0);
   for (int i = 0; i < 8; ++i)
     EXPECT_FLOAT_EQ(actual.data_as<float>()[i], .98f);
   header.kind = 2;
-  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  EXPECT_EQ(client.SparseGradientCommit(table, header, keys, grads), 0);
   header.rank = 0;
-  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  EXPECT_EQ(client.SparseGradientCommit(table, header, keys, grads), 0);
 }
 
 TEST(PetPSIntegrationTest, MissingKeysReturnZeroSlots) {
@@ -306,7 +306,7 @@ TEST(PetPSIntegrationTest, HashedValueBatchGetTransferSingleShard) {
   FLAGS_rdma_get_response_mode = previous_response_mode;
 }
 
-TEST(PetPSIntegrationTest, AdapterTrainingStepWithOutstandingPrefetch) {
+TEST(PetPSIntegrationTest, AdapterSparseGradientCommitWithOutstandingPrefetch) {
   json config = ParseFile2Json(std::getenv("RECSTORE_CONFIG"));
   config["distributed_client"]["max_keys_per_request"] = 10000;
   recstore::RDMAPSClientAdapter adapter(config);
@@ -322,14 +322,14 @@ TEST(PetPSIntegrationTest, AdapterTrainingStepWithOutstandingPrefetch) {
   std::vector<uint64_t> probe{0, 7, 777, rows - 1};
   auto pref0 = adapter.PrefetchParameter(probe);
   auto pref1 = adapter.PrefetchParameter(probe);
-  recstore::TrainingStepHeader header;
+  recstore::SparseGradientCommitHeader header;
   header.session = 8123;
   header.world   = 2;
   header.divisor = 2;
   header.dim     = dim;
-  EXPECT_EQ(adapter.TrainingStep("training", header, keys, grads), -1);
+  EXPECT_EQ(adapter.SparseGradientCommit("training", header, keys, grads), -1);
   header.rank = 1;
-  EXPECT_EQ(adapter.TrainingStep("training", header, keys, grads), 0);
+  EXPECT_EQ(adapter.SparseGradientCommit("training", header, keys, grads), 0);
   for (auto handle : {pref0, pref1}) {
     base::RecTensor old({0, dim}, base::DataType::FLOAT32);
     adapter.WaitForPrefetch(handle);
@@ -345,9 +345,9 @@ TEST(PetPSIntegrationTest, AdapterTrainingStepWithOutstandingPrefetch) {
   header.step = 1;
   header.rank = 0;
   base::RecTensor empty({0, dim}, base::DataType::FLOAT32);
-  EXPECT_EQ(adapter.TrainingStep("training", header, {}, empty), 0);
+  EXPECT_EQ(adapter.SparseGradientCommit("training", header, {}, empty), 0);
   header.rank = 1;
-  EXPECT_EQ(adapter.TrainingStep("training", header, keys, grads), 1);
+  EXPECT_EQ(adapter.SparseGradientCommit("training", header, keys, grads), 1);
   ASSERT_EQ(adapter.GetParameter(keys, actual), 0);
   for (int i = 0; i < rows * dim; ++i)
     EXPECT_NEAR(actual.data_as<float>()[i], .97f, 1e-6);

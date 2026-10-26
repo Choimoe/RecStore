@@ -503,9 +503,9 @@ int RDMAPSClientAdapter::PutParameter(const base::ConstArray<uint64_t>& keys,
       BuildChunks(keys, MaxPutKeysPerRpc(values.shape(1))), values);
 }
 
-int64_t RDMAPSClientAdapter::TrainingStep(
+int64_t RDMAPSClientAdapter::SparseGradientCommit(
     const std::string& table,
-    TrainingStepHeader h,
+    SparseGradientCommitHeader h,
     const base::ConstArray<uint64_t>& keys,
     const base::RecTensor& grads) {
   EnsureClientInitialized();
@@ -515,12 +515,13 @@ int64_t RDMAPSClientAdapter::TrainingStep(
   executor_->DrainBatchSlots();
   if (h.kind == 0 && (grads.dim() != 2 || grads.shape(1) != h.dim ||
                       !IsFloatEmbeddingValues(grads, keys.Size()))) {
-    throw std::invalid_argument("Invalid RDMA training gradients");
+    throw std::invalid_argument("Invalid RDMA sparse gradients");
   }
-  const size_t limit     = shard_clients_.front()->TrainingStepPayloadLimit();
+  const size_t limit =
+      shard_clients_.front()->SparseGradientCommitPayloadLimit();
   const size_t row_bytes = 8 + size_t(h.dim) * 4;
   if (limit < sizeof(h) + row_bytes)
-    throw std::runtime_error("Training row exceeds RDMA slot");
+    throw std::runtime_error("Gradient row exceeds RDMA slot");
   std::vector<std::vector<ShardChunk>> shards(shard_clients_.size());
   if (h.kind == 0) {
     for (auto& chunk : BuildChunks(keys, (limit - sizeof(h)) / row_bytes)) {
@@ -538,8 +539,9 @@ int64_t RDMAPSClientAdapter::TrainingStep(
   auto drain_one = [&] {
     const auto [client, rpc] = pending.front();
     pending.pop_front();
-    committed[client] = std::max(
-        committed[client], shard_clients_[client]->WaitTrainingStep(rpc));
+    committed[client] =
+        std::max(committed[client],
+                 shard_clients_[client]->WaitSparseGradientCommit(rpc));
   };
   try {
     // Round-robin chunks across shards, with a bounded window of outstanding
@@ -564,7 +566,8 @@ int64_t RDMAPSClientAdapter::TrainingStep(
           }
         }
         pending.emplace_back(
-            client, shard_clients_[client]->SubmitTrainingStep(table, packet));
+            client,
+            shard_clients_[client]->SubmitSparseGradientCommit(table, packet));
         if (pending.size() >= MaxInFlightGetRpcs())
           drain_one();
       }

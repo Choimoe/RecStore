@@ -17,7 +17,7 @@
 namespace recstore {
 
 // Homogeneous-host wire format, shared by RPC, SHM and RDMA transports.
-struct TrainingStepHeader {
+struct SparseGradientCommitHeader {
   uint64_t session    = 0;
   int64_t step        = 0;
   uint32_t rank       = 0;
@@ -31,12 +31,14 @@ struct TrainingStepHeader {
   uint32_t divisor    = 1;
   uint32_t version    = 1;
 };
-static_assert(sizeof(TrainingStepHeader) == 56, "TrainingStepHeader wire size");
+static_assert(sizeof(SparseGradientCommitHeader) == 56,
+              "SparseGradientCommitHeader wire size");
 
-inline TrainingStepHeader DecodeTrainingStep(const std::string& payload) {
-  TrainingStepHeader h;
+inline SparseGradientCommitHeader
+DecodeSparseGradientCommit(const std::string& payload) {
+  SparseGradientCommitHeader h;
   if (payload.size() < sizeof(h)) {
-    throw std::invalid_argument("Truncated training step header");
+    throw std::invalid_argument("Truncated sparse gradient commit header");
   }
   std::memcpy(&h, payload.data(), sizeof(h));
   if (h.version != 1 || !h.session || !h.world || h.world > 65536 ||
@@ -44,70 +46,70 @@ inline TrainingStepHeader DecodeTrainingStep(const std::string& payload) {
       h.kind > 3 || !h.chunks || h.chunks > 1048576 || h.chunk >= h.chunks ||
       (h.divisor != 1 && h.divisor != h.world) ||
       !std::isfinite(h.learning_rate) || h.learning_rate < 0) {
-    throw std::invalid_argument("Invalid training step metadata");
+    throw std::invalid_argument("Invalid sparse gradient commit metadata");
   }
   const uint64_t bytes =
       sizeof(h) + uint64_t(h.rows) * (8 + uint64_t(h.dim) * 4);
   if (bytes != payload.size() || (h.kind != 0 && h.rows != 0)) {
-    throw std::invalid_argument("Invalid training step payload size");
+    throw std::invalid_argument("Invalid sparse gradient commit payload size");
   }
   return h;
 }
 
-inline std::string PackTrainingStep(TrainingStepHeader h,
-                                    const uint64_t* keys = nullptr,
-                                    const float* grads   = nullptr) {
+inline std::string PackSparseGradientCommit(SparseGradientCommitHeader h,
+                                            const uint64_t* keys = nullptr,
+                                            const float* grads   = nullptr) {
   std::string result(
       sizeof(h) + size_t(h.rows) * (8 + size_t(h.dim) * 4), '\0');
   std::memcpy(result.data(), &h, sizeof(h));
   if (h.rows) {
     if (!keys || !grads)
-      throw std::invalid_argument("Missing training step rows");
+      throw std::invalid_argument("Missing sparse gradient commit rows");
     std::memcpy(result.data() + sizeof(h), keys, size_t(h.rows) * 8);
     std::memcpy(result.data() + sizeof(h) + size_t(h.rows) * 8,
                 grads,
                 size_t(h.rows) * h.dim * 4);
   }
-  DecodeTrainingStep(result);
+  DecodeSparseGradientCommit(result);
   return result;
 }
 
-class TrainingStepClient {
+class SparseGradientCommitClient {
 public:
-  virtual ~TrainingStepClient() = default;
-  virtual int64_t
-  ExchangeTrainingStep(const std::string& table, const std::string& payload) {
+  virtual ~SparseGradientCommitClient() = default;
+  virtual int64_t ExchangeSparseGradientCommit(const std::string& table,
+                                               const std::string& payload) {
     throw std::runtime_error(
-        "Training step protocol unsupported by this PS backend");
+        "Sparse gradient commit protocol unsupported by this PS backend");
   }
 
-  virtual size_t TrainingStepPayloadLimit() const { return 256 * 1024; }
+  virtual size_t SparseGradientCommitPayloadLimit() const { return 256 * 1024; }
 
-  virtual int64_t
-  TrainingStep(const std::string& table,
-               TrainingStepHeader h,
-               const base::ConstArray<uint64_t>& keys,
-               const base::RecTensor& grads) {
+  virtual int64_t SparseGradientCommit(
+      const std::string& table,
+      SparseGradientCommitHeader h,
+      const base::ConstArray<uint64_t>& keys,
+      const base::RecTensor& grads) {
     if (h.kind != 0)
-      return ExchangeTrainingStep(table, PackTrainingStep(h));
+      return ExchangeSparseGradientCommit(table, PackSparseGradientCommit(h));
     if (grads.dim() != 2 ||
         grads.shape(0) != static_cast<int64_t>(keys.Size()) ||
         grads.shape(1) != h.dim || grads.dtype() != base::DataType::FLOAT32) {
-      throw std::invalid_argument("Invalid training gradient shape");
+      throw std::invalid_argument("Invalid sparse gradient shape");
     }
-    const size_t limit     = TrainingStepPayloadLimit();
+    const size_t limit     = SparseGradientCommitPayloadLimit();
     const size_t row_bytes = 8 + size_t(h.dim) * 4;
     if (limit < sizeof(h) + row_bytes)
-      throw std::runtime_error("Training row exceeds transport slot");
+      throw std::runtime_error("Gradient row exceeds transport slot");
     const size_t rows = (limit - sizeof(h)) / row_bytes;
     h.chunks          = std::max<size_t>(1, (keys.Size() + rows - 1) / rows);
     int64_t committed = -1;
     for (h.chunk = 0; h.chunk < h.chunks; ++h.chunk) {
       const size_t begin = size_t(h.chunk) * rows;
       h.rows             = std::min(rows, keys.Size() - begin);
-      committed          = ExchangeTrainingStep(
+      committed          = ExchangeSparseGradientCommit(
           table,
-          PackTrainingStep(
+          PackSparseGradientCommit(
               h,
               h.rows ? keys.Data() + begin : nullptr,
               h.rows ? grads.data_as<float>() + begin * h.dim : nullptr));
@@ -118,7 +120,7 @@ public:
 
 // One in-flight step per table. RPC handlers acknowledge chunks immediately;
 // they never block a server worker waiting for another trainer.
-class TrainingStepCoordinator {
+class SparseGradientCommitCoordinator {
 public:
   using Apply = std::function<void(
       const std::vector<uint64_t>&, const std::vector<float>&)>;
@@ -126,14 +128,14 @@ public:
   int64_t Exchange(const std::string& table,
                    const std::string& payload,
                    const Apply& apply) {
-    const auto h = DecodeTrainingStep(payload);
+    const auto h = DecodeSparseGradientCommit(payload);
     // ponytail: one lock per PS shard; split by table if independent jobs need
     // concurrent commits. The fused BagPipe table already requires ordering.
     std::lock_guard<std::mutex> guard(mu_);
     auto it = states_.find(table);
     if (it == states_.end()) {
       if (h.kind != 0 || h.step != 0) {
-        throw std::runtime_error("Unknown training session");
+        throw std::runtime_error("Unknown sparse gradient session");
       }
       State state;
       state.header = h;
@@ -146,12 +148,14 @@ public:
     if (initial.session != h.session || initial.world != h.world ||
         initial.dim != h.dim || initial.learning_rate != h.learning_rate ||
         initial.divisor != h.divisor) {
-      throw std::runtime_error("Training session configuration mismatch");
+      throw std::runtime_error(
+          "Sparse gradient session configuration mismatch");
     }
     if (h.kind == 3)
       state.failed = true;
     if (state.failed)
-      throw std::runtime_error("Training session aborted or commit failed");
+      throw std::runtime_error(
+          "Sparse gradient session aborted or commit failed");
     if (h.kind == 1)
       return state.committed;
     if (h.kind == 2) {
@@ -170,16 +174,17 @@ public:
     if (h.step <= state.committed)
       return state.committed;
     if (h.step != state.committed + 1 || state.closed[h.rank]) {
-      throw std::runtime_error("Training steps must be submitted in order");
+      throw std::runtime_error(
+          "Sparse gradient commits must be submitted in order");
     }
     auto& chunks = state.ranks[h.rank];
     if (chunks.empty())
       chunks.resize(h.chunks);
     if (chunks.size() != h.chunks)
-      throw std::runtime_error("Training chunk count changed");
+      throw std::runtime_error("Gradient chunk count changed");
     if (!chunks[h.chunk].empty()) {
       if (chunks[h.chunk] != payload)
-        throw std::runtime_error("Conflicting training chunk retry");
+        throw std::runtime_error("Conflicting gradient chunk retry");
       return state.committed;
     }
     chunks[h.chunk] = payload;
@@ -196,7 +201,7 @@ public:
     // Fixed rank/chunk order makes network arrival order irrelevant.
     for (const auto& rank : state.ranks) {
       for (const auto& chunk : rank) {
-        const auto ch         = DecodeTrainingStep(chunk);
+        const auto ch         = DecodeSparseGradientCommit(chunk);
         const char* key_data  = chunk.data() + sizeof(ch);
         const char* grad_data = key_data + size_t(ch.rows) * 8;
         for (size_t row = 0; row < ch.rows; ++row) {
@@ -234,7 +239,7 @@ public:
 
 private:
   struct State {
-    TrainingStepHeader header;
+    SparseGradientCommitHeader header;
     int64_t committed = -1;
     bool failed       = false;
     std::vector<std::vector<std::string>> ranks;

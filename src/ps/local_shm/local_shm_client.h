@@ -53,9 +53,9 @@ public:
   explicit LocalShmPSClient(json config);
   ~LocalShmPSClient() override = default;
 
-  int64_t ExchangeTrainingStep(const std::string& table,
-                               const std::string& payload) override;
-  size_t TrainingStepPayloadLimit() const override {
+  int64_t ExchangeSparseGradientCommit(const std::string& table,
+                                       const std::string& payload) override;
+  size_t SparseGradientCommitPayloadLimit() const override {
     return region_.slot_buffer_bytes() > 4096
              ? region_.slot_buffer_bytes() - 4096
              : 0;

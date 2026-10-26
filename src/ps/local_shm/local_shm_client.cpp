@@ -674,19 +674,19 @@ int LocalShmPSClient::UpdateParameterFlat(
   return ok ? 0 : -1;
 }
 
-int64_t LocalShmPSClient::ExchangeTrainingStep(const std::string& table,
-                                               const std::string& data) {
+int64_t LocalShmPSClient::ExchangeSparseGradientCommit(
+    const std::string& table, const std::string& data) {
   if (!region_.IsOpen() ||
       table.size() + data.size() > region_.slot_buffer_bytes()) {
-    throw std::runtime_error("Training step exceeds SHM slot");
+    throw std::runtime_error("Sparse gradient commit exceeds SHM slot");
   }
   const int slot = AcquireSlot();
   if (slot < 0)
-    throw std::runtime_error("No SHM training slot");
+    throw std::runtime_error("No SHM gradient commit slot");
   auto* header              = region_.slot_header(slot);
   auto* payload             = region_.slot_payload(slot);
   const uint64_t request_id = NextRequestId();
-  header->opcode            = static_cast<uint32_t>(LocalOpcode::kTrainingStep);
+  header->opcode = static_cast<uint32_t>(LocalOpcode::kSparseGradientCommit);
   header->status_code       = static_cast<uint32_t>(LocalStatusCode::kOk);
   header->client_id         = client_id_;
   header->request_id        = request_id;
@@ -717,7 +717,7 @@ int64_t LocalShmPSClient::ExchangeTrainingStep(const std::string& table,
     std::memcpy(&committed, payload, sizeof(committed));
   ReleaseSlot(slot);
   if (!ok)
-    throw std::runtime_error("SHM training step failed");
+    throw std::runtime_error("SHM sparse gradient commit failed");
   return committed;
 }
 
@@ -821,7 +821,7 @@ LocalShmPSClient::PrefetchParameter(const base::ConstArray<uint64_t>& keys) {
     owned.assign(keys.Data(), keys.Data() + keys.Size());
   const auto id = NextRequestId();
   // Reuse the chunked GET path so a large prefetch cannot retain all SHM slots
-  // and prevent the next training-step submission from making progress.
+  // and prevent the next sparse gradient submission from making progress.
   auto result =
       std::async(std::launch::async, [this, owned = std::move(owned), dim]() {
         base::RecTensor values(

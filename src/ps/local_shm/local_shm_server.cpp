@@ -109,10 +109,10 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
       header->embedding_dim);
   try {
     switch (static_cast<LocalOpcode>(header->opcode)) {
-    case LocalOpcode::kTrainingStep: {
+    case LocalOpcode::kSparseGradientCommit: {
       if (header->input_bytes > region_->slot_buffer_bytes() ||
           header->table_name_len > header->input_bytes) {
-        throw std::invalid_argument("Invalid SHM training payload");
+        throw std::invalid_argument("Invalid SHM gradient commit payload");
       }
       const std::string table(
           reinterpret_cast<char*>(payload), header->table_name_len);
@@ -120,7 +120,7 @@ void LocalShmStoreRuntime::ProcessSlot(uint32_t slot_id) {
           reinterpret_cast<char*>(payload) + header->table_name_len,
           header->input_bytes - header->table_name_len);
       const int64_t committed =
-          cache_ps_->TrainingStep(table, data, worker_tid_);
+          cache_ps_->SparseGradientCommit(table, data, worker_tid_);
       std::memcpy(payload, &committed, sizeof(committed));
       header->output_bytes = sizeof(committed);
       FinishWithStatus(header, LocalStatusCode::kOk);

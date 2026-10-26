@@ -23,7 +23,7 @@
 #include "storage/kv_engine/engine_selector.h"
 #include "optimizer/optimizer.h"
 #include "ps/local_shm/local_shm_stage_report.h"
-#include "ps/base/training_step.h"
+#include "ps/base/sparse_gradient_commit.h"
 
 #ifdef ENABLE_PERF_REPORT
 #  include <chrono>
@@ -486,20 +486,21 @@ public:
 
   /// optimizer interface
 
-  int64_t TrainingStep(
+  int64_t SparseGradientCommit(
       const std::string& table, const std::string& payload, unsigned tid) {
-    const auto h    = recstore::DecodeTrainingStep(payload);
+    const auto h    = recstore::DecodeSparseGradientCommit(payload);
     const auto* sgd = dynamic_cast<SGD*>(optimizer_.get());
     if (!sgd || sgd->LearningRate() != h.learning_rate) {
-      throw std::runtime_error(
-          "BagPipe requires matching client/PS SGD learning rates");
+      throw std::runtime_error("Sparse gradient commit requires matching "
+                               "client/PS SGD learning rates");
     }
     const auto config = table_configs_.find(table);
     if (config == table_configs_.end() ||
         config->second.embedding_dim != h.dim) {
-      throw std::runtime_error("Training step table or dimension mismatch");
+      throw std::runtime_error(
+          "Sparse gradient commit table or dimension mismatch");
     }
-    return training_steps_.Exchange(
+    return sparse_gradient_commits_.Exchange(
         table,
         payload,
         [&](const std::vector<uint64_t>& keys,
@@ -511,7 +512,7 @@ public:
                   keys.size(),
                   h.dim,
                   tid)) {
-            throw std::runtime_error("Training step optimizer failed");
+            throw std::runtime_error("Sparse gradient commit optimizer failed");
           }
         });
   }
@@ -585,7 +586,7 @@ public:
   }
 
 private:
-  recstore::TrainingStepCoordinator training_steps_;
+  recstore::SparseGradientCommitCoordinator sparse_gradient_commits_;
   void MarkCheckpointDirty() {
     if (!checkpoint_dirty_.load(std::memory_order_relaxed)) {
       checkpoint_dirty_.store(true, std::memory_order_relaxed);

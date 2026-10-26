@@ -219,9 +219,10 @@ TEST_F(LocalShmPSClientTest, LastRequestProfileCapturesTransportStages) {
   server_thread.join();
 }
 
-TEST_F(LocalShmPSClientTest, TrainingStepAggregatesBeforeUpdatingStorage) {
-  const auto config =
-      MakeLocalShmConfig(MakeUniqueRegionName("recstore_training_step"));
+TEST_F(LocalShmPSClientTest,
+       SparseGradientCommitAggregatesBeforeUpdatingStorage) {
+  const auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_sparse_gradient_commit"));
   LocalShmParameterServer server;
   server.Init(config);
   std::thread server_thread([&]() { server.Run(); });
@@ -234,24 +235,24 @@ TEST_F(LocalShmPSClientTest, TrainingStepAggregatesBeforeUpdatingStorage) {
     base::RecTensor values(initial.data(), {1, 4});
     base::RecTensor grads(grad.data(), {1, 4});
     EXPECT_EQ(client.PutParameter(key_array, values), 0);
-    TrainingStepHeader h;
+    SparseGradientCommitHeader h;
     h.session = 10;
     h.world   = 2;
     h.dim     = 4;
     h.divisor = 2;
-    EXPECT_EQ(client.TrainingStep("training", h, key_array, grads), -1);
+    EXPECT_EQ(client.SparseGradientCommit("training", h, key_array, grads), -1);
     std::vector<float> result(4);
     EXPECT_EQ(client.GetParameterFlat(key_array, result.data(), 1, 4), 0);
     EXPECT_EQ(result, initial);
     h.rank = 1;
-    EXPECT_EQ(client.TrainingStep("training", h, key_array, grads), 0);
+    EXPECT_EQ(client.SparseGradientCommit("training", h, key_array, grads), 0);
     EXPECT_EQ(client.GetParameterFlat(key_array, result.data(), 1, 4), 0);
     for (size_t i = 0; i < 4; ++i)
       EXPECT_NEAR(result[i], initial[i] - 0.01f * grad[i], 1e-6);
-    EXPECT_EQ(client.TrainingStep("training", h, key_array, grads), 0);
+    EXPECT_EQ(client.SparseGradientCommit("training", h, key_array, grads), 0);
     h.kind = 1;
     base::RecTensor empty({0, 4}, base::DataType::FLOAT32);
-    EXPECT_EQ(client.TrainingStep(
+    EXPECT_EQ(client.SparseGradientCommit(
                   "training", h, base::ConstArray<uint64_t>(nullptr, 0), empty),
               0);
   } catch (...) {

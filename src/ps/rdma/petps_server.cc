@@ -1411,12 +1411,12 @@ private:
           profile_.handle_update_ns.fetch_add(
               NowNs() - handle_start_ns, std::memory_order_relaxed);
         }
-      } else if (descriptor->op ==
-                 static_cast<std::uint16_t>(petps::RcOp::kTrainingStep)) {
+      } else if (descriptor->op == static_cast<std::uint16_t>(
+                                       petps::RcOp::kSparseGradientCommit)) {
         if (descriptor->response_bytes != sizeof(int64_t)) {
-          throw std::invalid_argument("Invalid training response size");
+          throw std::invalid_argument("Invalid gradient commit response size");
         }
-        const int64_t committed = cache_ps_->TrainingStep(
+        const int64_t committed = cache_ps_->SparseGradientCommit(
             std::string(petps::DescriptorTableName(*descriptor)),
             std::string(payload, descriptor->payload_bytes),
             thread_id);

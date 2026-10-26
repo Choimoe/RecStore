@@ -23,10 +23,10 @@ public:
 
   virtual ~BRPCParameterServiceImpl() = default;
 
-  void TrainingStep(google::protobuf::RpcController*,
-                    const recstoreps_brpc::TrainingStepRequest*,
-                    recstoreps_brpc::TrainingStepResponse*,
-                    google::protobuf::Closure*) override;
+  void SparseGradientCommit(google::protobuf::RpcController*,
+                            const recstoreps_brpc::SparseGradientCommitRequest*,
+                            recstoreps_brpc::SparseGradientCommitResponse*,
+                            google::protobuf::Closure*) override;
 
   void GetParameter(google::protobuf::RpcController* controller,
                     const recstoreps_brpc::GetParameterRequest* request,

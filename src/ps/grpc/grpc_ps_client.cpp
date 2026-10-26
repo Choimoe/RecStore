@@ -757,18 +757,19 @@ void GRPCParameterClient::Command(recstore::PSCommand command) {
   }
 }
 
-int64_t GRPCParameterClient::ExchangeTrainingStep(const std::string& table,
-                                                  const std::string& payload) {
-  recstoreps::TrainingStepRequest request;
-  recstoreps::TrainingStepResponse response;
+int64_t GRPCParameterClient::ExchangeSparseGradientCommit(
+    const std::string& table, const std::string& payload) {
+  recstoreps::SparseGradientCommitRequest request;
+  recstoreps::SparseGradientCommitResponse response;
   request.set_table_name(table);
   request.set_payload(payload);
   grpc::ClientContext context;
   SetRpcDeadline(&context);
-  const auto status = stubs_[0]->TrainingStep(&context, request, &response);
+  const auto status =
+      stubs_[0]->SparseGradientCommit(&context, request, &response);
   if (!status.ok() || !response.error().empty()) {
     throw std::runtime_error(
-        "TrainingStep: " +
+        "SparseGradientCommit: " +
         (status.ok() ? response.error() : status.error_message()));
   }
   return response.committed_step();
