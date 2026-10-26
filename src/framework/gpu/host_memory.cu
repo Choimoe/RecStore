@@ -1,0 +1,70 @@
+#include "framework/gpu/host_memory.h"
+#include <cuda_runtime_api.h>
+#include <unistd.h>
+#include <cstdint>
+#include <mutex>
+#include <unordered_map>
+#include <memory>
+#include <stdexcept>
+#include <glog/logging.h>
+namespace recstore::framework {
+bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes) {
+  if (ptr == nullptr || bytes == 0) {
+    return false;
+  }
+  const long page_size = ::sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    return false;
+  }
+  const std::size_t page_bytes = static_cast<std::size_t>(page_size);
+  const uintptr_t raw_begin    = reinterpret_cast<uintptr_t>(ptr);
+  const uintptr_t raw_end      = raw_begin + bytes;
+  const uintptr_t page_begin =
+      raw_begin & ~(static_cast<uintptr_t>(page_bytes) - 1U);
+  const uintptr_t page_end =
+      (raw_end + page_bytes - 1U) & ~(static_cast<uintptr_t>(page_bytes) - 1U);
+  const std::size_t required_bytes =
+      static_cast<std::size_t>(page_end - page_begin);
+
+  static std::mutex mu;
+  static std::unordered_map<uintptr_t, std::size_t> registered_bytes_by_base;
+  std::lock_guard<std::mutex> guard(mu);
+  const std::size_t existing_bytes = registered_bytes_by_base[page_begin];
+  if (existing_bytes >= required_bytes) {
+    return true;
+  }
+
+  void* register_ptr = reinterpret_cast<void*>(page_begin + existing_bytes);
+  const std::size_t register_bytes = required_bytes - existing_bytes;
+  const cudaError_t err =
+      cudaHostRegister(register_ptr, register_bytes, cudaHostRegisterPortable);
+  if (err != cudaSuccess && err != cudaErrorHostMemoryAlreadyRegistered) {
+    LOG(WARNING) << "cudaHostRegister failed for local_shm payload: "
+                 << cudaGetErrorString(err)
+                 << " base=" << reinterpret_cast<void*>(page_begin)
+                 << " bytes=" << required_bytes;
+    return false;
+  }
+  registered_bytes_by_base[page_begin] = required_bytes;
+  return true;
+}
+
+void RetainUntilStreamComplete(void* stream_ptr,
+                               std::function<void()> release) {
+  auto stream    = static_cast<cudaStream_t>(stream_ptr);
+  auto* callback = new std::function<void()>(std::move(release));
+  auto status    = cudaLaunchHostFunc(
+      stream,
+      [](void* p) {
+        std::unique_ptr<std::function<void()>> owned(
+            static_cast<std::function<void()>*>(p));
+        (*owned)();
+      },
+      callback);
+  if (status != cudaSuccess) {
+    cudaStreamSynchronize(stream);
+    delete callback;
+    throw std::runtime_error(cudaGetErrorString(status));
+  }
+}
+} // namespace recstore::framework

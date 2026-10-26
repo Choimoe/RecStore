@@ -7,14 +7,19 @@
 namespace recstore {
 namespace framework {
 
+std::function<void()>
+RecordCudaCompletionForTensor(const torch::Tensor& tensor) {
+  TORCH_CHECK(!tensor.is_cuda(), "CUDA staging requires a CUDA build");
+  return [] {};
+}
+
 void SynchronizeCurrentCudaStreamForTensor(const torch::Tensor& tensor) {
   (void)tensor;
 }
 
-bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes) {
-  (void)ptr;
-  (void)bytes;
-  return false;
+void RetainUntilCudaComplete(const torch::Tensor&,
+                             std::function<void()> release) {
+  release();
 }
 
 } // namespace framework

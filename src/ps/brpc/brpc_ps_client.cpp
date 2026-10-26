@@ -822,3 +822,20 @@ int BRPCParameterClient::InitEmbeddingTable(
 
   return response.success() ? response.tag() : -1;
 }
+
+int64_t BRPCParameterClient::ExchangeSparseGradientCommit(
+    const std::string& table, const std::string& payload) {
+  recstoreps_brpc::SparseGradientCommitRequest request;
+  recstoreps_brpc::SparseGradientCommitResponse response;
+  request.set_table_name(table);
+  request.set_payload(payload);
+  brpc::Controller controller;
+  recstoreps_brpc::ParameterService_Stub stub(channel_.get());
+  stub.SparseGradientCommit(&controller, &request, &response, nullptr);
+  if (controller.Failed() || !response.error().empty()) {
+    throw std::runtime_error(
+        "SparseGradientCommit: " +
+        (controller.Failed() ? controller.ErrorText() : response.error()));
+  }
+  return response.committed_step();
+}

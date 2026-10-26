@@ -176,8 +176,7 @@ public:
   std::string ExtraResultFields() const override {
     const auto stats = io_backend_->GetReadStats();
     std::ostringstream out;
-    out << " layout_strategy=plain"
-        << " layout_page_reads=" << stats.page_reads
+    out << " layout_strategy=plain" << " layout_page_reads=" << stats.page_reads
         << " layout_bytes_read=" << stats.bytes_read;
     return out.str();
   }

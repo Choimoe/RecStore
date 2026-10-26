@@ -1411,6 +1411,18 @@ private:
           profile_.handle_update_ns.fetch_add(
               NowNs() - handle_start_ns, std::memory_order_relaxed);
         }
+      } else if (descriptor->op == static_cast<std::uint16_t>(
+                                       petps::RcOp::kSparseGradientCommit)) {
+        if (descriptor->response_bytes != sizeof(int64_t)) {
+          throw std::invalid_argument("Invalid gradient commit response size");
+        }
+        const int64_t committed = cache_ps_->SparseGradientCommit(
+            std::string(petps::DescriptorTableName(*descriptor)),
+            std::string(payload, descriptor->payload_bytes),
+            thread_id);
+        std::memcpy(response.payload, &committed, sizeof(committed));
+        response.status->status = static_cast<int32_t>(petps::RpcStatus::kOk);
+        response.status->response_bytes = sizeof(committed);
       } else if (descriptor->op ==
                  static_cast<std::uint16_t>(petps::RcOp::kInitTable)) {
         const std::uint64_t handle_start_ns = profile_enabled ? NowNs() : 0;

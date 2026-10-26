@@ -85,6 +85,9 @@ public:
 
   ~GRPCParameterClient() {}
 
+  int64_t ExchangeSparseGradientCommit(const std::string& table,
+                                       const std::string& payload) override;
+
   int GetParameter(const base::ConstArray<uint64_t>& keys,
                    base::RecTensor& values) override;
 

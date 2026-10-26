@@ -61,6 +61,7 @@ class BagPipeSparseSGD:
 
         with torch.no_grad():
             self._last_step_profile = {}
+            submitted = False
             for group in self.param_groups:
                 lr = group["lr"]
                 for mod in group["params"]:
@@ -100,6 +101,7 @@ class BagPipeSparseSGD:
                                 0, inverse_indices, all_grads
                             )
 
+                        submitted = True
                         self.controller.update_grads(
                             name,
                             unique_ids,
@@ -111,8 +113,18 @@ class BagPipeSparseSGD:
                     if hasattr(mod, "reset_trace"):
                         mod.reset_trace()
 
+            if not submitted and hasattr(self.controller, "_current_plan"):
+                plan = self.controller._current_plan
+                if plan is None or plan.unique_ids.numel():
+                    raise RuntimeError("BagPipe sparse gradient trace is missing")
+                self.controller.update_grads(
+                    self.controller.master_table_name,
+                    torch.empty(0, dtype=torch.int64, device=self.controller.device),
+                    torch.empty((0, self.controller.embedding_dim), device=self.controller.device),
+                    self.param_groups[0]["lr"], self._batch_num,
+                )
             self._batch_num += 1
 
     def flush(self) -> None:
-        """No-op: BagPipe controller handles writeback at cleanup time."""
+        """No-op: the controller waits for PS commits at dependency boundaries."""
         pass

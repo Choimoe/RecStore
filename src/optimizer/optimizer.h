@@ -47,6 +47,7 @@ private:
 
 public:
   explicit SGD(float lr = 0.01) : learning_rate_(lr) {}
+  float LearningRate() const { return learning_rate_; }
 
   int Init(const std::vector<std::string> table_name,
            const EmbeddingTableConfig& config,

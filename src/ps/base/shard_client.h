@@ -14,7 +14,7 @@ namespace recstore {
 // (dist_sharded_client.h). All methods return 0 on success and a negative
 // value on error, except InitEmbeddingTable which returns the non-negative
 // table tag.
-class ShardClient {
+class ShardClient : public SparseGradientCommitClient {
 public:
   virtual ~ShardClient() = default;
 

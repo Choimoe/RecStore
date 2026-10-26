@@ -39,6 +39,11 @@ public:
   explicit RDMAPSClientAdapter(json config);
   ~RDMAPSClientAdapter() override = default;
 
+  int64_t SparseGradientCommit(const std::string& table,
+                               SparseGradientCommitHeader h,
+                               const base::ConstArray<uint64_t>& keys,
+                               const base::RecTensor& grads) override;
+
   int GetParameter(const base::ConstArray<uint64_t>& keys,
                    base::RecTensor& values) override;
   int PutParameter(const base::ConstArray<uint64_t>& keys,
@@ -90,6 +95,9 @@ private:
 
   json config_;
   std::mutex init_mu_;
+  // GET windows and BagPipe submissions share finite RC slots. Serialize
+  // window ownership, while GPU work and PS rank aggregation remain async.
+  std::mutex io_mu_;
   std::mutex thread_init_mu_;
   mutable std::mutex state_mu_;
   bool initialized_ = false;

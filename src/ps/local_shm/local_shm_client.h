@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -50,6 +52,14 @@ class LocalShmPSClient : public BasePSClient {
 public:
   explicit LocalShmPSClient(json config);
   ~LocalShmPSClient() override = default;
+
+  int64_t ExchangeSparseGradientCommit(const std::string& table,
+                                       const std::string& payload) override;
+  size_t SparseGradientCommitPayloadLimit() const override {
+    return region_.slot_buffer_bytes() > 4096
+             ? region_.slot_buffer_bytes() - 4096
+             : 0;
+  }
 
   int GetParameter(const base::ConstArray<uint64_t>& keys,
                    base::RecTensor& values) override;
@@ -110,7 +120,8 @@ private:
   bool thread_ready_queue_sharding_ = false;
   uint32_t timeout_ms_              = 30000;
   std::unordered_map<std::string, int64_t> table_embedding_dims_;
-  std::unordered_map<uint64_t, std::pair<uint32_t, uint64_t>> prefetch_map_;
+  std::mutex prefetch_mu_;
+  std::unordered_map<uint64_t, std::future<base::RecTensor>> prefetch_map_;
 };
 
 } // namespace recstore

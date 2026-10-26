@@ -18,14 +18,13 @@ class OptimizationConfig:
         plugin: Strategy name — ``"none"``, ``"bagpipe"``, ``"lookahead"``,
             or any future registered plugin (e.g. ``"fusedrec"``).
         lookahead: Prefetch depth (shared by bagpipe / lookahead).
-        cleanup_proportion: BagPipe-specific — fraction of lookahead batches
-            at which to evict and write back.
-        cache_capacity: GPU cache capacity (number of embedding rows).
+        cleanup_proportion: Legacy cache cleanup setting; the bounded PS
+            runtime evicts clean rows on admission.
+        cache_capacity: GPU cache capacity in sets of 64 embedding rows.
         embedding_dim: Embedding dimension.
-        prescan: BagPipe-specific — precompute collective layouts over the
-            configured training steps and keep the full working set resident.
-            Requires a repeatable sequence, one ID per bag, and enough capacity.
-            Without it BagPipe uses dynamic prefetch and eviction.
+        prescan: Precompute CPU access plans; otherwise plan online.
+        aggregation: ``ps`` aggregates on PS; ``collective`` aggregates on
+            trainers before a unique per-row PS submission.
         plugin_config: Extensible per-plugin config for future strategies.
     """
 
@@ -35,4 +34,5 @@ class OptimizationConfig:
     cache_capacity: int = 0
     embedding_dim: int = 128
     prescan: bool = False
+    aggregation: str = "ps"
     plugin_config: Dict[str, Any] = field(default_factory=dict)

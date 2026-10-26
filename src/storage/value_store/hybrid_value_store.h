@@ -16,9 +16,10 @@ public:
   explicit HybridValueStore(const BaseKVConfig& config)
       : dram_store_(BuildDramConfig(config)) {
     const auto& value = config.json_config_.at("value");
-    ssd_store_.reset(base::Factory<ValueStore, const BaseKVConfig&>::NewInstance(
-        SsdStoreType(value), BuildSsdConfig(config)));
-    ssd_static_ = ssd_store_ && !ssd_store_->GetLayoutId().plain();
+    ssd_store_.reset(
+        base::Factory<ValueStore, const BaseKVConfig&>::NewInstance(
+            SsdStoreType(value), BuildSsdConfig(config)));
+    ssd_static_          = ssd_store_ && !ssd_store_->GetLayoutId().plain();
     const auto& v        = config.json_config_.at("value");
     const auto& dram     = v.at("dram_allocator");
     dram_capacity_bytes_ = dram.at("capacity_bytes").get<uint64_t>();
@@ -289,7 +290,8 @@ private:
     if (!value.contains("ssd_layout")) {
       return "SSD_VALUE_STORE";
     }
-    const std::string strategy = value.at("ssd_layout").value("strategy", "plain");
+    const std::string strategy =
+        value.at("ssd_layout").value("strategy", "plain");
     if (strategy.empty() || strategy == "plain") {
       return "SSD_VALUE_STORE";
     }
@@ -352,7 +354,7 @@ private:
 
   DramValueStore dram_store_;
   std::unique_ptr<ValueStore> ssd_store_;
-  bool ssd_static_           = false;
+  bool ssd_static_              = false;
   uint64_t dram_capacity_bytes_ = 0;
   double high_watermark_ratio_  = 0.85;
   std::atomic<uint64_t> dram_bytes_reserved_{0};

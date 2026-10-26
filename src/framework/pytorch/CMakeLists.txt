@@ -7,7 +7,10 @@ add_library(recstore_torch_ops SHARED
     op_base.cc
     op_flat.cc
     op_prefetch.cc
-    op_bagpipe.cc
+    cache/cache_bindings.cc
+    op_sparse_gradient_commit.cc
+    cache/tensor_adapter.cc
+    cache/bagpipe_bindings.cc
     op_profile.cc
     ../op.cc
     ../common/local_shm_kv_client_op.cc
@@ -26,7 +29,7 @@ add_library(recstore_torch_ops SHARED
 # CUDA-runtime host helpers live in a .cu so the family .cc files stay free of
 # CUDA includes and __has_include guards. CPU-only builds use a stub instead.
 if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
-    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime.cu)
+    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime.cu ../gpu/host_memory.cu)
     target_compile_options(recstore_torch_ops PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     # The top-level set(CUDA_SEPARABLE_COMPILATION ON) is cleared by the
@@ -36,7 +39,7 @@ if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
     set_target_properties(recstore_torch_ops PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON)
 else()
-    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime_cpu.cc)
+    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime_cpu.cc ../gpu/host_memory_cpu.cc)
 endif()
 
 target_compile_definitions(recstore_torch_ops PRIVATE _GLIBCXX_USE_CXX11_ABI=1)
@@ -77,6 +80,7 @@ target_link_libraries(recstore_torch_ops PRIVATE
 )
 
 if(TARGET framework_gpu_cache)
+    target_sources(recstore_torch_ops PRIVATE cache/gpu_cache_adapter.cu)
     target_compile_definitions(recstore_torch_ops PRIVATE RECSTORE_ENABLE_GPU_CACHE)
     target_link_libraries(recstore_torch_ops PRIVATE framework_gpu_cache)
 endif()

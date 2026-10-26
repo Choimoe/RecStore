@@ -417,6 +417,19 @@ private:
     return Status::OK;
   }
 
+  Status SparseGradientCommit(
+      ServerContext*,
+      const recstoreps::SparseGradientCommitRequest* request,
+      recstoreps::SparseGradientCommitResponse* reply) override {
+    try {
+      reply->set_committed_step(cache_ps_->SparseGradientCommit(
+          request->table_name(), request->payload(), 0));
+    } catch (const std::exception& error) {
+      reply->set_error(error.what());
+    }
+    return Status::OK;
+  }
+
   Status UpdateParameter(ServerContext* context,
                          const UpdateParameterRequest* request,
                          UpdateParameterResponse* reply) override {

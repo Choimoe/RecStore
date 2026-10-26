@@ -14,12 +14,12 @@
 namespace ssd_layout {
 namespace {
 
-constexpr char kMagic[8] = {'R', 'S', 'L', 'A', 'Y', '0', '0', '1'};
-constexpr uint32_t kVersion = 1;
+constexpr char kMagic[8]      = {'R', 'S', 'L', 'A', 'Y', '0', '0', '1'};
+constexpr uint32_t kVersion   = 1;
 constexpr uint64_t kFnvOffset = 14695981039346656037ULL;
-constexpr uint64_t kFnvPrime = 1099511628211ULL;
-constexpr float kBalanceP = 0.5f;
-constexpr int kMaxRefine = 8;
+constexpr uint64_t kFnvPrime  = 1099511628211ULL;
+constexpr float kBalanceP     = 0.5f;
+constexpr int kMaxRefine      = 8;
 
 [[noreturn]] void Fail(const std::string& message) {
   throw std::invalid_argument(message);
@@ -134,21 +134,19 @@ Rows RowsFromParts(const std::vector<uint64_t>& keys,
   return rows;
 }
 
-Artifact Finish(Strategy strategy,
-                uint32_t page_size,
-                uint32_t row_size,
-                Rows rows) {
+Artifact
+Finish(Strategy strategy, uint32_t page_size, uint32_t row_size, Rows rows) {
   if (strategy != Strategy::kPlain && strategy != Strategy::kBandana &&
       strategy != Strategy::kMaxEmbed) {
     Fail("unknown SSD layout strategy");
   }
   const uint32_t slots = SlotsPerPage(page_size, row_size);
   Artifact artifact;
-  artifact.strategy   = strategy;
-  artifact.page_size  = page_size;
-  artifact.row_size   = row_size;
-  artifact.keys       = std::move(rows.keys);
-  artifact.copies     = std::move(rows.copies);
+  artifact.strategy  = strategy;
+  artifact.page_size = page_size;
+  artifact.row_size  = row_size;
+  artifact.keys      = std::move(rows.keys);
+  artifact.copies    = std::move(rows.copies);
   if (artifact.keys.size() != artifact.copies.size()) {
     Fail("SSD layout key and copy counts differ");
   }
@@ -174,7 +172,8 @@ Artifact Finish(Strategy strategy,
       if (copy.page_id >= std::numeric_limits<uint32_t>::max()) {
         Fail("SSD layout page id exceeds uint32 range");
       }
-      page_count = std::max(page_count, static_cast<uint32_t>(copy.page_id + 1));
+      page_count =
+          std::max(page_count, static_cast<uint32_t>(copy.page_id + 1));
       const uint64_t slot =
           (copy.page_id << 32) | static_cast<uint64_t>(copy.byte_offset);
       if (!seen_slots.insert(slot).second) {
@@ -185,7 +184,8 @@ Artifact Finish(Strategy strategy,
   artifact.pages.resize(page_count);
   for (size_t i = 0; i < artifact.keys.size(); ++i) {
     for (const Location& copy : artifact.copies[i]) {
-      artifact.pages[copy.page_id].push_back({artifact.keys[i], copy.byte_offset});
+      artifact.pages[copy.page_id].push_back(
+          {artifact.keys[i], copy.byte_offset});
     }
   }
   for (auto& page : artifact.pages) {
@@ -251,7 +251,7 @@ std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
   std::vector<uint32_t> span_epoch(count, 0);
   std::vector<uint32_t> edge_epoch(edges.size(), 0);
   uint32_t next_epoch = 1;
-  uint32_t next_part = 0;
+  uint32_t next_part  = 0;
 
   // ponytail: adjacency costs O(vertices + pins) memory. Stream subgraphs if
   // traces outgrow RAM.
@@ -286,8 +286,8 @@ std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
       }
       for (uint32_t edge_id : relevant_edges) {
         const Edge& edge = edges[edge_id];
-        int left = 0;
-        int right = 0;
+        int left         = 0;
+        int right        = 0;
         for (uint64_t pin = edge.begin; pin < edge.end; ++pin) {
           const uint32_t vertex = graph.pins[pin];
           if (span_epoch[vertex] != epoch) {
@@ -333,7 +333,8 @@ std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
     }
   };
 
-  const auto divide = [&](auto&& self, size_t begin, size_t end, uint32_t limit) -> void {
+  const auto divide =
+      [&](auto&& self, size_t begin, size_t end, uint32_t limit) -> void {
     if (end - begin <= limit) {
       const uint32_t id = next_part++;
       for (size_t i = begin; i < end; ++i) {
@@ -364,13 +365,14 @@ std::vector<uint32_t> PartitionVertices(const Hypergraph& graph, uint32_t cap) {
   return part;
 }
 
-std::vector<uint32_t> PrimaryPages(const Artifact& artifact,
-                                   const std::vector<uint64_t>& keys) {
+std::vector<uint32_t>
+PrimaryPages(const Artifact& artifact, const std::vector<uint64_t>& keys) {
   std::unordered_map<uint64_t, uint32_t> page_of_key;
   page_of_key.reserve(artifact.keys.size());
   for (size_t i = 0; i < artifact.keys.size(); ++i) {
-    page_of_key.emplace(artifact.keys[i],
-                        static_cast<uint32_t>(artifact.copies[i].at(0).page_id));
+    page_of_key.emplace(
+        artifact.keys[i],
+        static_cast<uint32_t>(artifact.copies[i].at(0).page_id));
   }
   std::vector<uint32_t> pages(keys.size());
   for (size_t vertex = 0; vertex < keys.size(); ++vertex) {
@@ -436,7 +438,7 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
   ReadAll(path, &bytes);
   Hypergraph graph;
   if (binary) {
-    size_t offset = 0;
+    size_t offset   = 0;
     const auto need = [&](size_t count, size_t width) {
       if (offset > bytes.size() ||
           (width != 0 && count > (bytes.size() - offset) / width)) {
@@ -444,7 +446,7 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
       }
     };
     need(2, sizeof(uint64_t));
-    uint64_t queries = 0;
+    uint64_t queries  = 0;
     uint64_t vertices = 0;
     std::memcpy(&queries, bytes.data() + offset, sizeof(queries));
     offset += sizeof(queries);
@@ -456,7 +458,8 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
     graph.vertex_count = vertices;
     graph.xpins.resize(queries + 1);
     need(queries + 1, sizeof(uint64_t));
-    std::memcpy(graph.xpins.data(), bytes.data() + offset,
+    std::memcpy(graph.xpins.data(),
+                bytes.data() + offset,
                 (queries + 1) * sizeof(uint64_t));
     offset += (queries + 1) * sizeof(uint64_t);
     if (graph.xpins.empty() || graph.xpins.front() != 0) {
@@ -470,7 +473,8 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
     graph.pins.resize(graph.xpins.back());
     need(graph.pins.size(), sizeof(uint32_t));
     if (!graph.pins.empty()) {
-      std::memcpy(graph.pins.data(), bytes.data() + offset,
+      std::memcpy(graph.pins.data(),
+                  bytes.data() + offset,
                   graph.pins.size() * sizeof(uint32_t));
     }
     return graph;
@@ -485,9 +489,9 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
     Fail("text query log header is invalid");
   }
   std::istringstream header(line);
-  uint64_t starting = 0;
-  uint64_t vertices = 0;
-  uint64_t queries = 0;
+  uint64_t starting      = 0;
+  uint64_t vertices      = 0;
+  uint64_t queries       = 0;
   uint64_t declared_pins = 0;
   if (!(header >> starting >> vertices >> queries >> declared_pins)) {
     Fail("text query log header is invalid");
@@ -523,7 +527,8 @@ Hypergraph ReadQueryLog(const std::string& path, bool binary) {
   return graph;
 }
 
-std::vector<uint64_t> ReadKeyMap(const std::string& path, uint64_t vertex_count) {
+std::vector<uint64_t>
+ReadKeyMap(const std::string& path, uint64_t vertex_count) {
   std::vector<uint64_t> keys(vertex_count);
   if (path.empty()) {
     for (uint64_t vertex = 0; vertex < vertex_count; ++vertex) {
@@ -555,13 +560,15 @@ Artifact Partition(const Hypergraph& graph,
   if (keys.size() != graph.vertex_count) {
     Fail("key map size does not match the query log");
   }
-  const uint32_t cap = SlotsPerPage(page_size, row_size);
+  const uint32_t cap               = SlotsPerPage(page_size, row_size);
   const std::vector<uint32_t> part = PartitionVertices(graph, cap);
   std::vector<std::vector<uint32_t>> pages(keys.size());
   for (uint32_t vertex = 0; vertex < keys.size(); ++vertex) {
     pages[vertex].push_back(part[vertex]);
   }
-  return Finish(Strategy::kBandana, page_size, row_size,
+  return Finish(Strategy::kBandana,
+                page_size,
+                row_size,
                 RowsFromParts(keys, pages, row_size));
 }
 
@@ -573,12 +580,13 @@ Artifact Replicate(const Artifact& partitioned,
     Fail("replication ratio must be finite and non-negative");
   }
   CheckGraph(graph);
-  if (keys.size() != graph.vertex_count || partitioned.keys.size() != keys.size()) {
+  if (keys.size() != graph.vertex_count ||
+      partitioned.keys.size() != keys.size()) {
     Fail("replication inputs do not describe the same vertices");
   }
   auto pages = std::vector<std::vector<uint32_t>>(keys.size());
   const std::vector<uint32_t> primary = PrimaryPages(partitioned, keys);
-  uint32_t page_count = 0;
+  uint32_t page_count                 = 0;
   for (uint32_t page : primary) {
     page_count = std::max(page_count, page + 1);
   }
@@ -586,11 +594,14 @@ Artifact Replicate(const Artifact& partitioned,
     pages[vertex].push_back(primary[vertex]);
   }
   if (rep_ratio == 0.0 || keys.empty()) {
-    return Finish(Strategy::kMaxEmbed, partitioned.page_size, partitioned.row_size,
+    return Finish(Strategy::kMaxEmbed,
+                  partitioned.page_size,
+                  partitioned.row_size,
                   RowsFromParts(keys, pages, partitioned.row_size));
   }
 
-  const uint32_t cap = SlotsPerPage(partitioned.page_size, partitioned.row_size);
+  const uint32_t cap =
+      SlotsPerPage(partitioned.page_size, partitioned.row_size);
   const long double requested =
       static_cast<long double>(rep_ratio) * keys.size();
   if (requested > std::numeric_limits<uint64_t>::max()) {
@@ -604,9 +615,11 @@ Artifact Replicate(const Artifact& partitioned,
   for (uint64_t edge = 0; edge + 1 < graph.xpins.size(); ++edge) {
     std::vector<uint32_t> vertices(
         graph.pins.begin() + static_cast<std::ptrdiff_t>(graph.xpins[edge]),
-        graph.pins.begin() + static_cast<std::ptrdiff_t>(graph.xpins[edge + 1]));
+        graph.pins.begin() +
+            static_cast<std::ptrdiff_t>(graph.xpins[edge + 1]));
     std::sort(vertices.begin(), vertices.end());
-    vertices.erase(std::unique(vertices.begin(), vertices.end()), vertices.end());
+    vertices.erase(
+        std::unique(vertices.begin(), vertices.end()), vertices.end());
     if (vertices.size() < 2) {
       continue;
     }
@@ -652,9 +665,11 @@ Artifact Replicate(const Artifact& partitioned,
     for (const auto& item : neighbor_count) {
       neighbors.push_back({item.second, item.first});
     }
-    std::sort(neighbors.begin(), neighbors.end(), [](const auto& a, const auto& b) {
-      return a.first > b.first || (a.first == b.first && a.second < b.second);
-    });
+    std::sort(
+        neighbors.begin(), neighbors.end(), [](const auto& a, const auto& b) {
+          return a.first > b.first ||
+                 (a.first == b.first && a.second < b.second);
+        });
     std::vector<uint32_t> chosen{center};
     for (const auto& neighbor : neighbors) {
       if (chosen.size() == std::min<uint64_t>(cap, remaining)) {
@@ -671,7 +686,9 @@ Artifact Replicate(const Artifact& partitioned,
     }
     remaining -= chosen.size();
   }
-  return Finish(Strategy::kMaxEmbed, partitioned.page_size, partitioned.row_size,
+  return Finish(Strategy::kMaxEmbed,
+                partitioned.page_size,
+                partitioned.row_size,
                 RowsFromParts(keys, pages, partitioned.row_size));
 }
 
@@ -686,8 +703,7 @@ Artifact Shrink(const Artifact& replicated, double rep_ratio) {
     Fail("shrink ratio is too large");
   }
   const uint64_t target = std::max<uint64_t>(
-      replicated.keys.size(),
-      static_cast<uint64_t>(std::ceil(requested)));
+      replicated.keys.size(), static_cast<uint64_t>(std::ceil(requested)));
   std::vector<char> primary(replicated.pages.size(), 0);
   uint64_t copies = 0;
   for (const auto& row : replicated.copies) {
@@ -698,7 +714,8 @@ Artifact Shrink(const Artifact& replicated, double rep_ratio) {
   }
   std::vector<char> drop(replicated.pages.size(), 0);
   for (uint32_t page = static_cast<uint32_t>(drop.size());
-       page > 0 && copies > target; --page) {
+       page > 0 && copies > target;
+       --page) {
     if (primary[page - 1]) {
       continue;
     }
@@ -718,11 +735,14 @@ Artifact Shrink(const Artifact& replicated, double rep_ratio) {
   for (size_t i = 0; i < replicated.copies.size(); ++i) {
     for (const Location& copy : replicated.copies[i]) {
       if (!drop[copy.page_id]) {
-        rows.copies[i].push_back(Location{remap[copy.page_id], copy.byte_offset});
+        rows.copies[i].push_back(
+            Location{remap[copy.page_id], copy.byte_offset});
       }
     }
   }
-  return Finish(replicated.strategy, replicated.page_size, replicated.row_size,
+  return Finish(replicated.strategy,
+                replicated.page_size,
+                replicated.row_size,
                 std::move(rows));
 }
 
@@ -730,7 +750,9 @@ Artifact Normalize(Artifact artifact) {
   Rows rows;
   rows.keys   = std::move(artifact.keys);
   rows.copies = std::move(artifact.copies);
-  return Finish(artifact.strategy, artifact.page_size, artifact.row_size,
+  return Finish(artifact.strategy,
+                artifact.page_size,
+                artifact.row_size,
                 std::move(rows));
 }
 
@@ -780,7 +802,8 @@ Artifact LoadArtifact(const std::string& path) {
   }
   const uint64_t stored = [&] {
     uint64_t value = 0;
-    std::memcpy(&value, bytes.data() + bytes.size() - sizeof(value), sizeof(value));
+    std::memcpy(
+        &value, bytes.data() + bytes.size() - sizeof(value), sizeof(value));
     return value;
   }();
   if (Fnv(bytes.data(), bytes.size() - sizeof(stored)) != stored) {
@@ -795,11 +818,11 @@ Artifact LoadArtifact(const std::string& path) {
     Fail("unsupported SSD layout artifact");
   }
   Artifact artifact;
-  artifact.checksum   = stored;
-  artifact.strategy   = static_cast<Strategy>(ReadAt<uint32_t>(bytes, &offset));
-  artifact.page_size  = ReadAt<uint32_t>(bytes, &offset);
-  artifact.row_size   = ReadAt<uint32_t>(bytes, &offset);
-  const uint64_t key_count = ReadAt<uint64_t>(bytes, &offset);
+  artifact.checksum  = stored;
+  artifact.strategy  = static_cast<Strategy>(ReadAt<uint32_t>(bytes, &offset));
+  artifact.page_size = ReadAt<uint32_t>(bytes, &offset);
+  artifact.row_size  = ReadAt<uint32_t>(bytes, &offset);
+  const uint64_t key_count  = ReadAt<uint64_t>(bytes, &offset);
   const uint64_t page_count = ReadAt<uint64_t>(bytes, &offset);
   const uint64_t copy_count = ReadAt<uint64_t>(bytes, &offset);
   artifact.keys.reserve(key_count);
@@ -829,10 +852,13 @@ Artifact LoadArtifact(const std::string& path) {
     Fail("SSD layout artifact has trailing or mismatched records");
   }
   Rows rows;
-  rows.keys   = artifact.keys;
-  rows.copies = artifact.copies;
-  Artifact checked = Finish(artifact.strategy, artifact.page_size, artifact.row_size,
-                            std::move(rows));
+  rows.keys        = artifact.keys;
+  rows.copies      = artifact.copies;
+  Artifact checked = Finish(
+      artifact.strategy,
+      artifact.page_size,
+      artifact.row_size,
+      std::move(rows));
   if (checked.pages != artifact.pages) {
     Fail("SSD layout page index does not match key placement");
   }
@@ -840,17 +866,16 @@ Artifact LoadArtifact(const std::string& path) {
   return checked;
 }
 
-void CheckArtifact(const Artifact& artifact,
-                   Strategy expected,
-                   uint32_t expected_row_size) {
+void CheckArtifact(
+    const Artifact& artifact, Strategy expected, uint32_t expected_row_size) {
   if (artifact.strategy != expected || artifact.row_size != expected_row_size) {
     Fail("SSD layout strategy or row size mismatch");
   }
   Rows rows;
   rows.keys   = artifact.keys;
   rows.copies = artifact.copies;
-  const Artifact checked = Finish(expected, artifact.page_size, expected_row_size,
-                                  std::move(rows));
+  const Artifact checked =
+      Finish(expected, artifact.page_size, expected_row_size, std::move(rows));
   if (checked.pages != artifact.pages) {
     Fail("SSD layout page index does not match key placement");
   }

@@ -276,18 +276,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--optimization-cache-capacity",
         type=int,
         default=0,
-        help="GPU cache capacity (number of embedding rows) for plugins that use it.",
+        help="BagPipe GPU cache capacity in sets of 64 embedding rows.",
     )
     parser.add_argument(
         "--optimization-prescan",
         action="store_true",
         default=False,
         help=(
-            "BagPipe: pre-scan the configured training steps and precompute "
-            "collective layouts. Requires a repeatable batch sequence, one ID "
-            "per bag, and the complete working set to fit the GPU row limit. "
-            "Without it BagPipe uses dynamic prefetch and eviction."
+            "BagPipe: precompute CPU access plans for a repeatable training "
+            "sequence. GPU parameter storage remains bounded by cache capacity."
         ),
+    )
+    parser.add_argument(
+        "--bagpipe-aggregation", choices=["ps", "collective"], default="ps",
+        help="BagPipe sparse gradient aggregation: PS (phase 2) or trainer collective (phase 1).",
     )
     parser.add_argument("--master-addr", type=str, default="127.0.0.1")
     parser.add_argument("--master-port", type=int, default=29500)
@@ -614,6 +616,7 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
         cache_capacity=int(cfg_kwargs.pop("optimization_cache_capacity", 0)),
         embedding_dim=int(cfg_kwargs.get("embedding_dim", 128)),
         prescan=bool(cfg_kwargs.pop("optimization_prescan", False)),
+        aggregation=str(cfg_kwargs.pop("bagpipe_aggregation", "ps")),
     )
     cfg_kwargs["optimization"] = optimization
 

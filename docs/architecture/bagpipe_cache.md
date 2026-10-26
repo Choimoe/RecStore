@@ -1,97 +1,144 @@
-# BagPipe GPU cache ownership
+# BagPipe with PS-owned parameters
 
-BagPipe mode treats the C++ GPU cache as owned storage. The Python controller
-may plan prefetches, but it never assumes that a replace-style insert succeeded
-or that an invalidation removed a row.
+Default (online) and planned (prescan) execution share a bounded GPU cache
+controller. The PS owns embedding values and applies SGD each step; its
+DRAM/SSD tiers are configured independently of GPU cache capacity.
 
-## State ownership
+## Execution modes
 
-The C++ hash table is the residency authority. The Python flat tensors are a
-mirror that is updated only from authoritative C++ results:
+`--read-mode bagpipe` enables the runtime. `--optimization-prescan` builds
+CPU access plans before training; without it, ranks exchange batch IDs online.
+Both support two gradient aggregation modes:
 
-- `prefill_gpu_cache_no_evict` returns a per-key insert mask. Only true rows
-  are marked cached.
-- `gpu_cache_lookup_flat_no_evict` returns values and a post-fill residency
-  mask. Failed inserts remain uncached and are retried later.
-- `invalidate_gpu_cache_with_mask` returns a per-key removal mask. Only rows
-  reported as removed are cleared from the Python mirror.
-- `contains_gpu_cache` validates a policy all-hit decision immediately before
-  the lock-free `gpu_cache_lookup_flat_assuming_hits` path.
-- `get_gpu_cache_generation` changes whenever the C++ cache is reset. BagPipe
-  fails loudly if another component resets its owned cache.
+| Option | Aggregation | PS update |
+| --- | --- | --- |
+| `--bagpipe-aggregation collective` | All-reduce active-row gradients and divide by world size | One designated rank submits each row; PS commits after all rank markers |
+| `--bagpipe-aggregation ps` (default) | Send local unique-row gradients to their PS shard | PS sums in rank/chunk order, divides by world size, and applies SGD once |
 
-The mirror therefore has one writer protocol:
+Both modes use dense DDP collectives and ID metadata exchange. Prescan
+exchanges IDs once and retains plans in CPU memory; online mode exchanges
+IDs each batch.
 
-```text
-C++ no-evict insert success -> cached=true, TTL refresh
-C++ lookup fill success    -> cached=true, TTL refresh
-C++ removal success        -> cached=false, dirty=false, TTL=0
-C++ insert/removal failure -> previous state is retained
+Example additions to an existing RDMA training command:
+
+```sh
+--ps-type RDMA --read-mode bagpipe --optimization-prescan \
+  --optimization-cache-capacity 8192 --bagpipe-aggregation ps
 ```
 
-## Eviction
+The `rs_demo` launcher selects a local backend for single-node deployments,
+including commands with `--ps-type RDMA`.
 
-Only BagPipe evicts rows. C++ no-evict fills never replace a resident key.
-Python chooses expired or low-TTL candidates, reads dirty values for PS
-writeback, and invalidates them explicitly. Bookkeeping changes only for keys
-that the C++ removal mask confirms. If a no-evict fill fails because hash sets
-are saturated, the next cleanup retires a broader low-TTL slice and retries.
+## Memory and cache coherence
 
-This mirrors upstream BagPipe's `BagCache` invariant: insertion fills known
-empty storage, eviction is explicit, and the mapping and occupancy state change
-together. RecStore keeps the physical slots inside the C++ set-associative hash
-table, so the Python mirror is keyed by embedding ID rather than by local slot.
+`cache_capacity` is measured in units of 64 rows. Resident GPU value storage
+uses `cache_capacity * 64 * embedding_dim * 4` bytes. CPU LRU metadata maps
+keys to slots. The current batch and bounded prepared-batch queue use
+additional temporary tensors. Batches larger than the cache gather into their
+own tensors and admit only bounded rows. Prescan plans consume CPU memory
+proportional to the access trace.
 
-## Failure policy
+Admission returns the final source row for each destination slot, giving GPU
+scatters unique destinations even for oversized batches. Metadata operations
+are serialized with commit completion.
 
-BagPipe requires the authoritative APIs above. Missing APIs are configuration
-errors, not reasons to fall back to replace-style fills: a fallback could evict
-a key without updating the mirror. An external cache reset is also a hard error
-because dirty local updates cannot be reconstructed safely after the reset.
+After a PS commit, each rank updates cached rows accessed only by that rank
+using its local gradient divided by world size. Rows modified by another rank
+are invalidated and fetched on demand. Collective aggregation makes gradients
+available for all affected resident rows, which can then be updated locally.
+Eviction discards clean cache rows.
 
-## Prescanned execution
+Plans track each local row's previous global update step. Prefetch is issued
+only for rows whose preceding updates have committed; other misses wait until
+consumption.
+A forward waits for a pending commit when its rows depend on that step, allowing
+independent forward work to overlap PS submission. Each sparse update waits
+for its predecessor.
 
-BagPipe has one public plugin name, `bagpipe`. In the DLRM runner, enable
-precomputed collective layouts with:
+## RDMA submission
 
-```text
---read-mode bagpipe --optimization-prescan
-```
+Gradients are staged asynchronously into pinned CPU buffers. A native worker
+waits for producer-stream CUDA events before reading them and retains the
+source and staging buffers through submission. IDs in CPU plans avoid a GPU
+round trip.
 
-Without prescan, BagPipe uses the dynamic C++ cache described above. With
-prescan, it scans the configured training steps, loads the complete touched
-working set into a compact FP32 tensor on each rank, and communicates gradients
-using fixed per-step layouts. It retains every row until final writeback, so a
-rank's first use includes all preceding updates to that row. The internal
-resident controller shares the same plugin, read path, and sparse optimizer.
-No separate `bagpipe_planned` plugin is registered.
+The adapter packs gradients into bounded packets and submits chunks
+round-robin across shards. Multiple RC writes can precede ACK waits, bounded
+by QP/slot capacity. Every shard receives rank markers, including shards with
+zero rows in the step.
 
-The runner exchanges the prescanned fused IDs once and builds each step's
-global active-row layout and local index maps. Each step all-reduces FP32
-gradient values and applies their sum divided by world size, matching
-TorchRec/DDP global mean gradient semantics. The pending aggregate is applied
-before the next lookup, and the final update is drained before validation.
-There is no gradient compression or stale-read allowance. After successful
-training, all ranks align and rank 0 writes the authoritative values to the PS.
-Writeback errors propagate; error cleanup does not enter new collectives.
+GET windows and gradient submissions share RC slots. Before reusing slots,
+the adapter materializes outstanding prefetch results in CPU buffers while
+preserving their handles. Slot ownership is serialized within the adapter;
+GPU computation and PS aggregation remain asynchronous.
 
-Plans require an exactly repeatable batch sequence, fused tables, consistent
-feature order, and exactly one ID per feature per sample. Enqueue and lookup
-validate actual IDs and bag lengths, including changes that preserve unique-ID
-counts. A different shuffle or training schedule requires a new prescan. Each
-rank must issue one fused sparse optimizer update per step; empty optimizer
-traces and uneven rank termination are outside the runner's supported contract.
+## Module layout
 
-The full global working set must fit on **each** GPU, together with plan metadata
-and training tensors. The row limit is `cache_capacity * 64`, matching the C++
-cache's capacity unit. Capacity or schedule violations fail explicitly; they
-do not silently switch controllers. This resident working-set optimization does
-not replace eviction or dynamic cache coherence for out-of-core workloads.
+Paths below are relative to `src/`.
 
-CPU layout construction temporarily uses one PyTorch CPU thread because small
-per-batch sorts and searches suffer substantial thread-pool overhead. The
-previous thread budget is restored even if planning fails; training retains
-its original setting. Startup statistics separate metadata exchange, global
-unique construction, layout construction, PS loading, device copies, and
-rank-ready waiting. Report these startup costs, GPU memory use, and final PS
-writeback separately from steady training throughput.
+| Module | Responsibility |
+| --- | --- |
+| `optimization/bagpipe/cache_metadata.h` | `CacheMetadata`: batched LRU queries, admission, invalidation, and previous-update tracking using the C++ standard library |
+| `framework/op.{h,cc}` | Sparse commit submission/wait/close and cached updates/writes through `RecTensor`; cache clearing after successful table initialization or checkpoint restore |
+| `framework/common/sparse_gradient_commit_runtime.h` | Input readiness, asynchronous handles, committed-step polling, timeout, and peer abort |
+| `framework/cache/cache_aware_op.h` | Query/read-misses/fill/scatter sequence, low-hit bypass, fallback, and invalidation after transport completion |
+| `framework/cache/gpu_embedding_cache.{h,cu}` | GPU cache lifecycle, cross-stream ordering, generation, residency, and cache SGD; device-buffer API independent of Torch |
+| `framework/pytorch/cache/` | Tensor allocation, dtype/shape/device conversion, result wrapping, and cache/metadata bindings |
+| `framework/gpu/host_memory.cu` | Host-memory registration and stream-completion retention |
+
+`CacheMetadata` borrows input arrays for each call and returns vectors. Its
+PyTorch binding, `BagPipeCacheMetadata`, exchanges compact position and slot
+tensors with the Python controller, which handles planning, gathers, autograd,
+and communication scheduling.
+
+PyTorch adapters supply buffer operations to the common execution layer.
+`emb_read`, `local_lookup_flat`, and `gpu_cache_lookup_flat` share that layer.
+Adapters retain source/staging buffers through commit completion and borrowed
+local-read storage through H2D completion.
+
+GPU cache callers supply device pointers, sizes, a device ordinal, and a CUDA
+stream, retaining buffers until completion. Query waits for the miss count;
+hit-only reads and ordinary mutations enqueue work. Clear/disable wait before
+freeing cache storage. Explicit enable/disable/reset reset the calling thread's
+bypass state; internal clearing preserves it.
+
+Strict cache SGD sums duplicate gradients with CUDA/Thrust before updating
+each row once. A missing key causes invalidation of the requested keys and a
+`false` result. Best-effort SGD updates resident rows asynchronously and skips
+missing keys.
+
+Tests: `test_bagpipe_metadata`, `test_framework_op_runtime`, and
+`test_framework_gpu_cache`.
+
+## Sparse gradient commits
+
+`SparseGradientCommit` aggregates sparse gradients and commits ordered updates.
+Its header, client, and coordinator live in `src/ps/base/sparse_gradient_commit.h`.
+Python exposes `sparse_gradient_commit_async`, `sparse_gradient_commit_wait`,
+and `sparse_gradient_commit_close`. The asynchronous handle completes when
+all shards report the requested committed step.
+
+A session identifies one job on one fused table. Packets carry session, step,
+rank, world size, chunk index/count, dimension, and SGD learning rate. The PS
+acknowledges chunks immediately and applies the update once all ranks' chunks
+arrive. Clients observe the minimum committed step across shards. Empty-rank
+and all-empty-step markers advance the same protocol. Conflicting pending
+retries and out-of-order steps fail; committed-step retries do not repeat SGD.
+
+Backend errors can leave partial updates and fail the session. Recovery
+restores the job and PS from a consistent checkpoint. Rank loss produces an
+error or timeout. Successful shutdown drains pending work and closes every
+rank's session; failure cleanup uses no new distributed collective.
+
+## Requirements and metrics
+
+The runtime requires fused tables, FP32 gradients, constant-rate SGD with
+matching PS/client learning rates, fixed feature order, one ID per feature per
+sample, and one fused sparse update per step per rank. Empty ranks participate.
+Prescan requires the same ID sequence during training. Uneven rank termination,
+external writers, adaptive optimizers, and elastic recovery are unsupported.
+
+Metrics cover cache hits, demand/prefetch IDs, eviction/invalidation counts,
+resident bytes, skipped dependency waits, commit-wait time, and gradient
+payload bytes. Prescan startup and shutdown costs are recorded separately.
+Compare modes at the same cache capacity and include final commit time.

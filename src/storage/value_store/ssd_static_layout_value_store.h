@@ -20,17 +20,17 @@
 class SsdStaticLayoutValueStore : public ValueStore {
 public:
   struct Stats {
-    uint64_t logical_rows     = 0;
-    uint64_t physical_copies  = 0;
-    uint64_t page_reads       = 0;
-    uint64_t requested_rows   = 0;
-    uint64_t effective_rows   = 0;
-    uint64_t bytes_read       = 0;
+    uint64_t logical_rows    = 0;
+    uint64_t physical_copies = 0;
+    uint64_t page_reads      = 0;
+    uint64_t requested_rows  = 0;
+    uint64_t effective_rows  = 0;
+    uint64_t bytes_read      = 0;
   };
 
   explicit SsdStaticLayoutValueStore(const BaseKVConfig& config) {
-    const auto& value = config.json_config_.at("value");
-    const auto& layout = value.at("ssd_layout");
+    const auto& value               = config.json_config_.at("value");
+    const auto& layout              = value.at("ssd_layout");
     const std::string strategy_name = layout.at("strategy").get<std::string>();
     const auto strategy             = ssd_layout::ParseStrategy(strategy_name);
     if (strategy != ssd_layout::Strategy::kBandana &&
@@ -40,7 +40,8 @@ public:
     }
     const uint32_t row_size = static_cast<uint32_t>(
         value.at("default_value_size_hint").get<uint64_t>());
-    artifact_ = ssd_layout::LoadArtifact(layout.at("mapping_path").get<std::string>());
+    artifact_ =
+        ssd_layout::LoadArtifact(layout.at("mapping_path").get<std::string>());
     ssd_layout::CheckArtifact(artifact_, strategy, row_size);
     if (artifact_.page_size != PAGE_SIZE) {
       throw std::invalid_argument("SSD layout page size must equal PAGE_SIZE");
@@ -62,14 +63,15 @@ public:
     const uint64_t base_offset =
         io.value("base_offset_bytes", static_cast<uint64_t>(0));
     if (base_offset % PAGE_SIZE != 0) {
-      throw std::invalid_argument("SSD layout base offset must be page aligned");
+      throw std::invalid_argument(
+          "SSD layout base offset must be page aligned");
     }
-    page_id_offset_ = base_offset / PAGE_SIZE;
+    page_id_offset_         = base_offset / PAGE_SIZE;
     json["io_backend_type"] = io.value("type", "IOURING");
     json["file_path"]       = value.at("path").get<std::string>();
     json["queue_cnt"]       = io.value("queue_depth", 512);
     json["page_id_offset"]  = page_id_offset_;
-    using IOF = base::Factory<IOBackend, const BaseKVConfig&>;
+    using IOF               = base::Factory<IOBackend, const BaseKVConfig&>;
     io_backend_.reset(IOF::NewInstance(json.at("io_backend_type"), io_config));
     io_backend_->init();
   }
@@ -160,7 +162,8 @@ public:
                  std::vector<ReadResult>& out_results) override {
     out_results.resize(handles.size());
     std::vector<char> done(handles.size(), 1);
-    std::vector<const std::vector<ssd_layout::Location>*> copies(handles.size());
+    std::vector<const std::vector<ssd_layout::Location>*> copies(
+        handles.size());
     size_t remaining = 0;
     for (size_t i = 0; i < handles.size(); ++i) {
       if (handles[i] == kValueHandleNone) {
@@ -194,8 +197,8 @@ public:
           best_cover = item.second;
         }
       }
-      auto locked = LockPages({best_page}, false);
-      char* page  = ReadRawPage(best_page, true);
+      auto locked  = LockPages({best_page}, false);
+      char* page   = ReadRawPage(best_page, true);
       uint32_t hit = 0;
       for (size_t i = 0; i < done.size(); ++i) {
         if (done[i]) {
@@ -205,7 +208,8 @@ public:
           if (copy.page_id != best_page) {
             continue;
           }
-          std::memcpy(out_results[i].data.data(), page + copy.byte_offset,
+          std::memcpy(out_results[i].data.data(),
+                      page + copy.byte_offset,
                       artifact_.row_size);
           done[i] = 1;
           --remaining;
@@ -237,7 +241,8 @@ public:
     const double rows_per_page =
         snapshot.page_reads == 0
             ? 0.0
-            : static_cast<double>(snapshot.effective_rows) / snapshot.page_reads;
+            : static_cast<double>(snapshot.effective_rows) /
+                  snapshot.page_reads;
     std::ostringstream out;
     out << " layout_strategy=" << ssd_layout::StrategyName(artifact_.strategy)
         << " layout_logical_rows=" << snapshot.logical_rows
@@ -253,9 +258,9 @@ public:
 private:
   struct PageLock {
     std::vector<std::shared_mutex*> mutexes;
-    bool exclusive = false;
-    PageLock() = default;
-    PageLock(const PageLock&) = delete;
+    bool exclusive                       = false;
+    PageLock()                           = default;
+    PageLock(const PageLock&)            = delete;
     PageLock& operator=(const PageLock&) = delete;
     PageLock(PageLock&& other) noexcept : exclusive(other.exclusive) {
       mutexes.swap(other.mutexes);
@@ -335,7 +340,8 @@ private:
     io_backend_->FreeBuffer(page);
   }
 
-  void UpdatePage(const ssd_layout::Location& copy, const void* data, size_t size) {
+  void
+  UpdatePage(const ssd_layout::Location& copy, const void* data, size_t size) {
     char* page = ReadRawPage(copy.page_id, false);
     std::memcpy(page + copy.byte_offset, data, size);
     io_backend_->BatchWritePages({{copy.page_id + page_id_offset_, page, 1}});

@@ -9,6 +9,7 @@
 #include "base/json.h"
 #include "base/log.h"
 #include "base/tensor.h"
+#include "ps/base/sparse_gradient_commit.h"
 
 namespace recstore {
 struct EmbeddingTableConfig {
@@ -81,7 +82,7 @@ inline void ScatterEmbeddingRows(const base::RecTensor& src,
   }
 }
 
-class BasePSClient {
+class BasePSClient : public SparseGradientCommitClient {
   json json_config_;
 
 public:

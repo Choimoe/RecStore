@@ -1414,6 +1414,60 @@ int PetPSClient::SubmitUpdateParameterFlatGather(
       &slot, descriptor, slot.view.payload, payload_bytes, recv, 0, 0);
 }
 
+size_t PetPSClient::SparseGradientCommitPayloadLimit() const {
+  return PutPayloadBudget(FLAGS_rdma_rc_request_slot_bytes);
+}
+
+int64_t PetPSClient::ExchangeSparseGradientCommit(const std::string& table,
+                                                  const std::string& data) {
+  return WaitSparseGradientCommit(SubmitSparseGradientCommit(table, data));
+}
+
+int PetPSClient::SubmitSparseGradientCommit(const std::string& table,
+                                            const std::string& data) {
+  {
+    std::lock_guard<std::mutex> guard(mu_);
+    EnsureThreadInitializedLocked();
+    if (!RequestPayloadFitsSlot(data.size())) {
+      throw std::runtime_error("Sparse gradient commit exceeds RDMA slot");
+    }
+    const auto slot_handle = AcquireIdleSlot();
+    auto& slot = SlotAt(slot_handle.qp_index, slot_handle.slot_in_qp);
+    RequestDescriptor descriptor;
+    FillUpdateFlatDescriptor(
+        &descriptor, slot.next_seq++, 0, data.size(), 0, table, slot.view);
+    descriptor.op = static_cast<uint16_t>(RcOp::kSparseGradientCommit);
+    descriptor.response_bytes = sizeof(int64_t);
+    return SubmitRpcLocked(
+        &slot,
+        descriptor,
+        data.data(),
+        data.size(),
+        nullptr,
+        0,
+        sizeof(int64_t));
+  }
+}
+
+int64_t PetPSClient::WaitSparseGradientCommit(int rpc) {
+  try {
+    size_t bytes       = 0;
+    int32_t status     = 0;
+    const auto* result = BorrowGetResultPayload(rpc, nullptr, &bytes, &status);
+    if (status != static_cast<int32_t>(RpcStatus::kOk) ||
+        bytes != sizeof(int64_t)) {
+      throw std::runtime_error("RDMA sparse gradient commit failed");
+    }
+    int64_t committed;
+    std::memcpy(&committed, result, sizeof(committed));
+    RevokeRPCResource(rpc);
+    return committed;
+  } catch (...) {
+    RevokeRPCResource(rpc);
+    throw;
+  }
+}
+
 int PetPSClient::WaitUpdateParameter(int rpc_id) {
   if (rpc_id == 0) {
     return 0;

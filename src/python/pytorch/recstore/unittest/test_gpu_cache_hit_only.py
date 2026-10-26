@@ -204,6 +204,28 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
         after = self.client.get_gpu_cache_generation()
         self.assertGreater(after, before)
 
+    def test_strict_sgd_sums_duplicates_and_invalidates_on_miss(self) -> None:
+        ops = self.client.ops
+        keys = torch.tensor([5, 7], dtype=torch.int64, device="cuda")
+        initial = torch.full((2, 4), 10.0, device="cuda")
+        ops.prefill_gpu_cache(keys, initial)
+        repeated = keys[[0, 1, 0, 1, 0]]
+        grads = torch.arange(20, dtype=torch.float32, device="cuda").view(5, 4) / 7
+        summed = torch.zeros_like(initial)
+        summed.index_add_(0, torch.tensor([0, 1, 0, 1, 0], device="cuda"), grads)
+
+        self.assertTrue(ops.apply_sgd_update_gpu_cache(repeated, grads, 0.03))
+        actual, miss = ops.gpu_cache_lookup_flat_assuming_hits(keys, 4)
+        self.assertFalse(bool(miss.any()))
+        torch.testing.assert_close(actual, initial - summed * 0.03)
+
+        absent = torch.tensor([5, 999], dtype=torch.int64, device="cuda")
+        self.assertFalse(ops.apply_sgd_update_gpu_cache(absent, initial, 0.03))
+        self.assertEqual(ops.contains_gpu_cache(keys).tolist(), [False, True])
+        remaining, miss = ops.gpu_cache_lookup_flat_assuming_hits(keys[1:], 4)
+        self.assertFalse(bool(miss.any()))
+        torch.testing.assert_close(remaining, actual[1:])
+
     def test_invalidate_with_mask_reports_authoritative_removal(self) -> None:
         table_name = f"gpu_cache_invalidate_mask_{time.time_ns()}"
         self.client.init_data(
@@ -243,6 +265,28 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
         self.assertTrue(
             torch.equal(self.client.local_lookup_flat(table_name, keys), new_values)
         )
+
+    def test_read_entrypoints_share_fill_and_update_invalidation(self) -> None:
+        table = f"gpu_cache_common_op_{time.time_ns()}"
+        self.client.init_data(name=table, shape=(64, 4), dtype=torch.float32)
+        ids = torch.tensor([1, 3, 1], dtype=torch.int64, device="cuda")
+        encoded = self.client._normalize_ids(ids, preserve_device=True, name=table)
+        seed = torch.full((2, 4), 7.0, device="cuda")
+        for name in ("emb_read", "local_lookup_flat", "gpu_cache_lookup_flat"):
+            for update_on_cpu in (False, True):
+                with self.subTest(read=name, update_on_cpu=update_on_cpu):
+                    self.client.push(table, ids[:2].cpu(), seed.cpu())
+                    read = getattr(self.client.ops, name)
+                    before = read(encoded, 4)
+                    self.assertTrue(torch.equal(before, seed[[0, 1, 0]]))
+                    self.assertTrue(bool(self.client.ops.contains_gpu_cache(encoded).all()))
+                    update_ids = encoded[:2].cpu() if update_on_cpu else encoded[:2]
+                    grads = torch.ones((2, 4), device=update_ids.device)
+                    self.client.ops.emb_update_table(table, update_ids, grads)
+                    self.assertFalse(bool(self.client.ops.contains_gpu_cache(encoded).any()))
+                    after = read(encoded, 4)
+                    self.assertTrue(torch.allclose(after, before - 0.01))
+                    self.assertTrue(bool(self.client.ops.contains_gpu_cache(encoded).all()))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ import torch
 
 from ..optim.plugin import OptimizationPlugin
 
-from .controller import BagPipeCacheController
+from .planned import BagPipeCacheController
 from .optimizer import BagPipeSparseSGD
 
 
@@ -98,6 +98,7 @@ class BagPipePlugin(OptimizationPlugin):
         id_extractor: Callable[[Any], torch.Tensor] | None = None,
         enabled: bool = True,
         prescan: bool = False,
+        aggregation: str = "ps",
         **_: Any,
     ) -> "BagPipePlugin":
         """Create a BagPipePlugin.
@@ -108,8 +109,8 @@ class BagPipePlugin(OptimizationPlugin):
         Accepts ``**_`` to swallow extra kwargs from the registry (e.g.
         ``plugin_config``) that BagPipe does not use.
 
-        ``prescan=True`` selects the resident controller with precomputed
-        collective layouts. Its full working set must fit the row limit.
+        ``prescan=True`` precomputes CPU access plans. Both planning modes
+        use a bounded slot cache and commit SGD updates to the PS.
 
         ``cleanup_proportion`` (from :class:`OptimizationConfig`) and
         ``cleanup_batch_proportion`` (legacy name) are aliases; if both are
@@ -126,13 +127,11 @@ class BagPipePlugin(OptimizationPlugin):
         else:
             cleanup_batch = 0.25
 
-        controller_cls = BagPipeCacheController
-        if prescan:
-            from .planned import PlannedBagPipeController
-            controller_cls = PlannedBagPipeController
-        controller = controller_cls(
+        controller = BagPipeCacheController(
             embedding_module,
             kv_client,
+            prescan=prescan,
+            aggregation=aggregation,
             lookahead_value=lookahead,
             cleanup_batch_proportion=cleanup_batch,
             cache_capacity=cache_capacity,
@@ -198,8 +197,8 @@ class BagPipePlugin(OptimizationPlugin):
     ) -> None:
         """Consume hook: prefill GPU cache from the pre-issued prefetch.
 
-        Called just before the forward pass.  ``wait_and_get`` is
-        near-instant because the PS had ``lookahead`` steps to respond.
+        Called just before the forward pass.  Safe prefetches may already be ready; dependent misses wait for PS
+        commits before fetching.
         """
         if self._controller is not None:
             self._controller.prefill_cache(sparse_features, device)
@@ -208,9 +207,8 @@ class BagPipePlugin(OptimizationPlugin):
         """Record a batch's IDs before training.
 
         Call once per batch during a pre-training pass over the dataset, then
-        :meth:`finalize_prescan` once at the end. The resident controller builds
-        per-step collective layouts; the dynamic controller builds its oracle
-        shared-ID set. No-op when the plugin is disabled.
+        :meth:`finalize_prescan` once at the end. The controller builds
+        CPU access/dependency plans for the same bounded cache runtime. No-op when the plugin is disabled.
         """
         if self._controller is not None:
             self._controller.prescan_batch(batch_num, sparse_features)
@@ -259,7 +257,7 @@ class BagPipePlugin(OptimizationPlugin):
             row.update(self._controller.consume_stats(reset=True))
 
     def shutdown(self) -> None:
-        """Wait for async work and stop the background cleanup thread."""
+        """Drain pending PS commits and release prefetch/session resources."""
         if self._controller is not None:
             self._controller.shutdown()
 

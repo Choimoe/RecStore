@@ -1,4 +1,5 @@
 #include "framework/op.h"
+#include "framework/common/op_profile.h"
 
 #ifndef USE_FAKE_KVCLIENT
 
@@ -8,6 +9,45 @@
 #  include <stdexcept>
 
 namespace recstore {
+
+void KVClientOp::RequireLocalBackend() const {
+  if (ps_backend_name_ != "local_shm" && !IsHierKVBackendName(ps_backend_name_))
+    throw std::runtime_error(
+        "Local flat ops require local_shm or hierkv backend, got " +
+        ps_backend_name_);
+}
+
+std::shared_ptr<base::RecTensor> KVClientOp::AcquireLocalLookupFlat(
+    const base::RecTensor& keys, int64_t embedding_dim) {
+  using namespace framework;
+  RequireLocalBackend();
+  auto handle = std::make_unique<LocalShmFlatGetHandle>();
+  auto start  = SteadyNow();
+  if (SubmitLocalLookupFlat(keys, embedding_dim, handle.get()) != 0)
+    throw std::runtime_error("Failed to submit local_shm flat lookup");
+  g_last_local_lookup_flat_profile[kLookupSubmitMs] = ElapsedMs(start);
+  // The lease releases the transport slot on every success/error path.
+  auto lease = std::shared_ptr<LocalShmFlatGetHandle>(
+      handle.release(),
+      [client = ps_client_, backend = ps_backend_name_](auto* h) {
+        ReleaseLocalShmLookupFlat(client, backend, h);
+        delete h;
+      });
+  start = SteadyNow();
+  if (WaitLocalLookupFlat(lease.get()) != 0)
+    throw std::runtime_error("Failed to wait for local_shm flat lookup");
+  g_last_local_lookup_flat_profile[kLookupWaitMs] = ElapsedMs(start);
+  const int64_t rows                              = keys.shape(0);
+  if (!lease->values || lease->num_rows != rows ||
+      lease->embedding_dim != embedding_dim ||
+      lease->output_bytes != rows * embedding_dim * sizeof(float))
+    throw std::runtime_error(
+        "Unexpected local_shm flat lookup payload metadata");
+  return std::shared_ptr<base::RecTensor>(
+      new base::RecTensor(
+          const_cast<float*>(lease->values), {rows, embedding_dim}),
+      [lease](auto* values) { delete values; });
+}
 
 void KVClientOp::LocalLookupFlat(const base::RecTensor& keys,
                                  base::RecTensor& values) {

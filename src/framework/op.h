@@ -2,6 +2,8 @@
 
 #include "base/tensor.h"
 #include "framework/common/op_runtime_support.h"
+#include "framework/cache/cache_aware_op.h"
+#include "framework/common/sparse_gradient_commit_runtime.h"
 #include "ps/base/base_client.h"
 #include <cstddef>
 #include <memory>
@@ -129,10 +131,39 @@ public:
   void EmbUpdate(const std::string& table_name,
                  const base::RecTensor& keys,
                  const base::RecTensor& grads) override;
+  int64_t SparseGradientCommit(const std::string& table,
+                               SparseGradientCommitHeader header,
+                               const base::RecTensor& keys,
+                               const base::RecTensor& grads);
+  int64_t SparseGradientCommitAsync(
+      const std::string& table,
+      SparseGradientCommitHeader header,
+      const base::RecTensor& keys,
+      const base::RecTensor& grads,
+      std::function<void()> ready);
+  void WaitSparseGradientCommit(int64_t id);
+  void CloseSparseGradientCommit(const std::string& table,
+                                 SparseGradientCommitHeader header);
   uint64_t EmbUpdateAsync(const std::string& table_name,
                           const base::RecTensor& keys,
-                          const base::RecTensor& grads);
+                          const base::RecTensor& grads,
+                          framework::CacheUpdateActions cache = {});
   void WaitForEmbUpdate(uint64_t update_id);
+  void EmbUpdateCached(const std::string& table,
+                       const base::RecTensor& keys,
+                       const base::RecTensor& grads,
+                       const framework::CacheUpdateActions& cache,
+                       bool local = false);
+  void EmbWriteCached(const base::RecTensor& keys,
+                      const base::RecTensor& values,
+                      const framework::CacheUpdateActions& cache,
+                      bool per_key = false);
+  int InitEmbeddingTableCached(const std::string& table_name,
+                               const EmbeddingTableConfig& config,
+                               const framework::CacheUpdateActions& cache);
+  bool LoadCheckpointCached(const std::string& path,
+                            const std::string& metadata,
+                            const framework::CacheUpdateActions& cache);
   int InitEmbeddingTable(const std::string& table_name,
                          const EmbeddingTableConfig& config) override;
   bool EmbExists(const base::RecTensor& keys) override;
@@ -155,7 +186,13 @@ public:
   void SetPSConfig(const std::string& host, int port);
   void SetPSBackend(const std::string& backend);
   std::string CurrentPSBackend() const;
+  void RequireLocalBackend() const;
+  bool SupportsBorrowedLocalLookup() const {
+    return ps_backend_name_ == "local_shm";
+  }
   void LocalLookupFlat(const base::RecTensor& keys, base::RecTensor& values);
+  std::shared_ptr<base::RecTensor>
+  AcquireLocalLookupFlat(const base::RecTensor& keys, int64_t embedding_dim);
   int SubmitLocalLookupFlat(const base::RecTensor& keys,
                             int64_t embedding_dim,
                             LocalShmFlatGetHandle* handle);
@@ -167,6 +204,8 @@ public:
                        const base::RecTensor& grads);
 
 private:
+  SparseGradientCommitRuntime sparse_commits_;
+  framework::PendingCacheUpdates pending_updates_;
   int64_t embedding_dim_;
   std::string ps_backend_name_ = "unknown";
   static BasePSClient* ps_client_;

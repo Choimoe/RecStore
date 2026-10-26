@@ -1029,7 +1029,7 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertGreaterEqual(fake_sparse_optimizer.zero_grad_calls, 2)
         self.assertEqual(fake_ebc.reset_perf_stats_calls, 1)
 
-    def test_bagpipe_mode_enables_gpu_cache_and_keeps_plugin_optimizer(self) -> None:
+    def test_bagpipe_mode_uses_bounded_controller_and_keeps_plugin_optimizer(self) -> None:
         cfg = config.parse_config(
             [
                 "--backend",
@@ -1089,6 +1089,8 @@ class TestRecStoreRunner(unittest.TestCase):
             self.assertEqual(plugin_name, "bagpipe")
             created_kwargs.update(kwargs)
             plugin = _FakeBagPipePlugin()
+            plugin._controller = mock.Mock()
+            plugin._controller.lookup.side_effect = kwargs["embedding_module"]
             plugins.append(plugin)
             return plugin
 
@@ -1104,23 +1106,27 @@ class TestRecStoreRunner(unittest.TestCase):
             )
 
         client = fake_ebc.kv_client
-        self.assertEqual(client.enable_gpu_cache_calls, [(32, 4)])
-        self.assertTrue(client.gpu_cache_enabled)
+        self.assertEqual(client.enable_gpu_cache_calls, [])
+        self.assertFalse(client.gpu_cache_enabled)
         self.assertFalse(client.gpu_cache_lookup_bypass_enabled)
         self.assertEqual(created_kwargs["master_table_name"], "t_cat_0")
         self.assertEqual(created_kwargs["cache_capacity"], 32)
         self.assertFalse(created_kwargs["prescan"])
+        self.assertEqual(created_kwargs["aggregation"], "ps")
         self.assertEqual(len(plugins), 1)
         self.assertIs(_FakeSparseSGD.last_instance, plugins[0].optimizer)
         self.assertEqual(plugins[0].optimizer.step_calls, 1)
         self.assertEqual(plugins[0].optimizer.flush_calls, 1)
         self.assertEqual(plugins[0].shutdown_calls, 1)
+        plugins[0]._controller.lookup.assert_called_once()
+        plugins[0]._controller._wait_pending.assert_called_once_with()
 
     def test_bagpipe_prescan_runs_full_schedule_and_planned_lifecycle(self) -> None:
         cfg = config.parse_config([
             "--backend", "recstore", "--steps", "5", "--warmup-steps", "0",
             "--batch-size", "1", "--embedding-dim", "4", "--num-embeddings", "16",
             "--read-mode", "bagpipe", "--optimization-prescan",
+            "--bagpipe-aggregation", "collective",
         ])
         for fail_lookup in (False, True):
             with self.subTest(fail_lookup=fail_lookup):
@@ -1151,6 +1157,7 @@ class TestRecStoreRunner(unittest.TestCase):
 
                 self.assertEqual(create.call_args.args, ("bagpipe",))
                 self.assertTrue(create.call_args.kwargs["prescan"])
+                self.assertEqual(create.call_args.kwargs["aggregation"], "collective")
                 client = create.call_args.kwargs["kv_client"]
                 self.assertEqual(client.enable_gpu_cache_calls, [])
                 self.assertEqual([c.args[0] for c in plugin.prescan_batch.call_args_list], list(range(5)))
