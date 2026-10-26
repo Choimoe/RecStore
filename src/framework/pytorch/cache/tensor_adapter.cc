@@ -158,7 +158,8 @@ std::tuple<torch::Tensor, torch::Tensor> CachedReadTorch(
       torch_cache::FillGpuCache(miss_keys, miss_values);
   };
   io.scatter = [&] {
-    torch_cache::ScatterMissValues(&output, cached.missing_positions_cpu, miss_values);
+    torch_cache::ScatterMissValues(
+        &output, cached.missing_positions_cpu, miss_values);
     if (no_evict)
       resident.index_put_(
           {cached.missing_positions_cpu.to(keys.device())}, inserted);

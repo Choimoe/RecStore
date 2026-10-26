@@ -127,9 +127,8 @@ public:
     return AllocAndWrite(data, size);
   }
 
-  virtual std::vector<uint64_t>
-  BatchAllocAndWrite(const std::vector<uint64_t>& keys,
-                     const std::vector<WriteSpec>& specs) {
+  virtual std::vector<uint64_t> BatchAllocAndWrite(
+      const std::vector<uint64_t>& keys, const std::vector<WriteSpec>& specs) {
     if (keys.size() != specs.size()) {
       throw std::invalid_argument("BatchAllocAndWrite size mismatch");
     }

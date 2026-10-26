@@ -388,14 +388,15 @@ BaseKVConfig BuildConfig() {
           {"base_offset_bytes", 4096}}}};
     config.json_config_["value"]["tiering"] = {{"cache_policy", "LRU"}};
   }
-  if (!FLAGS_ssd_layout_strategy.empty() && FLAGS_ssd_layout_strategy != "plain") {
+  if (!FLAGS_ssd_layout_strategy.empty() &&
+      FLAGS_ssd_layout_strategy != "plain") {
     if (FLAGS_ssd_layout_mapping.empty()) {
       throw std::invalid_argument("ssd_layout_mapping is required");
     }
     if (FLAGS_value_store_type != "TIERED_VALUE_STORE") {
       config.json_config_["value"]["type"] = "SSD_STATIC_LAYOUT_VALUE_STORE";
       config.json_config_["value"]["path"] = FLAGS_ssd_path + "/value.db";
-      config.json_config_["value"]["io"] = {
+      config.json_config_["value"]["io"]   = {
           {"type", FLAGS_ssd_io_backend},
           {"queue_depth", FLAGS_ssd_queue_depth},
           {"base_offset_bytes", 0}};
@@ -587,12 +588,11 @@ void ReplayQueryLog(BaseKV* kv) {
     rows += keys.size();
   }
   const double seconds = SecondsSince(begin, std::chrono::steady_clock::now());
-  std::printf(
-      "LAYOUT_RESULT queries=%lu rows=%lu seconds=%.6f%s\n",
-      queries,
-      rows,
-      seconds,
-      kv->ExtraResultFields().c_str());
+  std::printf("LAYOUT_RESULT queries=%lu rows=%lu seconds=%.6f%s\n",
+              queries,
+              rows,
+              seconds,
+              kv->ExtraResultFields().c_str());
 }
 
 } // namespace
@@ -622,8 +622,8 @@ int RunBenchmark(int argc, char* argv[]) {
     LOG(FATAL) << "ssd_path must be set for SSD/TIERED value store";
   }
   if (!IsLegacyDirectEngine(FLAGS_engine_class) &&
-      !FLAGS_ssd_layout_strategy.empty() && FLAGS_ssd_layout_strategy != "plain" &&
-      FLAGS_ssd_path.empty()) {
+      !FLAGS_ssd_layout_strategy.empty() &&
+      FLAGS_ssd_layout_strategy != "plain" && FLAGS_ssd_path.empty()) {
     LOG(FATAL) << "ssd_path must be set for a static SSD layout";
   }
   if (!IsLegacyDirectEngine(FLAGS_engine_class) &&

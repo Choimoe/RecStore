@@ -162,8 +162,8 @@ public:
                                const EmbeddingTableConfig& config,
                                const framework::CacheUpdateActions& cache);
   bool LoadCheckpointCached(const std::string& path,
-                             const std::string& metadata,
-                             const framework::CacheUpdateActions& cache);
+                            const std::string& metadata,
+                            const framework::CacheUpdateActions& cache);
   int InitEmbeddingTable(const std::string& table_name,
                          const EmbeddingTableConfig& config) override;
   bool EmbExists(const base::RecTensor& keys) override;

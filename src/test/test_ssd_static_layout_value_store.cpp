@@ -31,7 +31,8 @@ class CountingIOBackend : public IOBackend {
 public:
   explicit CountingIOBackend(const BaseKVConfig& config) : IOBackend(config) {}
   void init() override {}
-  void* GetPage(coroutine<void>::push_type&, uint64_t, PageID_t page_id) override {
+  void*
+  GetPage(coroutine<void>::push_type&, uint64_t, PageID_t page_id) override {
     return GetPage(page_id);
   }
   void* GetPage(PageID_t page_id) override {
@@ -39,7 +40,10 @@ public:
     ReadPageSync(page_id, page);
     return page;
   }
-  void Unpin(coroutine<void>::push_type&, uint64_t, PageID_t page_id, void* page,
+  void Unpin(coroutine<void>::push_type&,
+             uint64_t,
+             PageID_t page_id,
+             void* page,
              bool dirty) override {
     Unpin(page_id, page, dirty);
   }
@@ -62,7 +66,9 @@ public:
   }
 
 protected:
-  void ReadPageAsync(coroutine<void>::push_type&, uint64_t, PageID_t page_id,
+  void ReadPageAsync(coroutine<void>::push_type&,
+                     uint64_t,
+                     PageID_t page_id,
                      char* buffer) override {
     ReadPageSync(page_id, buffer);
   }
@@ -74,7 +80,9 @@ protected:
     }
     std::memcpy(buffer, found->second.data(), PAGE_SIZE);
   }
-  void WritePageAsync(coroutine<void>::push_type&, uint64_t, PageID_t page_id,
+  void WritePageAsync(coroutine<void>::push_type&,
+                      uint64_t,
+                      PageID_t page_id,
                       char* buffer) override {
     WritePageSync(page_id, buffer);
   }
@@ -111,8 +119,10 @@ protected:
     return path;
   }
 
-  BaseKVConfig Config(const std::filesystem::path& mapping, const char* strategy,
-                      const char* value_type = "SSD_STATIC_LAYOUT_VALUE_STORE") {
+  BaseKVConfig
+  Config(const std::filesystem::path& mapping,
+         const char* strategy,
+         const char* value_type = "SSD_STATIC_LAYOUT_VALUE_STORE") {
     BaseKVConfig config;
     config.num_threads_ = 2;
     config.json_config_ = {
@@ -123,10 +133,12 @@ protected:
          {{"type", value_type},
           {"path", (root_ / "value.db").string()},
           {"default_value_size_hint", 4},
-          {"io", {{"type", "INMEMORY"}, {"queue_depth", 4}, {"base_offset_bytes", 0}}},
+          {"io",
+           {{"type", "INMEMORY"},
+            {"queue_depth", 4},
+            {"base_offset_bytes", 0}}},
           {"ssd_layout",
-           {{"strategy", strategy},
-            {"mapping_path", mapping.string()}}}}}};
+           {{"strategy", strategy}, {"mapping_path", mapping.string()}}}}}};
     return config;
   }
 
@@ -135,16 +147,17 @@ protected:
 
 ssd_layout::Artifact Bandana() {
   ssd_layout::Artifact artifact;
-  artifact.strategy   = ssd_layout::Strategy::kBandana;
-  artifact.page_size  = 4096;
-  artifact.row_size   = 4;
-  artifact.keys       = {0, 1, 2, 3, 4, 5};
-  artifact.copies     = {{{0, 0}}, {{0, 4}}, {{0, 8}}, {{1, 0}}, {{1, 4}}, {{1, 8}}};
+  artifact.strategy  = ssd_layout::Strategy::kBandana;
+  artifact.page_size = 4096;
+  artifact.row_size  = 4;
+  artifact.keys      = {0, 1, 2, 3, 4, 5};
+  artifact.copies    = {
+      {{0, 0}}, {{0, 4}}, {{0, 8}}, {{1, 0}}, {{1, 4}}, {{1, 8}}};
   return artifact;
 }
 
 ssd_layout::Artifact MaxEmbed() {
-  auto artifact   = Bandana();
+  auto artifact     = Bandana();
   artifact.strategy = ssd_layout::Strategy::kMaxEmbed;
   for (uint32_t slot = 0; slot < artifact.keys.size(); ++slot) {
     artifact.copies[slot].push_back({2, slot * 4});
@@ -155,7 +168,7 @@ ssd_layout::Artifact MaxEmbed() {
 TEST_F(StaticLayoutValueTest, KeyHandleRoundTripAndFixedPlacement) {
   auto store = std::make_unique<SsdStaticLayoutValueStore>(
       Config(Save(Bandana()), "bandana"));
-  const char zero[] = {'z', 'e', 'r', 'o'};
+  const char zero[]                = {'z', 'e', 'r', 'o'};
   const char max_key_is_separate[] = {'n', 'o', 'p', 'e'};
   store->Write(1, zero, 4);
   std::string out(4, '\0');
@@ -172,12 +185,13 @@ TEST_F(StaticLayoutValueTest, KeyHandleRoundTripAndFixedPlacement) {
                std::invalid_argument);
 
   ssd_layout::Artifact wide = Bandana();
-  wide.keys = {ssd_layout::kMaxKey};
-  wide.copies = {{{0, 0}}};
-  auto max_store = std::make_unique<SsdStaticLayoutValueStore>(
+  wide.keys                 = {ssd_layout::kMaxKey};
+  wide.copies               = {{{0, 0}}};
+  auto max_store            = std::make_unique<SsdStaticLayoutValueStore>(
       Config(Save(wide), "bandana"));
   max_store->Write(ssd_layout::kMaxKey + 1, zero, 4);
-  EXPECT_EQ(max_store->Read(ssd_layout::kMaxKey + 1, out.data(), out.size()), 4U);
+  EXPECT_EQ(max_store->Read(ssd_layout::kMaxKey + 1, out.data(), out.size()),
+            4U);
 }
 
 TEST_F(StaticLayoutValueTest, BatchReadUsesFewerPagesThanPlain) {
@@ -191,7 +205,10 @@ TEST_F(StaticLayoutValueTest, BatchReadUsesFewerPagesThanPlain) {
          {{"type", "SSD_SLAB"},
           {"capacity_bytes", 64ULL << 20},
           {"size_classes", {128}},
-          {"io", {{"type", "INMEMORY"}, {"queue_depth", 4}, {"base_offset_bytes", 0}}}}}}}};
+          {"io",
+           {{"type", "INMEMORY"},
+            {"queue_depth", 4},
+            {"base_offset_bytes", 0}}}}}}}};
   SsdValueStore plain(plain_config);
   std::vector<uint64_t> plain_handles;
   for (int i = 0; i < 6; ++i) {
@@ -238,7 +255,7 @@ TEST_F(StaticLayoutValueTest, BatchReadUsesFewerPagesThanPlain) {
 }
 
 TEST_F(StaticLayoutValueTest, HybridWatermarkAndReplicaUpdate) {
-  auto mapping = Save(MaxEmbed());
+  auto mapping        = Save(MaxEmbed());
   BaseKVConfig config = Config(mapping, "maxembed", "TIERED_VALUE_STORE");
   config.json_config_["value"]["dram_allocator"] = {
       {"type", "PERSIST_LOOP_SLAB"},
@@ -264,7 +281,8 @@ TEST_F(StaticLayoutValueTest, HybridWatermarkAndReplicaUpdate) {
   std::vector<base::ConstArray<float>> values;
   engine.BatchGet(base::ConstArray<uint64_t>(keys), &values, 0);
   ASSERT_EQ(values.size(), keys.size());
-  EXPECT_EQ(std::string(reinterpret_cast<const char*>(values[2].Data()), 4), updated);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(values[2].Data()), 4),
+            updated);
 
   config.json_config_["value"]["tiering"] = {
       {"high_watermark_ratio", 4.0 / static_cast<double>(1 << 20)}};
@@ -350,7 +368,8 @@ TEST_F(StaticLayoutValueTest, ConcurrentPageUpdatesDoNotTear) {
     threads.emplace_back([&, thread] {
       const std::string value(4, static_cast<char>('A' + thread));
       for (int i = 0; i < 100; ++i) {
-        store->Write(static_cast<uint64_t>(thread + 1), value.data(), value.size());
+        store->Write(
+            static_cast<uint64_t>(thread + 1), value.data(), value.size());
       }
     });
   }
@@ -367,12 +386,12 @@ TEST_F(StaticLayoutValueTest, ConcurrentPageUpdatesDoNotTear) {
 
 void WriteLegacyCheckpoint(const std::filesystem::path& path,
                            const std::string& metadata) {
-  const char magic[] = {'R', 'S', 'K', 'V', 'C', 'P', '0', '1'};
-  const uint32_t version = 2;
+  const char magic[]           = {'R', 'S', 'K', 'V', 'C', 'P', '0', '1'};
+  const uint32_t version       = 2;
   const uint64_t metadata_size = metadata.size();
-  const uint64_t record_count = 0;
-  uint64_t checksum = 0x9e3779b97f4a7c15ULL;
-  auto mix = [&](const void* data, size_t size) {
+  const uint64_t record_count  = 0;
+  uint64_t checksum            = 0x9e3779b97f4a7c15ULL;
+  auto mix                     = [&](const void* data, size_t size) {
     if (size != 0) {
       checksum = xxhash(data, size, checksum);
     }
@@ -385,21 +404,25 @@ void WriteLegacyCheckpoint(const std::filesystem::path& path,
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
   output.write(magic, sizeof(magic));
   output.write(reinterpret_cast<const char*>(&version), sizeof(version));
-  output.write(reinterpret_cast<const char*>(&metadata_size), sizeof(metadata_size));
-  output.write(reinterpret_cast<const char*>(&record_count), sizeof(record_count));
+  output.write(reinterpret_cast<const char*>(&metadata_size),
+               sizeof(metadata_size));
+  output.write(reinterpret_cast<const char*>(&record_count),
+               sizeof(record_count));
   output.write(metadata.data(), metadata.size());
   output.write(reinterpret_cast<const char*>(&checksum), sizeof(checksum));
 }
 
 TEST_F(StaticLayoutValueTest, CheckpointIdentityRoundTripAndMismatch) {
   const std::string metadata = "layout-v3";
-  const auto checkpoint = root_ / "layout.ckpt";
-  auto source = std::make_unique<KVEngineComposite>(Config(Save(Bandana()), "bandana"));
+  const auto checkpoint      = root_ / "layout.ckpt";
+  auto source =
+      std::make_unique<KVEngineComposite>(Config(Save(Bandana()), "bandana"));
   source->Put(0, std::string("abcd"), 0);
   source->Put(5, std::string("wxyz"), 0);
   ASSERT_TRUE(source->SaveCheckpoint(checkpoint.string(), metadata));
 
-  auto restored = std::make_unique<KVEngineComposite>(Config(Save(Bandana()), "bandana"));
+  auto restored =
+      std::make_unique<KVEngineComposite>(Config(Save(Bandana()), "bandana"));
   ASSERT_TRUE(restored->LoadCheckpoint(checkpoint.string(), metadata));
   std::string actual;
   restored->Get(0, actual, 0);
@@ -407,8 +430,8 @@ TEST_F(StaticLayoutValueTest, CheckpointIdentityRoundTripAndMismatch) {
   restored->Get(5, actual, 0);
   EXPECT_EQ(actual, "wxyz");
 
-  auto mismatched = std::make_unique<KVEngineComposite>(
-      Config(Save(MaxEmbed()), "maxembed"));
+  auto mismatched =
+      std::make_unique<KVEngineComposite>(Config(Save(MaxEmbed()), "maxembed"));
   EXPECT_FALSE(mismatched->LoadCheckpoint(checkpoint.string(), metadata));
   mismatched->Get(0, actual, 0);
   EXPECT_TRUE(actual.empty());
@@ -429,7 +452,8 @@ TEST_F(StaticLayoutValueTest, CheckpointIdentityRoundTripAndMismatch) {
          {{"type", "PERSIST_LOOP_SLAB"}, {"capacity_bytes", 1 << 20}}}}}};
   KVEngineComposite plain(dram);
   EXPECT_TRUE(plain.LoadCheckpoint(legacy.string(), metadata));
-  auto rejected = std::make_unique<KVEngineComposite>(Config(Save(Bandana()), "bandana"));
+  auto rejected =
+      std::make_unique<KVEngineComposite>(Config(Save(Bandana()), "bandana"));
   EXPECT_FALSE(rejected->LoadCheckpoint(legacy.string(), metadata));
   rejected->Get(0, actual, 0);
   EXPECT_TRUE(actual.empty());

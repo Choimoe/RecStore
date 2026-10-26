@@ -143,7 +143,8 @@ public:
       batch_keys.push_back(item.key);
       specs.push_back(item.spec);
     }
-    const auto new_handles = value_store_->BatchAllocAndWrite(batch_keys, specs);
+    const auto new_handles =
+        value_store_->BatchAllocAndWrite(batch_keys, specs);
     if (new_handles.size() != items.size()) {
       LOG(FATAL) << "KVEngine::BatchPut allocation result size mismatch";
     }

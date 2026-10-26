@@ -96,7 +96,8 @@ bool load_checkpoint_torch(const std::string& path,
                            const std::string& metadata) {
   TORCH_CHECK(!path.empty(), "checkpoint path must be non-empty");
   TORCH_CHECK(!metadata.empty(), "checkpoint metadata must be non-empty");
-  return GetConcreteKVClientOp()->LoadCheckpointCached(path, metadata, CacheActions());
+  return GetConcreteKVClientOp()->LoadCheckpointCached(
+      path, metadata, CacheActions());
 }
 
 void emb_write_torch(const torch::Tensor& keys, const torch::Tensor& values) {

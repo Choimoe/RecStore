@@ -75,7 +75,8 @@ void CheckRows(const torch::Tensor& keys,
                bool contiguous = true);
 std::pair<torch::Tensor, torch::Tensor>
 CudaCacheRows(const torch::Tensor& keys, const torch::Tensor& values);
-CacheUpdateActions CacheActions(const torch::Tensor& keys = {}, int64_t dim = 0);
+CacheUpdateActions
+CacheActions(const torch::Tensor& keys = {}, int64_t dim = 0);
 std::tuple<torch::Tensor, torch::Tensor> CachedReadTorch(
     const torch::Tensor& keys,
     int64_t dim,

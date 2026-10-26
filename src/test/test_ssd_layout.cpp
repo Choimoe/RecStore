@@ -28,16 +28,16 @@ protected:
   void TearDown() override { std::filesystem::remove_all(root_); }
 
   ssd_layout::Hypergraph WriteLogs() {
-    text_ = root_ / "query.txt";
+    text_   = root_ / "query.txt";
     binary_ = root_ / "query.bin";
     std::ofstream text(text_);
     text << "0 4 3 6\n0 1\n2 3\n1 2\n";
     text.close();
 
-    const uint64_t queries = 3;
+    const uint64_t queries  = 3;
     const uint64_t vertices = 4;
-    const uint64_t index[] = {0, 2, 4, 6};
-    const uint32_t pins[] = {0, 1, 2, 3, 1, 2};
+    const uint64_t index[]  = {0, 2, 4, 6};
+    const uint32_t pins[]   = {0, 1, 2, 3, 1, 2};
     std::ofstream binary(binary_, std::ios::binary);
     binary.write(reinterpret_cast<const char*>(&queries), sizeof(queries));
     binary.write(reinterpret_cast<const char*>(&vertices), sizeof(vertices));
@@ -54,7 +54,7 @@ protected:
 
 TEST_F(LayoutTest, TextAndBinaryLogsMatch) {
   WriteLogs();
-  const auto text = ssd_layout::ReadQueryLog(text_.string(), false);
+  const auto text   = ssd_layout::ReadQueryLog(text_.string(), false);
   const auto binary = ssd_layout::ReadQueryLog(binary_.string(), true);
   EXPECT_EQ(text.vertex_count, binary.vertex_count);
   EXPECT_EQ(text.xpins, binary.xpins);
@@ -97,9 +97,9 @@ TEST_F(LayoutTest, RejectsQueryCountsOutsideUint32Range) {
 }
 
 TEST_F(LayoutTest, PartitionIsDeterministicAndBounded) {
-  const auto graph = WriteLogs();
-  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
-  const auto first = ssd_layout::Partition(graph, keys, 4096, 2048);
+  const auto graph  = WriteLogs();
+  const auto keys   = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto first  = ssd_layout::Partition(graph, keys, 4096, 2048);
   const auto second = ssd_layout::Partition(graph, keys, 4096, 2048);
   ASSERT_EQ(first.keys.size(), 4U);
   EXPECT_EQ(first.keys, second.keys);
@@ -118,8 +118,9 @@ TEST_F(LayoutTest, PartitionIsDeterministicAndBounded) {
   EXPECT_NE(loaded.checksum, 0U);
   EXPECT_EQ(loaded.keys, first.keys);
   EXPECT_EQ(loaded.copies, first.copies);
-  EXPECT_THROW(ssd_layout::CheckArtifact(loaded, ssd_layout::Strategy::kMaxEmbed, 2048),
-               std::invalid_argument);
+  EXPECT_THROW(
+      ssd_layout::CheckArtifact(loaded, ssd_layout::Strategy::kMaxEmbed, 2048),
+      std::invalid_argument);
 }
 
 TEST_F(LayoutTest, PartitionScalesWithCurrentSubgraph) {
@@ -147,27 +148,31 @@ TEST_F(LayoutTest, PartitionScalesWithCurrentSubgraph) {
 }
 
 TEST_F(LayoutTest, ReplicationStaysInBudgetAndShrinkKeepsPrimary) {
-  const auto graph = WriteLogs();
-  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
-  const auto bandana = ssd_layout::Partition(graph, keys, 4096, 2048);
+  const auto graph      = WriteLogs();
+  const auto keys       = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto bandana    = ssd_layout::Partition(graph, keys, 4096, 2048);
   const auto replicated = ssd_layout::Replicate(bandana, graph, keys, 1.0);
   EXPECT_EQ(replicated.strategy, ssd_layout::Strategy::kMaxEmbed);
   uint64_t copies = 0;
   bool beneficial = false;
   for (size_t i = 0; i < replicated.copies.size(); ++i) {
     copies += replicated.copies[i].size();
-    EXPECT_EQ(replicated.copies[i].front().page_id, bandana.copies[i].front().page_id);
+    EXPECT_EQ(replicated.copies[i].front().page_id,
+              bandana.copies[i].front().page_id);
   }
   EXPECT_LE(copies, 8U);
   for (const auto& page : replicated.pages) {
     std::vector<uint64_t> primaries;
     for (const auto& item : page) {
-      const auto row = std::find(replicated.keys.begin(), replicated.keys.end(), item.first);
-      primaries.push_back(replicated.copies[row - replicated.keys.begin()].front().page_id);
+      const auto row =
+          std::find(replicated.keys.begin(), replicated.keys.end(), item.first);
+      primaries.push_back(
+          replicated.copies[row - replicated.keys.begin()].front().page_id);
     }
     if (!primaries.empty() &&
-        std::adjacent_find(primaries.begin(), primaries.end(), std::not_equal_to<uint64_t>()) !=
-            primaries.end()) {
+        std::adjacent_find(primaries.begin(),
+                           primaries.end(),
+                           std::not_equal_to<uint64_t>()) != primaries.end()) {
       beneficial = true;
     }
   }
@@ -177,16 +182,17 @@ TEST_F(LayoutTest, ReplicationStaysInBudgetAndShrinkKeepsPrimary) {
   ASSERT_EQ(shrunk.copies.size(), bandana.copies.size());
   for (size_t i = 0; i < shrunk.copies.size(); ++i) {
     ASSERT_EQ(shrunk.copies[i].size(), 1U);
-    EXPECT_EQ(shrunk.copies[i].front().page_id, bandana.copies[i].front().page_id);
+    EXPECT_EQ(shrunk.copies[i].front().page_id,
+              bandana.copies[i].front().page_id);
   }
 }
 
 TEST_F(LayoutTest, ReplicationDoesNotRoundCopyBudgetUpToAFullPage) {
-  const auto graph = WriteLogs();
-  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
-  const auto bandana = ssd_layout::Partition(graph, keys, 4096, 2048);
+  const auto graph      = WriteLogs();
+  const auto keys       = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto bandana    = ssd_layout::Partition(graph, keys, 4096, 2048);
   const auto replicated = ssd_layout::Replicate(bandana, graph, keys, 0.25);
-  uint64_t copies = 0;
+  uint64_t copies       = 0;
   for (const auto& row : replicated.copies) {
     copies += row.size();
   }
@@ -194,31 +200,31 @@ TEST_F(LayoutTest, ReplicationDoesNotRoundCopyBudgetUpToAFullPage) {
 }
 
 TEST_F(LayoutTest, ReplicationRejectsOutOfRangeVertices) {
-  auto graph = WriteLogs();
-  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  auto graph         = WriteLogs();
+  const auto keys    = ssd_layout::ReadKeyMap("", graph.vertex_count);
   const auto bandana = ssd_layout::Partition(graph, keys, 4096, 2048);
-  graph.pins[0] = static_cast<uint32_t>(graph.vertex_count);
+  graph.pins[0]      = static_cast<uint32_t>(graph.vertex_count);
   EXPECT_THROW(ssd_layout::Replicate(bandana, graph, keys, 1.0),
                std::invalid_argument);
 }
 
 TEST_F(LayoutTest, RejectsNonFiniteRatios) {
-  const auto graph = WriteLogs();
-  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto graph   = WriteLogs();
+  const auto keys    = ssd_layout::ReadKeyMap("", graph.vertex_count);
   const auto bandana = ssd_layout::Partition(graph, keys, 4096, 2048);
-  EXPECT_THROW(ssd_layout::Replicate(
-                   bandana, graph, keys,
-                   std::numeric_limits<double>::quiet_NaN()),
-               std::invalid_argument);
-  EXPECT_THROW(ssd_layout::Shrink(
-                   bandana, std::numeric_limits<double>::infinity()),
-               std::invalid_argument);
+  EXPECT_THROW(
+      ssd_layout::Replicate(
+          bandana, graph, keys, std::numeric_limits<double>::quiet_NaN()),
+      std::invalid_argument);
+  EXPECT_THROW(
+      ssd_layout::Shrink(bandana, std::numeric_limits<double>::infinity()),
+      std::invalid_argument);
 }
 
 TEST_F(LayoutTest, RejectsUnknownArtifactStrategy) {
-  const auto graph = WriteLogs();
-  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
-  auto artifact = ssd_layout::Partition(graph, keys, 4096, 2048);
+  const auto graph  = WriteLogs();
+  const auto keys   = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  auto artifact     = ssd_layout::Partition(graph, keys, 4096, 2048);
   artifact.strategy = static_cast<ssd_layout::Strategy>(99);
   EXPECT_THROW(ssd_layout::Normalize(std::move(artifact)),
                std::invalid_argument);
@@ -226,9 +232,10 @@ TEST_F(LayoutTest, RejectsUnknownArtifactStrategy) {
 
 TEST_F(LayoutTest, RejectsCorruptArtifact) {
   const auto graph = WriteLogs();
-  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
-  const auto path = root_ / "broken.bin";
-  ssd_layout::SaveArtifact(ssd_layout::Partition(graph, keys, 4096, 128), path.string());
+  const auto keys  = ssd_layout::ReadKeyMap("", graph.vertex_count);
+  const auto path  = root_ / "broken.bin";
+  ssd_layout::SaveArtifact(
+      ssd_layout::Partition(graph, keys, 4096, 128), path.string());
   std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
   file.seekp(-1, std::ios::end);
   char byte = 0;
