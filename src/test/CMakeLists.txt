@@ -117,6 +117,10 @@ target_link_libraries(test_rectensor PUBLIC
 )
 add_test(NAME test_rectensor COMMAND test_rectensor)
 
+add_executable(test_training_step test_training_step.cpp)
+target_link_libraries(test_training_step PUBLIC base gtest gtest_main pthread)
+add_test(NAME test_training_step COMMAND test_training_step)
+
 add_executable(test_optimizer test_optimizer.cpp)
 target_link_libraries(test_optimizer PUBLIC
     sparse_tensor
