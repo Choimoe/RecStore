@@ -306,6 +306,148 @@ class RecStoreRunner(BenchmarkRunner):
             table_offsets = {cfg_item["feature_names"][0]: 0 for cfg_item in eb_configs}
         return eb_configs, table_offsets, recstore.RecStoreEmbeddingBagCollection
 
+    def _build_read_path(
+        self,
+        cfg: RunConfig,
+        client: Any,
+        embedding_module: Any,
+        eb_configs: list[dict],
+        table_offsets: dict[str, int],
+        default_cat_names: list[str],
+        device: torch.device,
+    ) -> tuple[Any, Any, Any, bool]:
+        """Build the embedding read path, its optimizer, and the BagPipe plugin.
+
+        Returns ``(plugin, read_path, sparse_optimizer, use_planned_bagpipe)``.
+        """
+        use_bagpipe = cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
+        use_planned_bagpipe = use_bagpipe and cfg.optimization.prescan
+
+        if use_bagpipe:
+            fused_id_prefixes = torch.tensor(
+                [table_offsets[name] for name in default_cat_names],
+                dtype=torch.int64,
+                device=device,
+            )
+
+            def _id_extractor(sparse_features):
+                values = sparse_features.values().to(torch.int64)
+                try:
+                    # DLRM has one ID per feature per sample, so a
+                    # broadcast add avoids repeat_interleave and length
+                    # reduction on the enqueue path.
+                    return (
+                        values.view(len(fused_id_prefixes), -1)
+                        + fused_id_prefixes[:, None]
+                    ).reshape(-1).contiguous()
+                except RuntimeError:
+                    return convert_kjt_ids_to_fused_ids_device(
+                        sparse_features, table_offsets
+                    )
+
+            cache_capacity = (
+                cfg.optimization.cache_capacity
+                or cfg.gpu_cache_capacity
+                or 160_000
+            )
+            if not use_planned_bagpipe and not client.is_gpu_cache_enabled():
+                enabled = client.enable_gpu_cache(
+                    cache_capacity, cfg.embedding_dim
+                )
+                if not enabled:
+                    raise RuntimeError(
+                        "BagPipe requires GPU cache but enable_gpu_cache("
+                        f"capacity={cache_capacity}, dim={cfg.embedding_dim}) "
+                        "returned False"
+                    )
+            print(
+                "[rs_demo] BagPipe cache configured: "
+                f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
+            )
+            # BagPipe owns its cache policy.  The cold-start lookup must not
+            # trip the ops layer's low-hit bypass latch and clear the cache.
+            disable_bypass = getattr(
+                client, "set_gpu_cache_lookup_bypass_enabled", None
+            )
+            if callable(disable_bypass):
+                disable_bypass(False)
+            # BagPipe also owns residency across CPU-side update paths.
+            disable_clear_after_update = getattr(
+                client, "set_clear_gpu_cache_after_cpu_update", None
+            )
+            if callable(disable_clear_after_update):
+                disable_clear_after_update(False)
+
+            master_table_name = eb_configs[0]["name"] if eb_configs else ""
+            plugin = OptimizationPluginRegistry.create(
+                "bagpipe",
+                prescan=cfg.optimization.prescan,
+                embedding_module=embedding_module,
+                kv_client=client,
+                lookahead=cfg.optimization.lookahead,
+                cleanup_proportion=cfg.optimization.cleanup_proportion,
+                cache_capacity=cache_capacity,
+                embedding_dim=cfg.optimization.embedding_dim,
+                fuse_k=cfg.fuse_k,
+                table_offsets=table_offsets,
+                table_sizes={
+                    cfg_item["feature_names"][0]: cfg_item["num_embeddings"]
+                    for cfg_item in eb_configs
+                },
+                master_table_name=master_table_name,
+                device=device,
+                lr=0.01,
+                id_extractor=_id_extractor,
+            )
+            sparse_optimizer = plugin.create_sparse_optimizer(
+                [embedding_module], lr=0.01
+            )
+            read_path = BagPipeReadPath(plugin, device=device)
+        else:
+            fused_id_offsets = torch.tensor(
+                [table_offsets[name] for name in default_cat_names],
+                dtype=torch.int64,
+            )
+            plugin = None
+            read_path = build_embedding_read_path(
+                cfg.read_mode,
+                embedding_module=embedding_module,
+                prefetch_depth=cfg.prefetch_depth,
+                embedding_dim=cfg.embedding_dim,
+                feature_offsets=fused_id_offsets,
+            )
+            sparse_optimizer = recstore.SparseSGD([embedding_module], lr=0.01)
+
+        return plugin, read_path, sparse_optimizer, use_planned_bagpipe
+
+    def _build_training_modules(
+        self,
+        cfg: RunConfig,
+        device: torch.device,
+        local_rank: int,
+        use_dist: bool,
+        num_sparse_features: int,
+    ) -> tuple[Any, Any, Any, Any]:
+        """Build the dense model, criterion, and dense optimizer."""
+        dense_module = build_dense_module(
+            cfg,
+            num_sparse_features=num_sparse_features,
+            embedding_dim=cfg.embedding_dim,
+            device=device,
+        )
+        dense_module = _maybe_wrap_dense_module_for_dist(
+            dense_module=dense_module, device=device,
+            local_rank=local_rank, use_dist=use_dist,
+        )
+        unwrapped_module = (
+            dense_module.module
+            if isinstance(dense_module, torch.nn.parallel.DistributedDataParallel)
+            else dense_module
+        )
+        criterion = build_criterion(cfg, unwrapped_module)
+        dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
+        return dense_module, unwrapped_module, criterion, dense_optimizer
+
     def _run_local_worker(
         self,
         repo_root: Path,
@@ -350,10 +492,6 @@ class RecStoreRunner(BenchmarkRunner):
             eb_configs, table_offsets, RecStoreEmbeddingBagCollection = (
                 self._build_embedding_module(cfg, client, default_cat_names)
             )
-            fused_id_offsets = torch.tensor(
-                [table_offsets[name] for name in default_cat_names],
-                dtype=torch.int64,
-            )
             embedding_module = RecStoreEmbeddingBagCollection(
                 embedding_bag_configs=eb_configs,
                 enable_fusion=cfg.recstore_enable_fusion,
@@ -363,119 +501,31 @@ class RecStoreRunner(BenchmarkRunner):
             )
             # -- optimization plugin + read path --------------------------------
             use_bagpipe = cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
-            use_planned_bagpipe = use_bagpipe and cfg.optimization.prescan
-
-            if use_bagpipe:
-                fused_id_prefixes = torch.tensor(
-                    [table_offsets[name] for name in default_cat_names],
-                    dtype=torch.int64,
-                    device=device,
-                )
-
-                def _id_extractor(sparse_features):
-                    values = sparse_features.values().to(torch.int64)
-                    try:
-                        # DLRM has one ID per feature per sample, so a
-                        # broadcast add avoids repeat_interleave and length
-                        # reduction on the enqueue path.
-                        return (
-                            values.view(len(fused_id_prefixes), -1)
-                            + fused_id_prefixes[:, None]
-                        ).reshape(-1).contiguous()
-                    except RuntimeError:
-                        return convert_kjt_ids_to_fused_ids_device(
-                            sparse_features, table_offsets
-                        )
-
-                cache_capacity = (
-                    cfg.optimization.cache_capacity
-                    or cfg.gpu_cache_capacity
-                    or 160_000
-                )
-                if not use_planned_bagpipe and not client.is_gpu_cache_enabled():
-                    enabled = client.enable_gpu_cache(
-                        cache_capacity, cfg.embedding_dim
-                    )
-                    if not enabled:
-                        raise RuntimeError(
-                            "BagPipe requires GPU cache but enable_gpu_cache("
-                            f"capacity={cache_capacity}, dim={cfg.embedding_dim}) "
-                            "returned False"
-                        )
-                print(
-                    "[rs_demo] BagPipe cache configured: "
-                    f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
-                )
-                # BagPipe owns its cache policy.  The cold-start lookup must not
-                # trip the ops layer's low-hit bypass latch and clear the cache.
-                disable_bypass = getattr(
-                    client, "set_gpu_cache_lookup_bypass_enabled", None
-                )
-                if callable(disable_bypass):
-                    disable_bypass(False)
-                # BagPipe also owns residency across CPU-side update paths.
-                disable_clear_after_update = getattr(
-                    client, "set_clear_gpu_cache_after_cpu_update", None
-                )
-                if callable(disable_clear_after_update):
-                    disable_clear_after_update(False)
-
-                master_table_name = eb_configs[0]["name"] if eb_configs else ""
-                plugin = OptimizationPluginRegistry.create(
-                    "bagpipe",
-                    prescan=cfg.optimization.prescan,
+            plugin, read_path, sparse_optimizer, use_planned_bagpipe = (
+                self._build_read_path(
+                    cfg=cfg,
+                    client=client,
                     embedding_module=embedding_module,
-                    kv_client=client,
-                    lookahead=cfg.optimization.lookahead,
-                    cleanup_proportion=cfg.optimization.cleanup_proportion,
-                    cache_capacity=cache_capacity,
-                    embedding_dim=cfg.optimization.embedding_dim,
-                    fuse_k=cfg.fuse_k,
+                    eb_configs=eb_configs,
                     table_offsets=table_offsets,
-                    table_sizes={
-                        cfg_item["feature_names"][0]: cfg_item["num_embeddings"]
-                        for cfg_item in eb_configs
-                    },
-                    master_table_name=master_table_name,
+                    default_cat_names=default_cat_names,
                     device=device,
-                    lr=0.01,
-                    id_extractor=_id_extractor,
                 )
-                sparse_optimizer = plugin.create_sparse_optimizer(
-                    [embedding_module], lr=0.01
-                )
-                read_path = BagPipeReadPath(plugin, device=device)
-            else:
-                read_path = build_embedding_read_path(
-                    cfg.read_mode,
-                    embedding_module=embedding_module,
-                    prefetch_depth=cfg.prefetch_depth,
-                    embedding_dim=cfg.embedding_dim,
-                    feature_offsets=fused_id_offsets,
-                )
-                sparse_optimizer = recstore.SparseSGD([embedding_module], lr=0.01)
+            )
 
             _barrier_for_step_alignment(
                 dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
             )
 
-            dense_module = build_dense_module(
-                cfg,
-                num_sparse_features=len(default_cat_names),
-                embedding_dim=cfg.embedding_dim,
-                device=device,
+            dense_module, unwrapped_module, criterion, dense_optimizer = (
+                self._build_training_modules(
+                    cfg=cfg,
+                    device=device,
+                    local_rank=local_rank,
+                    use_dist=use_dist,
+                    num_sparse_features=len(default_cat_names),
+                )
             )
-            dense_module = _maybe_wrap_dense_module_for_dist(
-                dense_module=dense_module, device=device,
-                local_rank=local_rank, use_dist=use_dist,
-            )
-            unwrapped_module = (
-                dense_module.module
-                if isinstance(dense_module, torch.nn.parallel.DistributedDataParallel)
-                else dense_module
-            )
-            criterion = build_criterion(cfg, unwrapped_module)
-            dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
             record_pooled_grad = getattr(embedding_module, "record_pooled_grad", None)
 
             if _maybe_warmup_gpu_local_shm_fast_path(cfg=cfg, client=client, device=device):
