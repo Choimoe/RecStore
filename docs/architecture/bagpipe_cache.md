@@ -40,14 +40,23 @@ queue use additional temporary tensors; a batch larger than the cache still
 runs by gathering into its own batch tensor and admitting only bounded rows.
 Full-run plans consume CPU memory proportional to the access trace.
 
-The native `BagPipeCacheMetadata` helper batches CPU LRU queries, admission,
-invalidation, and last-update tracking. Python exchanges compact position and
-slot tensors with it instead of visiting every row or updating counters once
-per row. The helper owns metadata only; values remain in the bounded GPU
-tensor and PS storage. Rebuild `recstore_torch_ops` when updating this runtime.
+The framework-independent policy lives in
+`src/optimization/bagpipe/cache_metadata.h` as `CacheMetadata`. It batches LRU
+queries, admission, invalidation, and previous-update tracking using only the
+C++ standard library. Input arrays are borrowed during each call; results are
+ordinary vectors. It owns no tensors, embedding values, PS clients, or device
+state. `test_bagpipe_metadata` exercises this policy without linking Torch.
+
+`src/framework/pytorch/bagpipe_bindings.cc` validates tensor dtype/device/shape
+and adapts these arrays and results to PyTorch. The Python-visible class remains
+`BagPipeCacheMetadata`; the controller retains PyTorch planning, tensor gathers,
+autograd integration, and communication scheduling. Python exchanges compact
+position and slot tensors rather than visiting every row. Rebuild
+`recstore_torch_ops` when updating this runtime.
+
 Admission returns only the final source row for each destination slot, so an
-oversized batch never issues duplicate GPU scatter destinations. The
-controller serializes metadata operations with commit completion.
+oversized batch never issues duplicate GPU scatter destinations. The controller
+serializes metadata operations with commit completion.
 
 After a PS commit, a rank updates locally cached rows that only it accessed
 using its local gradient divided by world size. Rows modified by another rank
@@ -81,7 +90,19 @@ asynchronous. This avoids exhausting slots when several future batches are
 queued. It is not a general concurrent scheduler for mixing arbitrary raw
 RDMA requests and BagPipe training on the same client.
 
-## Commit protocol and failure behavior
+## Sparse gradient commit protocol and failure behavior
+
+`SparseGradientCommit` names the PS protocol for aggregating sparse gradients
+and committing an ordered update. Its header, client, and coordinator live in
+`src/ps/base/sparse_gradient_commit.h`; it is shared by PS transports and is
+independent of BagPipe's cache policy and Torch. Python clients expose
+`sparse_gradient_commit_async`, `sparse_gradient_commit_wait`, and
+`sparse_gradient_commit_close`. The asynchronous handle completes after all
+shards report the requested committed step, rather than just receipt of a chunk.
+
+This replaces the earlier `TrainingStep` names throughout this unmerged feature,
+including RPC methods. Update clients, servers, and the native extension together.
+RDMA/SHM opcode values and the binary header layout are unchanged.
 
 A session identifies one job on one fused table. Each packet carries session,
 step, rank, world size, chunk index/count, dimension, and SGD learning rate.

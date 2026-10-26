@@ -1,5 +1,4 @@
 #include "framework/pytorch/op_bagpipe.h"
-#include "framework/pytorch/op_bagpipe_metadata.h"
 
 #include <torch/extension.h>
 #include <future>
@@ -718,16 +717,7 @@ void update_gpu_cache_torch(const torch::Tensor& keys,
 } // namespace
 
 void RegisterBagpipeOps(torch::Library& m) {
-  m.class_<BagPipeCacheMetadata>("BagPipeCacheMetadata")
-      .def(torch::init<int64_t>())
-      .def("size", &BagPipeCacheMetadata::size)
-      .def("previous", &BagPipeCacheMetadata::previous)
-      .def("clear_plan", &BagPipeCacheMetadata::clear_plan)
-      .def("updated_ids", &BagPipeCacheMetadata::updated_ids)
-      .def("prefetch", &BagPipeCacheMetadata::prefetch)
-      .def("lookup", &BagPipeCacheMetadata::lookup)
-      .def("commit", &BagPipeCacheMetadata::commit)
-      .def("admit", &BagPipeCacheMetadata::admit);
+  RegisterBagpipeMetadataOps(m);
   m.def("sparse_gradient_commit_async", sparse_gradient_commit_async);
   m.def("sparse_gradient_commit_wait", sparse_gradient_commit_wait);
   m.def("sparse_gradient_commit_close", sparse_gradient_commit_close);

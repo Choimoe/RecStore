@@ -121,6 +121,11 @@ add_executable(test_sparse_gradient_commit test_sparse_gradient_commit.cpp)
 target_link_libraries(test_sparse_gradient_commit PUBLIC base gtest gtest_main pthread)
 add_test(NAME test_sparse_gradient_commit COMMAND test_sparse_gradient_commit)
 
+# The BagPipe policy test uses only the standard library and GoogleTest.
+add_executable(test_bagpipe_metadata test_bagpipe_metadata.cpp)
+target_link_libraries(test_bagpipe_metadata PRIVATE gtest gtest_main)
+add_test(NAME test_bagpipe_metadata COMMAND test_bagpipe_metadata)
+
 add_executable(test_optimizer test_optimizer.cpp)
 target_link_libraries(test_optimizer PUBLIC
     sparse_tensor

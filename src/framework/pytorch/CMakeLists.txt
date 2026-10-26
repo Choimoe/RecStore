@@ -8,6 +8,7 @@ add_library(recstore_torch_ops SHARED
     op_flat.cc
     op_prefetch.cc
     op_bagpipe.cc
+    bagpipe_bindings.cc
     op_profile.cc
     ../op.cc
     ../common/local_shm_kv_client_op.cc
