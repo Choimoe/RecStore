@@ -564,6 +564,7 @@ add_python_unittest(
     test_hierkv_rs_demo_py
     src.test.model_zoo.rs_demo.test_hybrid_dlrm
     src.test.model_zoo.rs_demo.test_recstore_runner
+    src.test.model_zoo.rs_demo.test_runner_launcher
 )
 set_tests_properties(
     test_hierkv_rs_demo_py

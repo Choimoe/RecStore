@@ -13,12 +13,12 @@ from model_zoo.rs_demo.cli import build_runner
 from model_zoo.rs_demo.config import RunConfig, dump_run_config, parse_config, validate_recstore_config
 from python.pytorch.recstore.optim.config import OptimizationConfig
 from python.pytorch.recstore.benchmark.report import write_stage_csv
+from model_zoo.rs_demo.runtime.worker_common import merge_rank_outputs as _merge_rank_outputs
 from model_zoo.rs_demo.runners.torchrec_runner import (
     TorchRecRunner,
     _barrier_for_step_alignment,
     _build_worker_fingerprint,
     _build_uvm_caching_constraints,
-    _merge_rank_outputs,
     _maybe_wrap_dense_module_for_dist,
     _write_or_verify_worker_fingerprint,
     _compute_or_load_shared_sharding_plan,
@@ -475,13 +475,13 @@ class TestTorchRecDispatch(unittest.TestCase):
             "model_zoo.rs_demo.runtime.worker_common.pick_socket_ifname",
             return_value="eno1",
         ), mock.patch(
-            "model_zoo.rs_demo.runners.torchrec_runner.subprocess.run",
+            "model_zoo.rs_demo.runners.base.subprocess.run",
             run_mock,
         ), mock.patch(
-            "model_zoo.rs_demo.runners.torchrec_runner._merge_rank_outputs",
+            "model_zoo.rs_demo.runners.base.merge_rank_outputs",
             return_value=[],
         ), mock.patch(
-            "model_zoo.rs_demo.runners.torchrec_runner.ensure_shared_dir",
+            "model_zoo.rs_demo.runners.base.ensure_shared_dir",
             return_value=None,
         ), mock.patch(
             "pathlib.Path.exists",
@@ -549,10 +549,10 @@ class TestTorchRecDispatch(unittest.TestCase):
                 "model_zoo.rs_demo.runtime.worker_common.pick_socket_ifname",
                 return_value=None,
             ), mock.patch(
-                "model_zoo.rs_demo.runners.torchrec_runner.subprocess.run",
+                "model_zoo.rs_demo.runners.base.subprocess.run",
                 side_effect=fake_subprocess_run,
             ), mock.patch(
-                "model_zoo.rs_demo.runners.torchrec_runner._merge_rank_outputs",
+                "model_zoo.rs_demo.runners.base.merge_rank_outputs",
                 return_value=[],
             ):
                 result = runner._run_distributed(Path("/app/RecStore"), cfg)

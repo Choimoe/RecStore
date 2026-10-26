@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -37,8 +35,6 @@ from .base import BenchmarkRunner
 from ..runtime.timing import stage_timer
 from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
-    build_worker_env as _build_worker_env,
-    merge_rank_outputs as _merge_rank_outputs,
     read_worker_context as _read_worker_context,
 )
 
@@ -97,33 +93,18 @@ def _build_train_dataloader_for_rank(
 
 
 class HpsTorchRunner(BenchmarkRunner):
+    backend = "hps_torch"
+    rank_dir_name = "hps_torch_ranks"
+
     def __init__(self, runtime_dir: Path) -> None:
         self.runtime_dir = runtime_dir
 
-    def _rank_output_dir(self, cfg: RunConfig) -> Path:
-        return Path(cfg.output_root) / "outputs" / cfg.run_id / "hps_torch_ranks"
+    def _main_csv(self, cfg: RunConfig) -> Path:
+        return Path(cfg.hps_torch_main_csv)
 
-    def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig) -> list[str]:
-        rdzv_endpoint = f"{cfg.master_addr}:{cfg.master_port}"
+    def _worker_argv(self, cfg: RunConfig) -> list[str]:
+        # HPS workers get their config as argv instead of --run-config-json.
         cmd = [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            "--nnodes",
-            str(cfg.nnodes),
-            "--node_rank",
-            str(cfg.node_rank),
-            "--nproc_per_node",
-            str(cfg.nproc_per_node),
-            "--rdzv_backend",
-            str(cfg.rdzv_backend),
-            "--rdzv_endpoint",
-            rdzv_endpoint,
-            "--rdzv_id",
-            str(cfg.rdzv_id),
-            "--tee",
-            "3",
-            str(repo_root / "model_zoo/rs_demo/run_mock_stress.py"),
             "--backend",
             "hps_torch",
             "--nnodes",
@@ -194,6 +175,19 @@ class HpsTorchRunner(BenchmarkRunner):
         if not cfg.hps_torch_gpucache:
             cmd.append("--hps-torch-disable-gpucache")
         return cmd
+
+    def _prepare_distributed(self, cfg: RunConfig, rank_dir: Path) -> None:
+        for path in rank_dir.glob("rank*.csv"):
+            path.unlink()
+        try:
+            _model_ready_path(cfg).unlink()
+        except FileNotFoundError:
+            pass
+
+    def _worker_env(self, rank_dir: Path) -> dict[str, str]:
+        env = super()._worker_env(rank_dir)
+        env.setdefault("NCCL_IB_DISABLE", "1")
+        return env
 
     def _run_worker(
         self,
@@ -406,42 +400,6 @@ class HpsTorchRunner(BenchmarkRunner):
             out_csv=Path(cfg.hps_torch_main_csv),
         )
 
-    def _run_distributed(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
-        rank_dir = self._rank_output_dir(cfg)
-        ensure_shared_dir(rank_dir)
-        for path in rank_dir.glob("rank*.csv"):
-            path.unlink()
-        ready_path = _model_ready_path(cfg)
-        try:
-            ready_path.unlink()
-        except FileNotFoundError:
-            pass
-
-        cmd = self._build_torchrun_cmd(repo_root, cfg)
-        env = _build_worker_env("hps_torch", rank_dir)
-        env.setdefault("NCCL_IB_DISABLE", "1")
-        res = subprocess.run(
-            cmd,
-            cwd=str(repo_root),
-            env=env,
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        if res.returncode != 0:
-            raise RuntimeError(
-                "hps_torch torchrun worker failed\n"
-                f"stdout:\n{res.stdout}\n"
-                f"stderr:\n{res.stderr}"
-            )
-
-        rank_csvs = [rank_dir / f"rank{rank}.csv" for rank in range(cfg.nproc_per_node)]
-        missing = [str(path) for path in rank_csvs if not path.exists()]
-        if missing:
-            raise RuntimeError(f"missing HPS Torch rank csv outputs: {missing}")
-        rows = _merge_rank_outputs(rank_csvs, Path(cfg.hps_torch_main_csv))
-        return {"backend": "hps_torch", "rows": rows}
-
     def run(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
         if cfg.backend != "hps_torch":
             raise ValueError("HpsTorchRunner requires cfg.backend to be 'hps_torch'.")
@@ -462,4 +420,4 @@ class HpsTorchRunner(BenchmarkRunner):
             )
         if cfg.nproc_per_node <= 1:
             return self._run_single_process(repo_root, cfg)
-        return self._run_distributed(repo_root, cfg)
+        return self._run_distributed(repo_root, cfg, config_json=False)
