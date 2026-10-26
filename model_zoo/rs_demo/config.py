@@ -91,10 +91,6 @@ def resolve_num_embeddings_per_feature(
     return cap_default_num_embeddings_per_feature(int(num_embeddings))
 
 
-def format_num_embeddings_per_feature(values: Sequence[int]) -> str:
-    return ",".join(str(int(value)) for value in values)
-
-
 def total_num_embeddings_per_feature(values: Sequence[int]) -> int:
     return sum(int(value) for value in values)
 

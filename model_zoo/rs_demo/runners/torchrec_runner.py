@@ -22,7 +22,6 @@ from ..models.dlrm import (
     compute_dense_loss,
 )
 from ..models.utils import (
-    parse_layer_sizes,
     prepare_hybrid_dlrm_input,
     reshape_torchrec_embeddings_for_dlrm,
     run_hybrid_backward,
@@ -32,7 +31,6 @@ from ..runtime.timing import StepTimer
 from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
     bool_int as _bool_int,
-    load_rows as _load_rows,
     read_worker_context as _read_worker_context,
     write_rows as _write_rows,
 )
