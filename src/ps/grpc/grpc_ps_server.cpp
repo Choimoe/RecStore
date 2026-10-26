@@ -417,6 +417,17 @@ private:
     return Status::OK;
   }
 
+  Status TrainingStep(ServerContext*, const recstoreps::TrainingStepRequest* request,
+                      recstoreps::TrainingStepResponse* reply) override {
+    try {
+      reply->set_committed_step(cache_ps_->TrainingStep(
+          request->table_name(), request->payload(), 0));
+    } catch (const std::exception& error) {
+      reply->set_error(error.what());
+    }
+    return Status::OK;
+  }
+
   Status UpdateParameter(ServerContext* context,
                          const UpdateParameterRequest* request,
                          UpdateParameterResponse* reply) override {

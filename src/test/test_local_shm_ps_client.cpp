@@ -219,6 +219,71 @@ TEST_F(LocalShmPSClientTest, LastRequestProfileCapturesTransportStages) {
   server_thread.join();
 }
 
+TEST_F(LocalShmPSClientTest, TrainingStepAggregatesBeforeUpdatingStorage) {
+  const auto config = MakeLocalShmConfig(MakeUniqueRegionName("recstore_training_step"));
+  LocalShmParameterServer server;
+  server.Init(config);
+  std::thread server_thread([&]() { server.Run(); });
+  try {
+    LocalShmPSClient client(config["local_shm"]);
+    EXPECT_EQ(client.InitEmbeddingTable("training", {128, 4}), 0);
+    std::vector<uint64_t> keys{7};
+    std::vector<float> initial{1, 2, 3, 4}, grad{2, 4, 6, 8};
+    base::ConstArray<uint64_t> key_array(keys);
+    base::RecTensor values(initial.data(), {1, 4});
+    base::RecTensor grads(grad.data(), {1, 4});
+    EXPECT_EQ(client.PutParameter(key_array, values), 0);
+    TrainingStepHeader h;
+    h.session = 10; h.world = 2; h.dim = 4; h.divisor = 2;
+    EXPECT_EQ(client.TrainingStep("training", h, key_array, grads), -1);
+    std::vector<float> result(4);
+    EXPECT_EQ(client.GetParameterFlat(key_array, result.data(), 1, 4), 0);
+    EXPECT_EQ(result, initial);
+    h.rank = 1;
+    EXPECT_EQ(client.TrainingStep("training", h, key_array, grads), 0);
+    EXPECT_EQ(client.GetParameterFlat(key_array, result.data(), 1, 4), 0);
+    for (size_t i = 0; i < 4; ++i) EXPECT_NEAR(result[i], initial[i] - 0.01f * grad[i], 1e-6);
+    EXPECT_EQ(client.TrainingStep("training", h, key_array, grads), 0);
+    h.kind = 1;
+    base::RecTensor empty({0, 4}, base::DataType::FLOAT32);
+    EXPECT_EQ(client.TrainingStep("training", h, base::ConstArray<uint64_t>(nullptr, 0), empty), 0);
+  } catch (...) {
+    server.Stop(); server_thread.join(); throw;
+  }
+  server.Stop();
+  server_thread.join();
+}
+
+TEST_F(LocalShmPSClientTest, PrefetchOwnsKeysAndChunksLargerThanSlots) {
+  auto config = MakeLocalShmConfig(MakeUniqueRegionName("recstore_prefetch"));
+  config["local_shm"]["slot_buffer_bytes"] = 256;
+  LocalShmParameterServer server;
+  server.Init(config);
+  std::thread server_thread([&]() { server.Run(); });
+  try {
+    LocalShmPSClient client(config["local_shm"]);
+    EXPECT_EQ(client.InitEmbeddingTable("training", {128, 4}), 0);
+    std::vector<uint64_t> keys(100);
+    std::iota(keys.begin(), keys.end(), 0);
+    base::RecTensor initial({100, 4}, base::DataType::FLOAT32);
+    for (int i = 0; i < 400; ++i) initial.data_as<float>()[i] = i;
+    EXPECT_EQ(client.PutParameter(keys, initial), 0);
+    const auto id = client.PrefetchParameter(keys);
+    std::fill(keys.begin(), keys.end(), 999);
+    client.WaitForPrefetch(id);
+    EXPECT_TRUE(client.IsPrefetchDone(id));
+    base::RecTensor actual({0, 4}, base::DataType::FLOAT32);
+    EXPECT_TRUE(client.GetPrefetchResult(id, actual));
+    EXPECT_EQ(actual.shape(0), 100);
+    for (int i = 0; i < 400; ++i) EXPECT_EQ(actual.data_as<float>()[i], i);
+    EXPECT_FALSE(client.GetPrefetchResult(id, actual));
+  } catch (...) {
+    server.Stop(); server_thread.join(); throw;
+  }
+  server.Stop();
+  server_thread.join();
+}
+
 TEST_F(LocalShmPSClientTest, LastRequestProfileCapturesOpcodePerRequestType) {
   const auto config = MakeLocalShmConfig(
       MakeUniqueRegionName("recstore_local_shm_ps_client_profile_opcode"));

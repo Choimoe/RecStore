@@ -20,6 +20,7 @@ enum class LocalOpcode : uint32_t {
   kGet        = 2,
   kPut        = 3,
   kUpdateFlat = 4,
+  kTrainingStep = 5,
 };
 
 enum class LocalSlotState : uint32_t {

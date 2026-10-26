@@ -909,3 +909,17 @@ int main(int argc, char** argv) {
   return 0;
 }
 #endif
+
+void recstore::BRPCParameterServiceImpl::TrainingStep(
+    google::protobuf::RpcController*,
+    const recstoreps_brpc::TrainingStepRequest* request,
+    recstoreps_brpc::TrainingStepResponse* reply,
+    google::protobuf::Closure* done) {
+  brpc::ClosureGuard guard(done);
+  try {
+    reply->set_committed_step(cache_ps_->TrainingStep(
+        request->table_name(), request->payload(), 0));
+  } catch (const std::exception& error) {
+    reply->set_error(error.what());
+  }
+}

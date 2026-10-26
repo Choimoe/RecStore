@@ -408,6 +408,7 @@ target_link_libraries(test_local_shm_ps_client PUBLIC
     gtest
     gtest_main
     pthread
+    rt
 )
 add_test(NAME test_local_shm_ps_client COMMAND test_local_shm_ps_client)
 set_tests_properties(test_local_shm_ps_client PROPERTIES
