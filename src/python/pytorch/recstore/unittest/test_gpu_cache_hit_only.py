@@ -244,6 +244,28 @@ class TestGpuCacheHitOnlyLookup(unittest.TestCase):
             torch.equal(self.client.local_lookup_flat(table_name, keys), new_values)
         )
 
+    def test_read_entrypoints_share_fill_and_update_invalidation(self) -> None:
+        table = f"gpu_cache_common_op_{time.time_ns()}"
+        self.client.init_data(name=table, shape=(64, 4), dtype=torch.float32)
+        ids = torch.tensor([1, 3, 1], dtype=torch.int64, device="cuda")
+        encoded = self.client._normalize_ids(ids, preserve_device=True, name=table)
+        seed = torch.full((2, 4), 7.0, device="cuda")
+        for name in ("emb_read", "local_lookup_flat", "gpu_cache_lookup_flat"):
+            for update_on_cpu in (False, True):
+                with self.subTest(read=name, update_on_cpu=update_on_cpu):
+                    self.client.push(table, ids[:2].cpu(), seed.cpu())
+                    read = getattr(self.client.ops, name)
+                    before = read(encoded, 4)
+                    self.assertTrue(torch.equal(before, seed[[0, 1, 0]]))
+                    self.assertTrue(bool(self.client.ops.contains_gpu_cache(encoded).all()))
+                    update_ids = encoded[:2].cpu() if update_on_cpu else encoded[:2]
+                    grads = torch.ones((2, 4), device=update_ids.device)
+                    self.client.ops.emb_update_table(table, update_ids, grads)
+                    self.assertFalse(bool(self.client.ops.contains_gpu_cache(encoded).any()))
+                    after = read(encoded, 4)
+                    self.assertTrue(torch.allclose(after, before - 0.01))
+                    self.assertTrue(bool(self.client.ops.contains_gpu_cache(encoded).all()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -90,6 +90,38 @@ asynchronous. This avoids exhausting slots when several future batches are
 queued. It is not a general concurrent scheduler for mixing arbitrary raw
 RDMA requests and BagPipe training on the same client.
 
+## Framework adapter boundary
+
+`src/framework/pytorch/` adapts framework tensors to the common op API. It
+owns dtype/shape checks, contiguous and pinned buffers, CUDA stream events,
+Tensor result wrapping, and operator registration. It does not own commit
+polling, asynchronous work handles, cache bypass thresholds, or cache
+coherence decisions. The former `op_bagpipe.cc` has been removed.
+
+The execution paths are split by responsibility:
+
+- `framework/op.{h,cc}` exposes sparse commit submission/wait/close and cached
+  update/write operations using `RecTensor` views.
+- `framework/common/sparse_gradient_commit_runtime.h` owns asynchronous work,
+  input readiness, committed-step polling, timeout, and peer abort. Adapters
+  supply a readiness callback that retains source/staging buffers until the
+  operation finishes; no Torch types enter the runtime.
+- `framework/common/cache_aware_op.h` owns the shared query/read-misses/fill/
+  scatter pipeline, low-hit bypass, fallback, and invalidation after transport
+  completion. Its device actions are callbacks; the same policy is exercised
+  by C++ tests without Torch or CUDA.
+- `framework/pytorch/tensor_adapter.cc` supplies Tensor allocation and device
+  operations for those callbacks. `emb_read`, `local_lookup_flat`, and
+  `gpu_cache_lookup_flat` share the common pipeline. Existing GPU cache
+  primitives remain in `framework/gpu/`.
+- Local flat reads expose a common transport lease. The Tensor adapter retains
+  borrowed host storage until its H2D stream callback completes. Generic host
+  memory registration lives in `framework/gpu/host_memory.cu`.
+
+The Python operator names are unchanged by this extraction. The new
+`test_framework_op_runtime` checks readiness/lifetime, timeout and abort,
+cache bypass/fallback, and completion-before-invalidation without Torch.
+
 ## Sparse gradient commit protocol and failure behavior
 
 `SparseGradientCommit` names the PS protocol for aggregating sparse gradients

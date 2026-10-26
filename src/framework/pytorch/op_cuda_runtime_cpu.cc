@@ -17,10 +17,9 @@ void SynchronizeCurrentCudaStreamForTensor(const torch::Tensor& tensor) {
   (void)tensor;
 }
 
-bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes) {
-  (void)ptr;
-  (void)bytes;
-  return false;
+void RetainUntilCudaComplete(const torch::Tensor&,
+                             std::function<void()> release) {
+  release();
 }
 
 } // namespace framework

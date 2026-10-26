@@ -5,6 +5,7 @@
 // __has_include guards; the implementation lives in op_cuda_runtime.cu
 // (or op_cuda_runtime_cpu.cc for CPU-only builds).
 
+#include "framework/gpu/host_memory.h"
 #include <cstddef>
 #include <functional>
 
@@ -18,7 +19,8 @@ void SynchronizeCurrentCudaStreamForTensor(const torch::Tensor& tensor);
 std::function<void()>
 RecordCudaCompletionForTensor(const torch::Tensor& tensor);
 
-bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes);
+void RetainUntilCudaComplete(const torch::Tensor& tensor,
+                             std::function<void()> release);
 
 } // namespace framework
 } // namespace recstore

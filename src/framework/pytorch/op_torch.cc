@@ -7,12 +7,14 @@
 //   base     - basic read/write, PS configuration, table and checkpoint ops
 //   flat     - local_shm flat fast-path lookup/update
 //   prefetch - asynchronous prefetch ops
-//   bagpipe  - GPU cache / BagPipe ops
+//   cache    - GPU cache primitives and BagPipe metadata adapters
+//   commit   - sparse gradient commit adapter
 //   profile  - profile and warmup queries
 
 #include <torch/extension.h>
 
-#include "framework/pytorch/op_bagpipe.h"
+#include "framework/pytorch/op_gpu_cache.h"
+#include "framework/pytorch/op_sparse_gradient_commit.h"
 #include "framework/pytorch/op_base.h"
 #include "framework/pytorch/op_flat.h"
 #include "framework/pytorch/op_prefetch.h"
@@ -20,12 +22,15 @@
 
 namespace recstore {
 namespace framework {
+void RegisterBagpipeMetadataOps(torch::Library& m);
 
 TORCH_LIBRARY(recstore_ops, m) {
   RegisterBaseOps(m);
   RegisterFlatOps(m);
   RegisterPrefetchOps(m);
-  RegisterBagpipeOps(m);
+  RegisterGpuCacheOps(m);
+  RegisterSparseGradientCommitOps(m);
+  RegisterBagpipeMetadataOps(m);
   RegisterProfileOps(m);
 }
 

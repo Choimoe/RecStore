@@ -1,4 +1,4 @@
-#include "framework/pytorch/op_bagpipe.h"
+#include <torch/extension.h>
 #include "optimization/bagpipe/cache_metadata.h"
 
 #include <torch/custom_class.h>
