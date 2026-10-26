@@ -624,6 +624,16 @@ bool RdmaDistributedExecutor::WaitBatch(int batch_id) {
   return FinalizeBatch(&it->second);
 }
 
+void RdmaDistributedExecutor::DrainBatchSlots() {
+  std::lock_guard<std::mutex> guard(batches_mu_);
+  for (auto& entry : batches_) {
+    auto& batch = entry.second;
+    WaitShardRpcs(batch.shard_rpcs);
+    FinalizeBatch(&batch);
+    ReleaseShardRpcs(&batch.shard_rpcs);
+  }
+}
+
 void RdmaDistributedExecutor::ReleaseBatch(int batch_id) {
   shard_routing::BatchRequest batch;
   {

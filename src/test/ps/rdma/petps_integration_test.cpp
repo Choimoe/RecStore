@@ -222,6 +222,38 @@ TEST(PetPSIntegrationTest, UpdateGetRoundTripSingleShard) {
   }
 }
 
+TEST(PetPSIntegrationTest, TrainingStepCommitSingleShard) {
+  auto& client = SingleShardClient();
+  const std::string table = "training_step";
+  std::vector<uint64_t> keys = {601, 602};
+  std::vector<float> initial(8, 1.0f), gradients(8, 2.0f);
+  base::RecTensor values(initial.data(), {2, 4});
+  base::RecTensor grads(gradients.data(), {2, 4});
+  ASSERT_EQ(client.InitEmbeddingTable(table, 1024, 4), 0);
+  ASSERT_EQ(client.PutParameter(keys, values), 0);
+  recstore::TrainingStepHeader header;
+  header.session = 7123;
+  header.world = 2;
+  header.divisor = 2;
+  header.dim = 4;
+  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), -1);
+  base::RecTensor actual({2, 4}, base::DataType::FLOAT32);
+  ASSERT_EQ(client.GetParameter(keys, actual), 0);
+  for (int i = 0; i < 8; ++i) EXPECT_FLOAT_EQ(actual.data_as<float>()[i], 1.0f);
+  header.rank = 1;
+  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  // Repeating a committed submission must not apply SGD again.
+  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  header.kind = 1;
+  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  ASSERT_EQ(client.GetParameter(keys, actual), 0);
+  for (int i = 0; i < 8; ++i) EXPECT_FLOAT_EQ(actual.data_as<float>()[i], .98f);
+  header.kind = 2;
+  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+  header.rank = 0;
+  EXPECT_EQ(client.TrainingStep(table, header, keys, grads), 0);
+}
+
 TEST(PetPSIntegrationTest, MissingKeysReturnZeroSlots) {
   const int embedding_dim = FLAGS_value_size / sizeof(float);
   auto& client            = SingleShardClient();
@@ -270,6 +302,46 @@ TEST(PetPSIntegrationTest, HashedValueBatchGetTransferSingleShard) {
   EXPECT_EQ(*status, static_cast<std::int32_t>(petps::RpcStatus::kOk));
   client.RevokeRPCResource(rpc_id);
   FLAGS_rdma_get_response_mode = previous_response_mode;
+}
+
+TEST(PetPSIntegrationTest, AdapterTrainingStepWithOutstandingPrefetch) {
+  json config = ParseFile2Json(std::getenv("RECSTORE_CONFIG"));
+  config["distributed_client"]["max_keys_per_request"] = 10000;
+  recstore::RDMAPSClientAdapter adapter(config);
+  constexpr int rows = 100000;  // Multiple training packets per shard.
+  constexpr int dim = 4;
+  ASSERT_EQ(adapter.InitEmbeddingTable("training", {rows, dim}), 0);
+  std::vector<uint64_t> keys(rows);
+  std::iota(keys.begin(), keys.end(), 0);
+  std::vector<float> initial(rows * dim, 1.0f), gradients(rows * dim, 2.0f);
+  base::RecTensor values(initial.data(), {rows, dim});
+  base::RecTensor grads(gradients.data(), {rows, dim});
+  ASSERT_EQ(adapter.PutParameter(keys, values), 0);
+  std::vector<uint64_t> probe{0, 7, 777, rows - 1};
+  auto pref0 = adapter.PrefetchParameter(probe);
+  auto pref1 = adapter.PrefetchParameter(probe);
+  recstore::TrainingStepHeader header;
+  header.session = 8123; header.world = 2; header.divisor = 2; header.dim = dim;
+  EXPECT_EQ(adapter.TrainingStep("training", header, keys, grads), -1);
+  header.rank = 1;
+  EXPECT_EQ(adapter.TrainingStep("training", header, keys, grads), 0);
+  for (auto handle : {pref0, pref1}) {
+    base::RecTensor old({0, dim}, base::DataType::FLOAT32);
+    adapter.WaitForPrefetch(handle);
+    EXPECT_TRUE(adapter.GetPrefetchResult(handle, old));
+    EXPECT_EQ(old.shape(0), probe.size());
+    for (int i = 0; i < probe.size() * dim; ++i) EXPECT_FLOAT_EQ(old.data_as<float>()[i], 1.0f);
+  }
+  base::RecTensor actual({rows, dim}, base::DataType::FLOAT32);
+  ASSERT_EQ(adapter.GetParameter(keys, actual), 0);
+  for (int i = 0; i < rows * dim; ++i) EXPECT_FLOAT_EQ(actual.data_as<float>()[i], .98f);
+  header.step = 1; header.rank = 0;
+  base::RecTensor empty({0, dim}, base::DataType::FLOAT32);
+  EXPECT_EQ(adapter.TrainingStep("training", header, {}, empty), 0);
+  header.rank = 1;
+  EXPECT_EQ(adapter.TrainingStep("training", header, keys, grads), 1);
+  ASSERT_EQ(adapter.GetParameter(keys, actual), 0);
+  for (int i = 0; i < rows * dim; ++i) EXPECT_NEAR(actual.data_as<float>()[i], .97f, 1e-6);
 }
 
 TEST(PetPSIntegrationTest, AdapterSplitGetRoundTripMultiShard) {

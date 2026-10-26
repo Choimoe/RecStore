@@ -50,6 +50,9 @@ public:
   // Returns true when the batch assembled with kOk.
   bool WaitBatch(int batch_id);
   void ReleaseBatch(int batch_id);
+  // Materialize outstanding GETs in their CPU buffers and release RC slots,
+  // preserving their public handles until consumers retrieve the results.
+  void DrainBatchSlots();
   void WaitShardRpcs(
       const std::vector<shard_routing::PendingShardRpc>& shard_rpcs) const;
   void ReleaseShardRpcs(

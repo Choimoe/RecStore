@@ -722,6 +722,7 @@ add_test(NAME test_ps_transport_benchmark COMMAND test_ps_transport_benchmark)
 
 add_executable(test_raw_verbs_allocator test_raw_verbs_allocator.cpp)
 target_link_libraries(test_raw_verbs_allocator PUBLIC
+    base
     gtest
     gtest_main
     pthread

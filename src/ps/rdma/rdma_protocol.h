@@ -36,6 +36,7 @@ enum class RcOp : std::uint16_t {
   kUpdate     = 3,
   kInitTable  = 4,
   kUpdateFlat = 5,
+  kTrainingStep = 6,
 };
 
 enum class RcHashMethod : std::uint8_t {

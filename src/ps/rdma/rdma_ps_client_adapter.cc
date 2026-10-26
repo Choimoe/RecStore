@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -461,6 +462,8 @@ int RDMAPSClientAdapter::SubmitGetParameter(
 int RDMAPSClientAdapter::GetParameter(const base::ConstArray<uint64_t>& keys,
                                       base::RecTensor& values) {
   EnsureThreadInitialized();
+  std::lock_guard<std::mutex> io_guard(io_mu_);
+  executor_->DrainBatchSlots();
   if (!IsFloatEmbeddingValues(values, static_cast<int64_t>(keys.Size()))) {
     return -1;
   }
@@ -498,6 +501,71 @@ int RDMAPSClientAdapter::PutParameter(const base::ConstArray<uint64_t>& keys,
   EnsureThreadInitialized();
   return executor_->PutParameter(
       BuildChunks(keys, MaxPutKeysPerRpc(values.shape(1))), values);
+}
+
+int64_t RDMAPSClientAdapter::TrainingStep(
+    const std::string& table, TrainingStepHeader h,
+    const base::ConstArray<uint64_t>& keys, const base::RecTensor& grads) {
+  EnsureClientInitialized();
+  EnsureThreadInitialized();
+  EnsureTableReady(table, h.dim);
+  std::lock_guard<std::mutex> io_guard(io_mu_);
+  executor_->DrainBatchSlots();
+  if (h.kind == 0 && (grads.dim() != 2 || grads.shape(1) != h.dim ||
+                     !IsFloatEmbeddingValues(grads, keys.Size()))) {
+    throw std::invalid_argument("Invalid RDMA training gradients");
+  }
+  const size_t limit = shard_clients_.front()->TrainingStepPayloadLimit();
+  const size_t row_bytes = 8 + size_t(h.dim) * 4;
+  if (limit < sizeof(h) + row_bytes) throw std::runtime_error("Training row exceeds RDMA slot");
+  std::vector<std::vector<ShardChunk>> shards(shard_clients_.size());
+  if (h.kind == 0) {
+    for (auto& chunk : BuildChunks(keys, (limit - sizeof(h)) / row_bytes)) {
+      shards[chunk.client_index].push_back(std::move(chunk));
+    }
+  }
+  size_t rounds = 1;
+  for (auto& shard : shards) {
+    if (shard.empty()) shard.emplace_back();  // Empty-rank marker for every PS.
+    rounds = std::max(rounds, shard.size());
+  }
+  std::vector<int64_t> committed(shards.size(), -1);
+  std::deque<std::pair<size_t, int>> pending;
+  auto drain_one = [&] {
+    const auto [client, rpc] = pending.front();
+    pending.pop_front();
+    committed[client] = std::max(committed[client], shard_clients_[client]->WaitTrainingStep(rpc));
+  };
+  try {
+    // Round-robin chunks across shards, with a bounded window of outstanding
+    // RC writes. Gather directly into each packet, without a full shard copy.
+    for (size_t round = 0; round < rounds; ++round) {
+      for (size_t client = 0; client < shards.size(); ++client) {
+        if (round >= shards[client].size()) continue;
+        const auto& chunk = shards[client][round];
+        h.chunk = round; h.chunks = shards[client].size(); h.rows = chunk.keys.size();
+        std::string packet(sizeof(h) + h.rows * row_bytes, '\0');
+        std::memcpy(packet.data(), &h, sizeof(h));
+        if (h.rows) {
+          std::memcpy(packet.data() + sizeof(h), chunk.keys.data(), h.rows * 8);
+          char* dst = packet.data() + sizeof(h) + h.rows * 8;
+          for (size_t row = 0; row < h.rows; ++row) {
+            std::memcpy(dst + row * h.dim * 4,
+                        grads.data_as<float>() + chunk.positions[row] * h.dim, h.dim * 4);
+          }
+        }
+        pending.emplace_back(client, shard_clients_[client]->SubmitTrainingStep(table, packet));
+        if (pending.size() >= MaxInFlightGetRpcs()) drain_one();
+      }
+    }
+    while (!pending.empty()) drain_one();
+  } catch (...) {
+    while (!pending.empty()) {
+      try { drain_one(); } catch (...) {}
+    }
+    throw;
+  }
+  return *std::min_element(committed.begin(), committed.end());
 }
 
 int RDMAPSClientAdapter::UpdateParameter(const std::string& table_name,
@@ -585,6 +653,8 @@ void RDMAPSClientAdapter::Command(PSCommand) {
 uint64_t
 RDMAPSClientAdapter::PrefetchParameter(const base::ConstArray<uint64_t>& keys) {
   EnsureThreadInitialized();
+  std::lock_guard<std::mutex> io_guard(io_mu_);
+  executor_->DrainBatchSlots();
   if (keys.Size() == 0) {
     throw std::invalid_argument("RDMA prefetch requires at least one key");
   }
