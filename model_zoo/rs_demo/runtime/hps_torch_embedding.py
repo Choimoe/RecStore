@@ -4,7 +4,7 @@ import json
 import importlib
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from types import ModuleType
 from pathlib import Path
 from typing import Any, Sequence

@@ -123,22 +123,6 @@ def build_sparse_features(keys: list[str], values: torch.Tensor, lengths: torch.
         return _SimpleKeyedJaggedTensor(keys, values, lengths)
 
 
-def build_batch_ids_from_kjt(sparse_features) -> torch.Tensor:
-    ids_chunks = []
-    for key in sparse_features.keys():
-        ids_chunks.append(sparse_features[key].values().to(torch.int64))
-    if not ids_chunks:
-        return torch.empty((0,), dtype=torch.int64)
-    return torch.cat(ids_chunks, dim=0).cpu().contiguous()
-
-
-def build_table_offsets_from_eb_configs(eb_configs: list[dict], fusion_k: int) -> dict[str, int]:
-    offsets: dict[str, int] = {}
-    for idx, cfg in enumerate(eb_configs):
-        offsets[cfg["feature_names"][0]] = idx << fusion_k
-    return offsets
-
-
 def convert_kjt_ids_to_fused_ids(sparse_features, table_offsets: dict[str, int]) -> torch.Tensor:
     ids_chunks = []
     for key in sparse_features.keys():

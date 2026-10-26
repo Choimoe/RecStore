@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from dataclasses import asdict, dataclass, field
@@ -25,38 +24,6 @@ except ImportError:
         cache_capacity: int = 0
         embedding_dim: int = 128
         plugin_config: Dict[str, Any] = field(default_factory=dict)
-
-
-# Model plugins that contribute their own CLI arguments (routed into
-# ``RunConfig.model_args``).  DLRM is built in and needs none; others live in
-# their own ``model_zoo/<Model>/`` package.  Missing packages are skipped so the
-# CLI still works when only a subset of models is present.
-_MODEL_ARG_PLUGIN_MODULES = ()
-
-
-def _import_model_plugin(path: str):
-    """Import a model plugin module, tolerating both the ``model_zoo`` on-path
-    layout (production) and the repo-root layout (tests)."""
-    for candidate in (path, f"model_zoo.{path}"):
-        try:
-            return importlib.import_module(candidate)
-        except ImportError:
-            continue
-    return None
-
-
-def _iter_model_arg_plugins():
-    for path in _MODEL_ARG_PLUGIN_MODULES:
-        module = _import_model_plugin(path)
-        if module is not None:
-            yield module.PLUGIN
-
-
-def _model_arg_dests() -> list[str]:
-    dests: list[str] = []
-    for plugin in _iter_model_arg_plugins():
-        dests.extend(getattr(plugin, "ARG_DESTS", ()))
-    return dests
 
 
 DEFAULT_NUM_EMBEDDINGS_PER_FEATURE = [
@@ -124,10 +91,6 @@ def resolve_num_embeddings_per_feature(
     return cap_default_num_embeddings_per_feature(int(num_embeddings))
 
 
-def format_num_embeddings_per_feature(values: Sequence[int]) -> str:
-    return ",".join(str(int(value)) for value in values)
-
-
 def total_num_embeddings_per_feature(values: Sequence[int]) -> int:
     return sum(int(value) for value in values)
 
@@ -176,7 +139,6 @@ class RunConfig:
     over_arch_layer_sizes: str = "1024,1024,512,256,1"
     # Dense compute model: "dlrm" (default).
     model: str = "dlrm"
-    model_args: dict = field(default_factory=dict)
     backend: str = "recstore"
     nproc: int = 1
     nnodes: int = 1
@@ -632,6 +594,7 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
         # Drop removed fields so older worker JSON still loads.
         raw.pop("enable_single_node_distributed_fast_path", None)
         raw.pop("read_before_update", None)
+        raw.pop("model_args", None)
         raw = _migrate_legacy_optim_fields(raw)
         if isinstance(raw.get("optimization"), dict):
             raw["optimization"] = OptimizationConfig(**raw["optimization"])
@@ -657,12 +620,9 @@ def parse_config(argv: list[str] | None = None) -> RunConfig:
     )
     cfg_kwargs["optimization"] = optimization
 
-    # Route model-specific args into model_args.
-    model_args = {d: cfg_kwargs.pop(d) for d in _model_arg_dests() if d in cfg_kwargs}
     if cfg_kwargs["nproc_per_node"] is None:
         cfg_kwargs["nproc_per_node"] = cfg_kwargs.get("nproc", 1)
     cfg = RunConfig(**cfg_kwargs)
-    cfg.model_args = model_args
     if disable_recstore_fusion:
         cfg.recstore_enable_fusion = False
     if ns.no_start_server:

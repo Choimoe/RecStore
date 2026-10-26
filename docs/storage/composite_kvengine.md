@@ -99,6 +99,7 @@ SSD 索引创建 `IOBackend` 前的配置映射：
 |--------------|--------|------|
 | `DRAM_VALUE_STORE` | `DramValueStore` | 需非空 `value.path`、`value.dram_allocator` |
 | `SSD_VALUE_STORE` | `SsdValueStore` | 需非空 `value.path`、`value.ssd_allocator`（含 `io`） |
+| `SSD_STATIC_LAYOUT_VALUE_STORE` | `SsdStaticLayoutValueStore` | 固定 Bandana/MaxEmbed 布局，见下文 |
 | `TIERED_VALUE_STORE` | `HybridValueStore` | 需 `dram_allocator` + `ssd_allocator`；无顶层 `value.path` |
 
 ### 组合与字段约束
@@ -161,14 +162,31 @@ SSD 索引创建 `IOBackend` 前的配置映射：
 
 ## SSD Allocator（`value.ssd_allocator.type`）
 
-`SsdValueStore` 内联构造；默认 **`SSD_SLAB`**。
+`SsdValueStore` 内联构造；默认 **`SSD_SLAB`**。静态 Bandana/MaxEmbed 布局不使用这两个 allocator。
 
 | `type` | 实现 | 主要字段 |
 |--------|------|----------|
 | `SSD_SLAB` | `SsdSlabAllocator` | `capacity_bytes`；可选 `size_classes`（默认 128…4096）；`base_offset_bytes` |
 | `SSD_BUDDY` | `SsdBuddyAllocator` | `capacity_bytes`；`min_block_size` / `max_block_size`；`base_offset_bytes` |
 
-均需嵌套 `io` 对象。
+均需嵌套 `io` 对象。`plain` 是省略 `value.ssd_layout` 或显式 `"strategy": "plain"` 的现有 `SSD_VALUE_STORE`。
+
+## 静态 SSD 布局
+
+`SSD_STATIC_LAYOUT_VALUE_STORE` 直接保存 `key -> [(page, offset), ...]`。handle 是 `key + 1`，`0` 仍表示缺失；`TIERED_VALUE_STORE` 在 SSD 层继续加最高位。key 必须小于 `2^63-1`。
+
+| `value.ssd_layout.strategy` | 含义 |
+|-----------------------------|------|
+| `bandana` | 每个 key 一个固定页槽 |
+| `maxembed` | 每个 key 一个 primary 槽，外加预算内的副本页 |
+
+离线命令是 `recstore_ssd_layout partition|replicate|shrink|inspect`。`bandana` 只跑 partition；`maxembed` 在 partition 之后跑 replicate，需要更低副本率时再 shrink。运行时加载 artifact，并要求 `strategy` 和 `default_value_size_hint` 与文件一致。输入和 artifact 字节布局见 [ssd_layout.md](../../src/storage/ssd_layout/ssd_layout.md)。
+
+固定槽位不会 `Alloc` 或 `Free`。更新覆盖该 key 的全部副本；mapping 中没有的 key、变长 value 会直接失败。换 strategy 或 artifact 不能热切换，必须用空 engine 重新 `BulkLoad` 或 `LoadCheckpoint`。
+
+Checkpoint v3 在原 metadata 之外保存 strategy 和 artifact checksum。v2 checkpoint 只能恢复到 plain engine；identity 不一致时拒绝加载，不会静默退回 plain。
+
+`TIERED_VALUE_STORE` 可以把静态 store 当作 SSD 子 store。DRAM 选择仍是现有高水位：`dram_bytes_reserved + size <= capacity * high_watermark_ratio`。这里没有 LRU，也没有 SSD miss 后的 promotion。
 
 ---
 

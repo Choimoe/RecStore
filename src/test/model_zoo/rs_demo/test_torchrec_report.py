@@ -10,7 +10,7 @@ from python.pytorch.recstore.benchmark.report import (
     finalize_torchrec_row,
     write_stage_csv,
 )
-from model_zoo.rs_demo.runners.torchrec_runner import _merge_rank_outputs
+from model_zoo.rs_demo.runtime.worker_common import merge_rank_outputs as _merge_rank_outputs
 
 
 class TestTorchRecReport(unittest.TestCase):

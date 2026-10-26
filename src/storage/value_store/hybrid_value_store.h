@@ -8,13 +8,17 @@
 
 #include "base/factory.h"
 #include "storage/value_store/dram_value_store.h"
+#include "storage/value_store/ssd_static_layout_value_store.h"
 #include "storage/value_store/ssd_value_store.h"
 
 class HybridValueStore : public ValueStore {
 public:
   explicit HybridValueStore(const BaseKVConfig& config)
-      : dram_store_(BuildDramConfig(config)),
-        ssd_store_(BuildSsdConfig(config)) {
+      : dram_store_(BuildDramConfig(config)) {
+    const auto& value = config.json_config_.at("value");
+    ssd_store_.reset(base::Factory<ValueStore, const BaseKVConfig&>::NewInstance(
+        SsdStoreType(value), BuildSsdConfig(config)));
+    ssd_static_ = ssd_store_ && !ssd_store_->GetLayoutId().plain();
     const auto& v        = config.json_config_.at("value");
     const auto& dram     = v.at("dram_allocator");
     dram_capacity_bytes_ = dram.at("capacity_bytes").get<uint64_t>();
@@ -34,7 +38,7 @@ public:
         return MakeDramHandle(raw);
       }
     }
-    const uint64_t raw = ssd_store_.Alloc(size);
+    const uint64_t raw = ssd_store_->Alloc(size);
     if (raw == kValueHandleNone) {
       return kValueHandleNone;
     }
@@ -48,7 +52,7 @@ public:
       return;
     }
     if (IsOnSSD(handle)) {
-      ssd_store_.Write(SsdRawHandle(handle), data, size);
+      ssd_store_->Write(SsdRawHandle(handle), data, size);
       return;
     }
     dram_store_.Write(DramRawHandle(handle), data, size);
@@ -62,12 +66,23 @@ public:
     return handle;
   }
 
+  uint64_t AllocAndWrite(uint64_t key, const void* data, size_t size) override {
+    if (!ssd_static_) {
+      return AllocAndWrite(data, size);
+    }
+    const uint64_t handle = PlaceStatic(key, size);
+    if (handle != kValueHandleNone) {
+      Write(handle, data, size);
+    }
+    return handle;
+  }
+
   size_t Read(uint64_t handle, void* out_buf, size_t buf_size) override {
     if (handle == kValueHandleNone) {
       return 0;
     }
     if (IsOnSSD(handle)) {
-      return ssd_store_.Read(SsdRawHandle(handle), out_buf, buf_size);
+      return ssd_store_->Read(SsdRawHandle(handle), out_buf, buf_size);
     }
     return dram_store_.Read(DramRawHandle(handle), out_buf, buf_size);
   }
@@ -77,7 +92,7 @@ public:
       return;
     }
     if (IsOnSSD(handle)) {
-      ssd_store_.Free(SsdRawHandle(handle));
+      ssd_store_->Free(SsdRawHandle(handle));
       ssd_live_allocs_.fetch_sub(1, std::memory_order_relaxed);
       return;
     }
@@ -112,7 +127,7 @@ public:
       return 0;
     }
     if (IsOnSSD(handle)) {
-      return ssd_store_.SlotCapacity(SsdRawHandle(handle));
+      return ssd_store_->SlotCapacity(SsdRawHandle(handle));
     }
     return dram_store_.SlotCapacity(DramRawHandle(handle));
   }
@@ -146,7 +161,7 @@ public:
       dram_store_.BatchWrite(dram_handles, dram_specs);
     }
     if (!ssd_handles.empty()) {
-      ssd_store_.BatchWrite(ssd_handles, ssd_specs);
+      ssd_store_->BatchWrite(ssd_handles, ssd_specs);
     }
   }
 
@@ -183,7 +198,7 @@ public:
     }
 
     std::vector<ReadResult> ssd_results;
-    ssd_store_.BatchRead(ssd_handles, ssd_results);
+    ssd_store_->BatchRead(ssd_handles, ssd_results);
     if (ssd_results.size() != ssd_indices.size()) {
       throw std::runtime_error(
           "HybridValueStore::BatchRead result size mismatch");
@@ -198,8 +213,14 @@ public:
     os << "HybridValueStore(dram_reserved="
        << dram_bytes_reserved_.load(std::memory_order_relaxed)
        << ", dram_capacity=" << dram_capacity_bytes_ << ", dram="
-       << dram_store_.GetInfo() << ", ssd=" << ssd_store_.GetInfo() << ")";
+       << dram_store_.GetInfo() << ", ssd=" << ssd_store_->GetInfo() << ")";
     return os.str();
+  }
+
+  void ResetStats() override {
+    if (ssd_store_) {
+      ssd_store_->ResetStats();
+    }
   }
 
   std::string ExtraResultFields() const override {
@@ -226,7 +247,11 @@ public:
        << " tiered_dram_total_allocs=" << dram_total
        << " tiered_ssd_total_allocs=" << ssd_total << " tiered_total_allocs="
        << total << " tiered_ssd_total_ratio=" << total_ratio;
-    return os.str();
+    return os.str() + ssd_store_->ExtraResultFields();
+  }
+
+  ValueStore::LayoutId GetLayoutId() const override {
+    return ssd_store_ ? ssd_store_->GetLayoutId() : ValueStore::LayoutId{};
   }
 
 private:
@@ -254,9 +279,24 @@ private:
       value["path"] = value.at("dram_allocator").at("path");
     }
     value.erase("ssd_allocator");
+    value.erase("ssd_layout");
     value.erase("tiering");
     j["value"] = value;
     return out;
+  }
+
+  static std::string SsdStoreType(const json& value) {
+    if (!value.contains("ssd_layout")) {
+      return "SSD_VALUE_STORE";
+    }
+    const std::string strategy = value.at("ssd_layout").value("strategy", "plain");
+    if (strategy.empty() || strategy == "plain") {
+      return "SSD_VALUE_STORE";
+    }
+    if (strategy == "bandana" || strategy == "maxembed") {
+      return "SSD_STATIC_LAYOUT_VALUE_STORE";
+    }
+    throw std::invalid_argument("unknown SSD layout strategy: " + strategy);
   }
 
   static BaseKVConfig BuildSsdConfig(const BaseKVConfig& config) {
@@ -266,7 +306,7 @@ private:
       return out;
     }
     json value    = j.at("value");
-    value["type"] = "SSD_VALUE_STORE";
+    value["type"] = SsdStoreType(value);
     if (value.at("ssd_allocator").contains("path")) {
       value["path"] = value.at("ssd_allocator").at("path");
     }
@@ -287,8 +327,32 @@ private:
     return next <= high_watermark_ratio_;
   }
 
+  uint64_t PlaceStatic(uint64_t key, size_t size) {
+    if (key > ssd_layout::kMaxKey) {
+      throw std::invalid_argument("static SSD key is out of range");
+    }
+    const size_t row_size = ssd_store_->SlotCapacity(key + 1);
+    if (size != row_size) {
+      throw std::invalid_argument("static SSD layout value size mismatch");
+    }
+    if (ShouldUseDram(size)) {
+      const uint64_t raw = dram_store_.Alloc(size);
+      if (raw != kValueHandleNone) {
+        dram_bytes_reserved_.fetch_add(
+            dram_store_.SlotCapacity(raw), std::memory_order_relaxed);
+        dram_live_allocs_.fetch_add(1, std::memory_order_relaxed);
+        dram_total_allocs_.fetch_add(1, std::memory_order_relaxed);
+        return MakeDramHandle(raw);
+      }
+    }
+    ssd_live_allocs_.fetch_add(1, std::memory_order_relaxed);
+    ssd_total_allocs_.fetch_add(1, std::memory_order_relaxed);
+    return MakeSsdHandle(key + 1);
+  }
+
   DramValueStore dram_store_;
-  SsdValueStore ssd_store_;
+  std::unique_ptr<ValueStore> ssd_store_;
+  bool ssd_static_           = false;
   uint64_t dram_capacity_bytes_ = 0;
   double high_watermark_ratio_  = 0.85;
   std::atomic<uint64_t> dram_bytes_reserved_{0};

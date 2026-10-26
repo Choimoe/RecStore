@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
-import subprocess
 import sys
 import time
 from collections import deque
@@ -19,14 +17,12 @@ if _pytorch_src not in sys.path:
 
 from ..config import (
     RunConfig,
-    dump_run_config,
     ensure_shared_dir,
     resolve_num_embeddings_per_feature,
     validate_recstore_config,
 )
 from ..data.dlrm_source import (
     build_kjt_batch_from_dense_sparse_labels,
-    build_train_dataloader,
     convert_kjt_ids_to_fused_ids,
     convert_kjt_ids_to_fused_ids_device,
     get_default_cat_names,
@@ -50,12 +46,14 @@ from ..runtime.timing import StepTimer
 from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
     bool_int as _bool_int,
-    build_worker_env as _build_worker_env,
-    merge_rank_outputs as _merge_rank_outputs,
     read_worker_context as _read_worker_context,
     write_rows as _write_rows,
 )
-from .base import BenchmarkRunner
+from .base import (
+    BenchmarkRunner,
+    build_rank_dataloader as _build_train_dataloader_for_mode,
+    wrap_dense_module_for_dist as _maybe_wrap_dense_module_for_dist,
+)
 
 from recstore.embedding_read_path import (
     BagPipeReadPath,
@@ -209,34 +207,6 @@ def _maybe_warmup_gpu_local_shm_fast_path(
     return bool(client.warmup_local_lookup_flat_cuda_region())
 
 
-def _build_train_dataloader_for_mode(repo_root: Path, cfg: RunConfig, rank: int):
-    world_size = cfg.nnodes * cfg.nproc_per_node
-    return build_train_dataloader(
-        repo_root=repo_root,
-        data_dir_rel=cfg.data_dir,
-        train_ratio=cfg.train_ratio,
-        num_embeddings=cfg.num_embeddings,
-        num_embeddings_per_feature=cfg.num_embeddings_per_feature,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        seed=cfg.seed,
-        rank=rank if world_size > 1 else None,
-        world_size=world_size if world_size > 1 else None,
-    )
-
-
-def _maybe_wrap_dense_module_for_dist(
-    dense_module: torch.nn.Module, device: torch.device, local_rank: int, use_dist: bool
-) -> torch.nn.Module:
-    if not use_dist:
-        return dense_module
-    if device.type == "cuda":
-        return torch.nn.parallel.DistributedDataParallel(
-            dense_module, device_ids=[local_rank], output_device=local_rank
-        )
-    return torch.nn.parallel.DistributedDataParallel(dense_module)
-
-
 class RecStoreRunner(BenchmarkRunner):
     """Train a DLRM-style model with embeddings served by the RecStore PS.
 
@@ -246,86 +216,30 @@ class RecStoreRunner(BenchmarkRunner):
     update. Embedding reads follow ``cfg.read_mode`` (direct / prefetch).
     """
 
+    backend = "recstore"
+    rank_dir_name = "recstore_ranks"
+
     def __init__(self, runtime_dir: Path) -> None:
         self.runtime_dir = runtime_dir
 
-    def _rank_output_dir(self, cfg: RunConfig) -> Path:
-        return Path(cfg.output_root) / "outputs" / cfg.run_id / "recstore_ranks"
+    def _main_csv(self, cfg: RunConfig) -> Path:
+        return Path(cfg.recstore_main_csv)
 
-    def _build_torchrun_cmd(self, repo_root: Path, cfg: RunConfig, config_json: Path) -> list[str]:
-        # The whole resolved config is handed to each worker as JSON, so the
-        # launcher argv stays tiny and never drifts from the config schema.
-        return [
-            sys.executable, "-m", "torch.distributed.run",
-            "--nnodes", str(cfg.nnodes),
-            "--node_rank", str(cfg.node_rank),
-            "--nproc_per_node", str(cfg.nproc_per_node),
-            "--rdzv_backend", str(cfg.rdzv_backend),
-            "--rdzv_endpoint", f"{cfg.master_addr}:{cfg.master_port}",
-            "--rdzv_id", str(cfg.rdzv_id),
-            "--tee", "3",
-            str(repo_root / "model_zoo/rs_demo/run_mock_stress.py"),
-            "--run-config-json", str(config_json),
-        ]
+    def _after_torchrun(self, cfg: RunConfig, rank_dir: Path, result) -> None:
+        # [BagPipe-probe] keep worker stderr even on success: C++ WARNINGs
+        # (GPU cache fallbacks, update failures) are otherwise lost.
+        try:
+            (rank_dir / "worker_stderr.log").write_text(
+                result.stderr or "", encoding="utf-8"
+            )
+        except OSError:
+            pass
 
     def _run_single_process(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
         return self._run_local_worker(
             repo_root=repo_root, cfg=cfg, rank=0, world_size=1, local_rank=0,
             out_csv=Path(cfg.recstore_main_csv),
         )
-
-    def _run_distributed(self, repo_root: Path, cfg: RunConfig) -> dict[str, Any]:
-        rank_dir = self._rank_output_dir(cfg)
-        ensure_shared_dir(rank_dir)
-        # Workers must not start their own PS server (the launcher already did).
-        worker_cfg = dataclasses.replace(cfg, start_server=False)
-        config_json = dump_run_config(worker_cfg, rank_dir / "worker_config.json")
-
-        cmd = self._build_torchrun_cmd(repo_root, cfg, config_json)
-        env = _build_worker_env("recstore", rank_dir)
-        res = subprocess.run(
-            cmd, cwd=str(repo_root), env=env, check=False, text=True, capture_output=True
-        )
-        # [BagPipe-probe] keep worker stderr even on success: C++ WARNINGs
-        # (GPU cache fallbacks, update failures) are otherwise lost.
-        try:
-            (rank_dir / "worker_stderr.log").write_text(
-                res.stderr or "", encoding="utf-8"
-            )
-        except Exception:
-            pass
-        if res.returncode != 0:
-            raise RuntimeError(
-                "recstore torchrun worker failed\n"
-                f"stdout:\n{res.stdout}\nstderr:\n{res.stderr}"
-            )
-
-        world_size = cfg.nnodes * cfg.nproc_per_node
-        rank_csvs = [rank_dir / f"rank{rank}.csv" for rank in range(world_size)]
-        # Without a shared filesystem each host can only see its own rank
-        # CSVs; verify the local ranks and merge everything only when all
-        # ranks are visible (e.g. shared FS or single host). The e2e driver
-        # collects remote rank CSVs and produces the merged main csv itself.
-        local_ranks = range(
-            cfg.node_rank * cfg.nproc_per_node,
-            (cfg.node_rank + 1) * cfg.nproc_per_node,
-        )
-        missing_local = [
-            str(rank_dir / f"rank{rank}.csv")
-            for rank in local_ranks
-            if not (rank_dir / f"rank{rank}.csv").exists()
-        ]
-        if missing_local:
-            raise RuntimeError(f"missing local rank csv outputs: {missing_local}")
-        missing = [str(path) for path in rank_csvs if not path.exists()]
-        if missing:
-            print(
-                "[rs_demo] remote rank csvs not visible on this host "
-                f"(no shared filesystem?); skipping merge: {missing}"
-            )
-            return {"backend": "recstore", "rows": []}
-        rows = _merge_rank_outputs(rank_csvs, Path(cfg.recstore_main_csv))
-        return {"backend": "recstore", "rows": rows}
 
     # -- worker setup ------------------------------------------------------
 
@@ -366,6 +280,139 @@ class RecStoreRunner(BenchmarkRunner):
         else:
             table_offsets = {cfg_item["feature_names"][0]: 0 for cfg_item in eb_configs}
         return eb_configs, table_offsets, recstore.RecStoreEmbeddingBagCollection
+
+    def _build_read_path(
+        self,
+        cfg: RunConfig,
+        client: Any,
+        embedding_module: Any,
+        eb_configs: list[dict],
+        table_offsets: dict[str, int],
+        default_cat_names: list[str],
+        device: torch.device,
+    ) -> tuple[Any, Any, Any, bool]:
+        """Build the embedding read path, its optimizer, and the BagPipe plugin.
+
+        Returns ``(plugin, read_path, sparse_optimizer, use_planned_bagpipe)``.
+        """
+        use_bagpipe = cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
+        use_planned_bagpipe = use_bagpipe and cfg.optimization.prescan
+
+        if use_bagpipe:
+            fused_id_prefixes = torch.tensor(
+                [table_offsets[name] for name in default_cat_names],
+                dtype=torch.int64,
+                device=device,
+            )
+
+            def _id_extractor(sparse_features):
+                values = sparse_features.values().to(torch.int64)
+                try:
+                    # DLRM has one ID per feature per sample, so a
+                    # broadcast add avoids repeat_interleave and length
+                    # reduction on the enqueue path.
+                    return (
+                        values.view(len(fused_id_prefixes), -1)
+                        + fused_id_prefixes[:, None]
+                    ).reshape(-1).contiguous()
+                except RuntimeError:
+                    return convert_kjt_ids_to_fused_ids_device(
+                        sparse_features, table_offsets
+                    )
+
+            cache_capacity = (
+                cfg.optimization.cache_capacity
+                or cfg.gpu_cache_capacity
+                or 160_000
+            )
+            print(
+                "[rs_demo] BagPipe cache configured: "
+                f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
+            )
+            # BagPipe owns its cache policy.  The cold-start lookup must not
+            # trip the ops layer's low-hit bypass latch and clear the cache.
+            disable_bypass = getattr(
+                client, "set_gpu_cache_lookup_bypass_enabled", None
+            )
+            if callable(disable_bypass):
+                disable_bypass(False)
+            # BagPipe also owns residency across CPU-side update paths.
+            disable_clear_after_update = getattr(
+                client, "set_clear_gpu_cache_after_cpu_update", None
+            )
+            if callable(disable_clear_after_update):
+                disable_clear_after_update(False)
+
+            master_table_name = eb_configs[0]["name"] if eb_configs else ""
+            plugin = OptimizationPluginRegistry.create(
+                "bagpipe",
+                prescan=cfg.optimization.prescan,
+                aggregation=cfg.optimization.aggregation,
+                embedding_module=embedding_module,
+                kv_client=client,
+                lookahead=cfg.optimization.lookahead,
+                cleanup_proportion=cfg.optimization.cleanup_proportion,
+                cache_capacity=cache_capacity,
+                embedding_dim=cfg.optimization.embedding_dim,
+                fuse_k=cfg.fuse_k,
+                table_offsets=table_offsets,
+                table_sizes={
+                    cfg_item["feature_names"][0]: cfg_item["num_embeddings"]
+                    for cfg_item in eb_configs
+                },
+                master_table_name=master_table_name,
+                device=device,
+                lr=0.01,
+                id_extractor=_id_extractor,
+            )
+            sparse_optimizer = plugin.create_sparse_optimizer(
+                [embedding_module], lr=0.01
+            )
+            read_path = BagPipeReadPath(plugin, device=device)
+        else:
+            fused_id_offsets = torch.tensor(
+                [table_offsets[name] for name in default_cat_names],
+                dtype=torch.int64,
+            )
+            plugin = None
+            read_path = build_embedding_read_path(
+                cfg.read_mode,
+                embedding_module=embedding_module,
+                prefetch_depth=cfg.prefetch_depth,
+                embedding_dim=cfg.embedding_dim,
+                feature_offsets=fused_id_offsets,
+            )
+            sparse_optimizer = recstore.SparseSGD([embedding_module], lr=0.01)
+
+        return plugin, read_path, sparse_optimizer, use_planned_bagpipe
+
+    def _build_training_modules(
+        self,
+        cfg: RunConfig,
+        device: torch.device,
+        local_rank: int,
+        use_dist: bool,
+        num_sparse_features: int,
+    ) -> tuple[Any, Any, Any, Any]:
+        """Build the dense model, criterion, and dense optimizer."""
+        dense_module = build_dense_module(
+            cfg,
+            num_sparse_features=num_sparse_features,
+            embedding_dim=cfg.embedding_dim,
+            device=device,
+        )
+        dense_module = _maybe_wrap_dense_module_for_dist(
+            dense_module=dense_module, device=device,
+            local_rank=local_rank, use_dist=use_dist,
+        )
+        unwrapped_module = (
+            dense_module.module
+            if isinstance(dense_module, torch.nn.parallel.DistributedDataParallel)
+            else dense_module
+        )
+        criterion = build_criterion(cfg, unwrapped_module)
+        dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
+        return dense_module, unwrapped_module, criterion, dense_optimizer
 
     def _run_local_worker(
         self,
@@ -411,10 +458,6 @@ class RecStoreRunner(BenchmarkRunner):
             eb_configs, table_offsets, RecStoreEmbeddingBagCollection = (
                 self._build_embedding_module(cfg, client, default_cat_names)
             )
-            fused_id_offsets = torch.tensor(
-                [table_offsets[name] for name in default_cat_names],
-                dtype=torch.int64,
-            )
             embedding_module = RecStoreEmbeddingBagCollection(
                 embedding_bag_configs=eb_configs,
                 enable_fusion=cfg.recstore_enable_fusion,
@@ -424,110 +467,31 @@ class RecStoreRunner(BenchmarkRunner):
             )
             # -- optimization plugin + read path --------------------------------
             use_bagpipe = cfg.optimization.plugin == "bagpipe" or cfg.read_mode == "bagpipe"
-            use_planned_bagpipe = use_bagpipe and cfg.optimization.prescan
-
-            if use_bagpipe:
-                fused_id_prefixes = torch.tensor(
-                    [table_offsets[name] for name in default_cat_names],
-                    dtype=torch.int64,
-                    device=device,
-                )
-
-                def _id_extractor(sparse_features):
-                    values = sparse_features.values().to(torch.int64)
-                    try:
-                        # DLRM has one ID per feature per sample, so a
-                        # broadcast add avoids repeat_interleave and length
-                        # reduction on the enqueue path.
-                        return (
-                            values.view(len(fused_id_prefixes), -1)
-                            + fused_id_prefixes[:, None]
-                        ).reshape(-1).contiguous()
-                    except RuntimeError:
-                        return convert_kjt_ids_to_fused_ids_device(
-                            sparse_features, table_offsets
-                        )
-
-                cache_capacity = (
-                    cfg.optimization.cache_capacity
-                    or cfg.gpu_cache_capacity
-                    or 160_000
-                )
-                print(
-                    "[rs_demo] BagPipe cache configured: "
-                    f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
-                )
-                # BagPipe owns its cache policy.  The cold-start lookup must not
-                # trip the ops layer's low-hit bypass latch and clear the cache.
-                disable_bypass = getattr(
-                    client, "set_gpu_cache_lookup_bypass_enabled", None
-                )
-                if callable(disable_bypass):
-                    disable_bypass(False)
-                # BagPipe also owns residency across CPU-side update paths.
-                disable_clear_after_update = getattr(
-                    client, "set_clear_gpu_cache_after_cpu_update", None
-                )
-                if callable(disable_clear_after_update):
-                    disable_clear_after_update(False)
-
-                master_table_name = eb_configs[0]["name"] if eb_configs else ""
-                plugin = OptimizationPluginRegistry.create(
-                    "bagpipe",
-                    prescan=cfg.optimization.prescan,
-                    aggregation=cfg.optimization.aggregation,
+            plugin, read_path, sparse_optimizer, use_planned_bagpipe = (
+                self._build_read_path(
+                    cfg=cfg,
+                    client=client,
                     embedding_module=embedding_module,
-                    kv_client=client,
-                    lookahead=cfg.optimization.lookahead,
-                    cleanup_proportion=cfg.optimization.cleanup_proportion,
-                    cache_capacity=cache_capacity,
-                    embedding_dim=cfg.optimization.embedding_dim,
-                    fuse_k=cfg.fuse_k,
+                    eb_configs=eb_configs,
                     table_offsets=table_offsets,
-                    table_sizes={
-                        cfg_item["feature_names"][0]: cfg_item["num_embeddings"]
-                        for cfg_item in eb_configs
-                    },
-                    master_table_name=master_table_name,
+                    default_cat_names=default_cat_names,
                     device=device,
-                    lr=0.01,
-                    id_extractor=_id_extractor,
                 )
-                sparse_optimizer = plugin.create_sparse_optimizer(
-                    [embedding_module], lr=0.01
-                )
-                read_path = BagPipeReadPath(plugin, device=device)
-            else:
-                read_path = build_embedding_read_path(
-                    cfg.read_mode,
-                    embedding_module=embedding_module,
-                    prefetch_depth=cfg.prefetch_depth,
-                    embedding_dim=cfg.embedding_dim,
-                    feature_offsets=fused_id_offsets,
-                )
-                sparse_optimizer = recstore.SparseSGD([embedding_module], lr=0.01)
+            )
 
             _barrier_for_step_alignment(
                 dist=dist, device=device, local_rank=local_rank, use_dist=use_dist
             )
 
-            dense_module = build_dense_module(
-                cfg,
-                num_sparse_features=len(default_cat_names),
-                embedding_dim=cfg.embedding_dim,
-                device=device,
+            dense_module, unwrapped_module, criterion, dense_optimizer = (
+                self._build_training_modules(
+                    cfg=cfg,
+                    device=device,
+                    local_rank=local_rank,
+                    use_dist=use_dist,
+                    num_sparse_features=len(default_cat_names),
+                )
             )
-            dense_module = _maybe_wrap_dense_module_for_dist(
-                dense_module=dense_module, device=device,
-                local_rank=local_rank, use_dist=use_dist,
-            )
-            unwrapped_module = (
-                dense_module.module
-                if isinstance(dense_module, torch.nn.parallel.DistributedDataParallel)
-                else dense_module
-            )
-            criterion = build_criterion(cfg, unwrapped_module)
-            dense_optimizer = torch.optim.SGD(dense_module.parameters(), lr=0.01)
             record_pooled_grad = getattr(embedding_module, "record_pooled_grad", None)
 
             if _maybe_warmup_gpu_local_shm_fast_path(cfg=cfg, client=client, device=device):
