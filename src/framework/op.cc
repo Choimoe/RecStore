@@ -503,31 +503,98 @@ int64_t KVClientOp::SparseGradientCommit(
       grads);
 }
 
-uint64_t KVClientOp::EmbUpdateAsync(const std::string& table_name,
-                                    const base::RecTensor& keys,
-                                    const base::RecTensor& grads) {
-  if (ps_client_ == nullptr) {
+int64_t KVClientOp::SparseGradientCommitAsync(
+    const std::string& table,
+    SparseGradientCommitHeader header,
+    const base::RecTensor& keys,
+    const base::RecTensor& grads,
+    std::function<void()> ready) {
+  if (!ps_client_)
     throw std::runtime_error("PS client is not initialized");
-  }
+  auto* client = ps_client_;
+  return sparse_commits_.Submit(
+      [client, table](SparseGradientCommitHeader h,
+                      const base::RecTensor& k,
+                      const base::RecTensor& g) {
+        return client->SparseGradientCommit(
+            table,
+            h,
+            base::ConstArray<uint64_t>(k.data_as<uint64_t>(), k.shape(0)),
+            g);
+      },
+      header,
+      keys,
+      grads,
+      std::move(ready));
+}
+
+void KVClientOp::WaitSparseGradientCommit(int64_t id) {
+  sparse_commits_.Wait(id);
+}
+
+void KVClientOp::CloseSparseGradientCommit(const std::string& table,
+                                           SparseGradientCommitHeader header) {
+  base::RecTensor keys({0}, base::DataType::UINT64);
+  base::RecTensor grads({0, int64_t(header.dim)}, base::DataType::FLOAT32);
+  SparseGradientCommit(table, header, keys, grads);
+}
+
+uint64_t KVClientOp::EmbUpdateAsync(
+    const std::string& table_name,
+    const base::RecTensor& keys,
+    const base::RecTensor& grads,
+    framework::CacheUpdateActions cache) {
+  if (ps_client_ == nullptr)
+    throw std::runtime_error("PS client is not initialized");
+  if (ps_backend_name_ != "rdma")
+    throw std::runtime_error("emb_update_async requires the RDMA backend");
   validate_keys(keys);
   validate_embeddings(grads, "Grads");
-  if (keys.shape(0) != grads.shape(0) || grads.shape(1) <= 0) {
+  if (table_name.empty() || keys.shape(0) != grads.shape(0) ||
+      grads.shape(1) <= 0)
     throw std::invalid_argument("Invalid asynchronous embedding update shape");
-  }
   const int64_t rows = keys.shape(0);
-  return ps_client_->SubmitUpdateParameterAsync(
+  auto id            = ps_client_->SubmitUpdateParameterAsync(
       table_name,
       base::ConstArray<uint64_t>(keys.data_as<uint64_t>(), rows),
       grads);
+  pending_updates_.Add(id, rows, std::move(cache));
+  return id;
 }
 
 void KVClientOp::WaitForEmbUpdate(uint64_t update_id) {
-  if (ps_client_ == nullptr) {
+  if (ps_client_ == nullptr)
     throw std::runtime_error("PS client is not initialized");
-  }
-  if (ps_client_->WaitUpdateParameter(update_id) != 0) {
-    throw std::runtime_error("Failed to complete asynchronous RDMA update");
-  }
+  pending_updates_.Wait(update_id, [this, update_id] {
+    if (ps_client_->WaitUpdateParameter(update_id) != 0)
+      throw std::runtime_error("Failed to complete asynchronous RDMA update");
+  });
+}
+
+void KVClientOp::EmbUpdateCached(
+    const std::string& table,
+    const base::RecTensor& keys,
+    const base::RecTensor& grads,
+    const framework::CacheUpdateActions& cache,
+    bool local) {
+  framework::g_cache_aware_op.Update(keys.shape(0), cache, [&] {
+    if (local)
+      LocalUpdateFlat(table, keys, grads);
+    else
+      EmbUpdate(table, keys, grads);
+  });
+}
+
+void KVClientOp::EmbWriteCached(
+    const base::RecTensor& keys,
+    const base::RecTensor& values,
+    const framework::CacheUpdateActions& cache,
+    bool per_key) {
+  EmbWrite(keys, values);
+  if (per_key)
+    framework::g_cache_aware_op.AfterUpdate(keys.shape(0), cache, true);
+  else if (cache.enabled && cache.enabled())
+    framework::CacheAwareOp::ClearNoThrow(cache.clear);
 }
 
 int KVClientOp::InitEmbeddingTable(const std::string& table_name,

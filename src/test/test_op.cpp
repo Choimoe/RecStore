@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "framework/common/sparse_gradient_commit_runtime.h"
+#include "framework/common/cache_aware_op.h"
+
 #define private public
 #include "framework/op.h"
 #undef private
