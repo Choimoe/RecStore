@@ -1028,7 +1028,7 @@ class TestRecStoreRunner(unittest.TestCase):
         self.assertGreaterEqual(fake_sparse_optimizer.zero_grad_calls, 2)
         self.assertEqual(fake_ebc.reset_perf_stats_calls, 1)
 
-    def test_bagpipe_mode_enables_gpu_cache_and_keeps_plugin_optimizer(self) -> None:
+    def test_bagpipe_mode_uses_bounded_controller_and_keeps_plugin_optimizer(self) -> None:
         cfg = config.parse_config(
             [
                 "--backend",
@@ -1088,6 +1088,8 @@ class TestRecStoreRunner(unittest.TestCase):
             self.assertEqual(plugin_name, "bagpipe")
             created_kwargs.update(kwargs)
             plugin = _FakeBagPipePlugin()
+            plugin._controller = mock.Mock()
+            plugin._controller.lookup.side_effect = kwargs["embedding_module"]
             plugins.append(plugin)
             return plugin
 
@@ -1103,8 +1105,8 @@ class TestRecStoreRunner(unittest.TestCase):
             )
 
         client = fake_ebc.kv_client
-        self.assertEqual(client.enable_gpu_cache_calls, [(32, 4)])
-        self.assertTrue(client.gpu_cache_enabled)
+        self.assertEqual(client.enable_gpu_cache_calls, [])
+        self.assertFalse(client.gpu_cache_enabled)
         self.assertFalse(client.gpu_cache_lookup_bypass_enabled)
         self.assertEqual(created_kwargs["master_table_name"], "t_cat_0")
         self.assertEqual(created_kwargs["cache_capacity"], 32)

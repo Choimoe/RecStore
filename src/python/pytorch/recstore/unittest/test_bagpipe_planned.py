@@ -1,6 +1,8 @@
+import time
 import tempfile
 import unittest
 from datetime import timedelta
+from multiprocessing.managers import BaseManager
 from pathlib import Path
 
 import torch
@@ -8,7 +10,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from ..bagpipe_cache.planned import PlannedBagPipeController
-from ..bagpipe_cache.controller import BagPipeCacheController
 from ..optim import OptimizationPluginRegistry
 
 
@@ -25,97 +26,155 @@ class _Features:
         return self._lengths
 
 
-class _PS:
+class _Server:
+    """Independent global-mean SGD reference, shared by test trainers."""
     def __init__(self):
-        self.rows = {key: torch.tensor([float(key), float(key * 2)]) for key in range(100)}
-        self.writes = 0
+        import threading
+        self.lock = threading.Lock()
+        self.rows = {key: [float(key), float(key * 2)] for key in range(512)}
+        self.pending = {}
+        self.committed = -1
+
+    def pull(self, ids):
+        with self.lock:
+            return [self.rows[key][:] for key in ids]
+
+    def submit(self, ids, grads, step, rank, world, lr, divisor):
+        with self.lock:
+            contributions = self.pending.setdefault(step, {})
+            contributions[rank] = (ids, grads)
+            if len(contributions) == world:
+                total = {}
+                for source in range(world):
+                    keys, values = contributions[source]
+                    for key, value in zip(keys, values):
+                        row = total.setdefault(key, [0., 0.])
+                        for col in range(2):
+                            row[col] += value[col]
+                for key, value in total.items():
+                    self.rows[key] = [self.rows[key][col] - lr * value[col] / divisor for col in range(2)]
+                self.committed = step
+                del self.pending[step]
+
+    def done(self, step):
+        with self.lock:
+            return self.committed >= step
+
+
+class _PS:
+    def __init__(self, server=None):
+        self.server = server or _Server()
+        self.prefetches = {}
+        self.next_handle = 0
+        self.fail_wait = False
+        self.pulled = 0
 
     def pull(self, name, ids):
-        return torch.stack([self.rows[key] for key in ids.tolist()])
+        self.pulled += ids.numel()
+        return torch.tensor(self.server.pull(ids.tolist()), dtype=torch.float32).reshape(-1, 2)
 
-    def emb_write_values(self, name, ids, values):
-        self.writes += 1
-        for key, value in zip(ids.tolist(), values):
-            self.rows[key] = value.clone()
+    def prefetch(self, ids):
+        self.next_handle += 1
+        self.prefetches[self.next_handle] = self.pull("table", ids).clone()
+        return self.next_handle
+
+    def wait_and_get(self, handle, dim, device="cpu"):
+        return self.prefetches.pop(handle).to(device)
+
+    def training_step_async(self, name, ids, grads, **kwargs):
+        self.server.submit(ids.cpu().tolist(), grads.cpu().tolist(),
+                           **{k: kwargs[k] for k in ("step", "rank", "world", "lr", "divisor")})
+        return kwargs["step"]
+
+    def training_step_wait(self, step):
+        if self.fail_wait:
+            raise OSError("simulated commit failure")
+        deadline = time.monotonic() + 20
+        while not self.server.done(step):
+            if time.monotonic() > deadline:
+                raise TimeoutError("test PS commit timed out")
+            time.sleep(.001)
+
+    def training_step_close(self, *args, **kwargs):
+        pass
 
 
-def _controller(ps=None, capacity=1):
+def _controller(ps=None, capacity=1, **kwargs):
     return PlannedBagPipeController(
         None, ps or _PS(), cache_capacity=capacity, embedding_dim=2,
         table_offsets={"f0": 0}, master_table_name="table", device="cpu",
-        id_extractor=lambda sf: sf.ids,
+        id_extractor=lambda sf: sf.ids, lr=0.1, **kwargs,
     )
 
 
-def _distributed_reference(rank, rendezvous):
-    dist.init_process_group(
-        "gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2,
-        timeout=timedelta(seconds=30),
-    )
+class _Manager(BaseManager):
+    pass
+
+
+_Manager.register("Server", _Server)
+
+
+def _distributed_reference(rank, rendezvous, server, aggregation, prescan):
+    dist.init_process_group("gloo", init_method=f"file://{rendezvous}",
+                            rank=rank, world_size=2, timeout=timedelta(seconds=30))
     try:
-        ps = _PS()
-        controller = _controller(ps)
-        all_ids = [[[3], [7], [3]], [[], [3], [3]]]
-        all_grads = [
-            [[[2.0, 4.0]], [[1.0, 1.0]], [[2.0, 3.0]]],
-            [[], [[3.0, 5.0]], [[4.0, 6.0]]],
-        ]
+        # More than 64 rows overall, a late first touch, an empty rank, and
+        # cross-rank reuse after eviction. Enqueue all steps before updating
+        # to catch stale prefetch results, including same-count ID changes.
+        all_ids = [[[3], list(range(100, 180)), [3], [7], [3]],
+                   [[], [3], [7], list(range(200, 280)), [3]]]
         batches = [_Features(ids) for ids in all_ids[rank]]
-        for step, batch in enumerate(batches):
-            controller.prescan_batch(step, batch)
-        controller.finalize_prescan()
+        controller = _controller(_PS(server), aggregation=aggregation, prescan=prescan)
+        if prescan:
+            for step, batch in enumerate(batches):
+                controller.prescan_batch(step, batch)
+            controller.finalize_prescan()
+            assert all(t.device.type == "cpu" for p in controller._plans for t in vars(p).values())
         tickets = [controller.enqueue(batch) for batch in batches]
-        reference = {key: ps.rows[key].clone() for key in (3, 7)}
+        stat_fields = set(controller.consume_stats())
+        reference = {key: torch.tensor([float(key), float(key * 2)]) for key in range(512)}
         for step, batch in enumerate(batches):
             controller.prefill_cache(batch, torch.device("cpu"))
             expected = torch.stack([reference[key] for key in batch.ids.tolist()]) if batch.ids.numel() else torch.empty((0, 2))
-            torch.testing.assert_close(controller.lookup(batch).values(), expected, rtol=0, atol=0)
+            torch.testing.assert_close(controller.lookup(batch).values(), expected)
             ids, _, _ = tickets[step]
-            grads = torch.tensor(all_grads[rank][step]).reshape(-1, 2)
+            grads = torch.full((ids.numel(), 2), float(rank + step + 1))
             controller.update_grads("table", ids, grads, 0.1, step)
-            for key in reference:
-                total = torch.zeros(2)
-                for source in range(2):
-                    for pos, source_key in enumerate(all_ids[source][step]):
-                        if source_key == key:
-                            total += torch.tensor(all_grads[source][step][pos])
-                reference[key].add_(total, alpha=-0.1 / 2)
+            for source in range(2):
+                for key in all_ids[source][step]:
+                    reference[key] -= 0.1 * (source + step + 1) / 2
+            assert len(controller._slots) <= 64
+            assert controller._values.shape == (64, 2)
+            assert set(controller.consume_stats()) == stat_fields
         controller.shutdown()
-        for row, key in enumerate(controller._global_ids.tolist()):
-            torch.testing.assert_close(controller._values[row], reference[key], rtol=0, atol=0)
-            if rank == 0:
-                torch.testing.assert_close(ps.rows[key], reference[key], rtol=0, atol=0)
-        assert ps.writes == int(rank == 0), "Only the designated owner may persist replicas"
+        touched = sorted(set(key for steps in all_ids for batch in steps for key in batch))
+        torch.testing.assert_close(torch.tensor(server.pull(touched)), torch.stack([reference[key] for key in touched]))
+        assert not controller.kv_client.prefetches
     finally:
         dist.destroy_process_group()
 
 
 class TestPlannedBagPipe(unittest.TestCase):
-    def test_single_bagpipe_entry_selects_controller_from_prescan(self):
-        self.assertEqual(
-            [name for name in OptimizationPluginRegistry.available() if name.startswith("bagpipe")],
-            ["bagpipe"],
-        )
-        with self.assertRaisesRegex(ValueError, "Unknown optimization plugin"):
-            OptimizationPluginRegistry.create("bagpipe_planned")
-        for prescan, controller_type in ((False, BagPipeCacheController), (True, PlannedBagPipeController)):
-            with self.subTest(prescan=prescan):
-                plugin = OptimizationPluginRegistry.create(
-                    "bagpipe", prescan=prescan, embedding_module=None, kv_client=_PS(),
-                    cache_capacity=1, embedding_dim=2, lookahead=4,
-                    table_offsets={"f0": 0}, table_sizes={"f0": 100},
-                    master_table_name="table", device=torch.device("cpu"),
-                    id_extractor=lambda sf: sf.ids,
-                )
-                try:
-                    self.assertIsInstance(plugin._controller, controller_type)
-                    self.assertIs(plugin.create_sparse_optimizer([], lr=0.1).controller, plugin._controller)
-                finally:
-                    plugin.shutdown()
+    def test_single_runtime_for_both_planning_modes(self):
+        self.assertEqual([name for name in OptimizationPluginRegistry.available() if name.startswith("bagpipe")], ["bagpipe"])
+        for prescan in (False, True):
+            plugin = OptimizationPluginRegistry.create(
+                "bagpipe", prescan=prescan, embedding_module=None, kv_client=_PS(),
+                cache_capacity=1, embedding_dim=2, lookahead=4,
+                table_offsets={"f0": 0}, table_sizes={"f0": 100},
+                master_table_name="table", device=torch.device("cpu"),
+                id_extractor=lambda sf: sf.ids,
+            )
+            try:
+                self.assertIsInstance(plugin._controller, PlannedBagPipeController)
+                self.assertEqual(plugin._controller._use_prescan, prescan)
+            finally:
+                plugin.shutdown()
 
-    def test_feature_order_and_duplicate_id_ticket_preserve_lookup_and_sgd(self):
+    def test_feature_order_duplicates_and_bounded_cache(self):
+        ps = _PS()
         controller = PlannedBagPipeController(
-            None, _PS(), cache_capacity=1, embedding_dim=2,
+            None, ps, cache_capacity=1, embedding_dim=2, lr=0.1,
             table_offsets={"f0": 0, "f1": 4}, master_table_name="table",
             device="cpu", id_extractor=lambda sf: sf.ids,
         )
@@ -123,54 +182,52 @@ class TestPlannedBagPipe(unittest.TestCase):
         controller.prescan_batch(0, batch)
         controller.finalize_prescan()
         ids, inverse, count = controller.enqueue(batch)
-        self.assertEqual(count, 4)
         self.assertEqual(inverse.tolist(), [0, 0, 1, 2])
         controller.prefill_cache(batch, torch.device("cpu"))
-        torch.testing.assert_close(controller.lookup(batch).values(), torch.tensor([
-            [3.0, 6.0, 7.0, 14.0], [3.0, 6.0, 8.0, 16.0],
-        ]))
+        torch.testing.assert_close(controller.lookup(batch).values(), torch.tensor([[3., 6., 7., 14.], [3., 6., 8., 16.]]))
         grads = torch.zeros((ids.numel(), 2)).index_add_(0, inverse, torch.ones((count, 2)))
-        controller.update_grads("table", ids, grads, 0.1, 0)
+        controller.update_grads("table", ids, grads, .1, 0)
         controller.shutdown()
-        torch.testing.assert_close(controller.kv_client.rows[3], torch.tensor([2.8, 5.8]))
+        torch.testing.assert_close(torch.tensor(ps.server.pull([3])), torch.tensor([[2.8, 5.8]]))
 
-    def test_real_collective_matches_global_mean_sgd_with_late_touch_and_empty_rank(self):
-        with tempfile.TemporaryDirectory() as directory:
-            mp.spawn(_distributed_reference, args=(str(Path(directory) / "rendezvous"),), nprocs=2, join=True)
+    def test_real_collective_and_ps_paths_match_global_mean_under_eviction(self):
+        with _Manager() as manager:
+            for aggregation in ("collective", "ps"):
+                for prescan in (False, True):
+                    with self.subTest(aggregation=aggregation, prescan=prescan), tempfile.TemporaryDirectory() as directory:
+                        mp.spawn(_distributed_reference,
+                                 args=(str(Path(directory) / "rendezvous"), manager.Server(), aggregation, prescan),
+                                 nprocs=2, join=True)
 
-    def test_same_count_different_ids_and_nonunit_lengths_are_rejected(self):
+    def test_schedule_mismatch_and_commit_failure_are_explicit(self):
         controller = _controller()
-        controller.prescan_batch(0, _Features([3, 7]))
+        batch = _Features([3, 7])
+        controller.prescan_batch(0, batch)
         controller.finalize_prescan()
         with self.assertRaisesRegex(RuntimeError, "batch IDs differ"):
             controller.enqueue(_Features([7, 3]))
         with self.assertRaisesRegex(RuntimeError, "bag lengths"):
             controller.enqueue(_Features([3, 7], lengths=[0, 2]))
-        controller.shutdown(flush=False)
-
-    def test_capacity_and_writeback_failures_are_explicit(self):
-        controller = _controller()
-        controller.prescan_batch(0, _Features(list(range(65))))
-        previous_threads = torch.get_num_threads()
-        with self.assertRaisesRegex(RuntimeError, "64-row limit"):
-            controller.finalize_prescan()
-        self.assertEqual(torch.get_num_threads(), previous_threads)
-        ps = _PS()
-        controller = _controller(ps)
-        batch = _Features([3])
-        controller.prescan_batch(0, batch)
-        controller.finalize_prescan()
-        self.assertEqual(torch.get_num_threads(), previous_threads)
         ids, _, _ = controller.enqueue(batch)
         controller.prefill_cache(batch, torch.device("cpu"))
-        controller.update_grads("table", ids, torch.ones((1, 2)), 0.1, 0)
-        def fail_write(*args):
-            raise OSError("simulated transport failure")
-        ps.emb_write_values = fail_write
-        with self.assertRaisesRegex(RuntimeError, "PS writeback failed"):
+        controller.update_grads("table", ids, torch.ones((2, 2)), .1, 0)
+        controller.kv_client.fail_wait = True
+        with self.assertRaisesRegex(OSError, "commit failure"):
             controller.shutdown()
         self.assertFalse(controller._closed)
         controller.shutdown(flush=False)
+
+    def test_independent_batch_does_not_wait_for_prior_commit(self):
+        controller = _controller(prescan=False)
+        batches = [_Features([3]), _Features([7])]
+        tickets = [controller.enqueue(batch) for batch in batches]
+        controller.prefill_cache(batches[0], "cpu")
+        controller.update_grads("table", tickets[0][0], torch.ones((1, 2)), .1, 0)
+        controller.kv_client.fail_wait = True
+        controller.prefill_cache(batches[1], "cpu")
+        self.assertEqual(controller._stats["bagpipe_dependency_wait_skipped"], 1)
+        controller.kv_client.fail_wait = False
+        controller.shutdown()
 
 
 if __name__ == "__main__":

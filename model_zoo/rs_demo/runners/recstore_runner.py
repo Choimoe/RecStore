@@ -453,16 +453,6 @@ class RecStoreRunner(BenchmarkRunner):
                     or cfg.gpu_cache_capacity
                     or 160_000
                 )
-                if not use_planned_bagpipe and not client.is_gpu_cache_enabled():
-                    enabled = client.enable_gpu_cache(
-                        cache_capacity, cfg.embedding_dim
-                    )
-                    if not enabled:
-                        raise RuntimeError(
-                            "BagPipe requires GPU cache but enable_gpu_cache("
-                            f"capacity={cache_capacity}, dim={cfg.embedding_dim}) "
-                            "returned False"
-                        )
                 print(
                     "[rs_demo] BagPipe cache configured: "
                     f"capacity={cache_capacity}, dim={cfg.embedding_dim}"
@@ -485,6 +475,7 @@ class RecStoreRunner(BenchmarkRunner):
                 plugin = OptimizationPluginRegistry.create(
                     "bagpipe",
                     prescan=cfg.optimization.prescan,
+                    aggregation=cfg.optimization.aggregation,
                     embedding_module=embedding_module,
                     kv_client=client,
                     lookahead=cfg.optimization.lookahead,
@@ -546,8 +537,7 @@ class RecStoreRunner(BenchmarkRunner):
                 )
 
             lifecycle = {"rank": rank}
-            # Precompute the complete training schedule and resident working
-            # set, including epoch transitions, for single- and multi-rank runs.
+            # Keep the complete access schedule on CPU, including epoch transitions.
             if (
                 use_planned_bagpipe
                 and plugin is not None
@@ -700,7 +690,7 @@ class RecStoreRunner(BenchmarkRunner):
                 events.emit("consume_start", step=step)
                 with timer.cpu("embed_lookup_ms"):
                     read_path.before_lookup(step, sparse_features, ticket, row)
-                    if use_planned_bagpipe:
+                    if use_bagpipe:
                         embeddings = plugin._controller.lookup(sparse_features)
                     elif callable(record_pooled_grad):
                         with torch.no_grad():
@@ -798,7 +788,7 @@ class RecStoreRunner(BenchmarkRunner):
                     read_path.after_sparse_update(
                         step, sparse_features, sparse_optimizer, row
                     )
-                    if use_planned_bagpipe and step == cfg.steps - 1:
+                    if use_bagpipe and step == cfg.steps - 1:
                         # Charge the final deferred SGD to training as well.
                         plugin._controller._wait_pending()
                     sparse_optimizer.zero_grad()
@@ -839,8 +829,8 @@ class RecStoreRunner(BenchmarkRunner):
 
             _write_rows(out_csv, rows)
             if cfg.validation_state:
-                if not use_planned_bagpipe:
-                    raise RuntimeError("RecStore validation-state requires bagpipe with --optimization-prescan")
+                if not use_bagpipe:
+                    raise RuntimeError("RecStore validation-state requires bagpipe")
                 from ..runtime.validation import export_validation_state
                 export_validation_state(
                     Path(cfg.output_root) / "outputs" / cfg.run_id / f"validation_rank{rank}.pt",
@@ -879,7 +869,7 @@ class RecStoreRunner(BenchmarkRunner):
             if events is not None:
                 events.close()
             if plugin is not None:
-                if use_planned_bagpipe:
+                if use_bagpipe:
                     plugin._controller.shutdown(flush=False)
                 else:
                     plugin.shutdown()

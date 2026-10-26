@@ -15,7 +15,7 @@ def export_validation_state(path, embedding_module, dense_module, planned_contro
     """Save plain CPU tensors, preserving the offsets of TorchRec local shards.
 
     This is a diagnostic snapshot, not a resumable training checkpoint. RecStore
-    snapshots require the planned controller's authoritative resident values.
+    snapshots read committed authoritative values from the PS.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,12 +29,17 @@ def export_validation_state(path, embedding_module, dense_module, planned_contro
     }
     if planned_controller is not None:
         planned_controller._wait_pending()
-        if planned_controller._global_ids is None or planned_controller._values is None:
-            raise RuntimeError("Planned validation requires initialized authoritative values")
+        plans = planned_controller._plans
+        ids = (torch.unique(torch.cat([p.active_ids for p in plans])) if plans
+               else torch.tensor(sorted(planned_controller._last_update), dtype=torch.int64))
+        values = torch.cat([
+            planned_controller.kv_client.pull(planned_controller.master_table_name, chunk).cpu()
+            for chunk in ids.split(4096)
+        ]) if ids.numel() else torch.empty((0, planned_controller.embedding_dim))
         state.update(
             embedding_kind="planned",
-            global_ids=_cpu_copy(planned_controller._global_ids),
-            values=_cpu_copy(planned_controller._values),
+            global_ids=ids,
+            values=values,
             tables=[{
                 "name": config.name,
                 "offset": index << embedding_module._fusion_k,
@@ -43,7 +48,7 @@ def export_validation_state(path, embedding_module, dense_module, planned_contro
         )
     else:
         if getattr(embedding_module, "is_recstore_sparse_module", False):
-            raise ValueError("BagPipe validation snapshots require --optimization-prescan")
+            raise ValueError("BagPipe validation snapshots require its cache controller")
         tables = {}
         for name, value in embedding_module.state_dict().items():
             if "embedding_bags." not in name or not name.endswith(".weight"):
