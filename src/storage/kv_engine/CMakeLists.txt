@@ -23,7 +23,7 @@ endif()
 
 target_link_libraries(
   kv_engine
-  PUBLIC pet_kv index io_backend
+  PUBLIC pet_kv index io_backend ssd_layout
   # spdk_wrapper
 )
   # INTERFACE pet_kv dash_hash PMHashPCLHT PMHashLevel PMHashClevel PMHashCCEHVM)

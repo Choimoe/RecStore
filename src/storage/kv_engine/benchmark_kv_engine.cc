@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <exception>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -24,6 +23,7 @@
 #include "storage/io_backend/force_link.h"
 #include "storage/kv_engine/base_kv.h"
 #include "storage/kv_engine/engine_selector.h"
+#include "storage/ssd_layout/ssd_layout.h"
 
 DEFINE_string(
     dram_path,
@@ -81,6 +81,9 @@ DEFINE_int32(thread_num, 16, "worker thread count");
 DEFINE_int32(load_thread_num, 0, "load thread count; 0 uses thread_num");
 DEFINE_int32(value_size, 128, "value size bytes");
 DEFINE_int32(running_seconds, 5, "transaction runtime seconds");
+DEFINE_string(ssd_layout_strategy, "", "plain, bandana, or maxembed");
+DEFINE_string(ssd_layout_mapping, "", "precomputed SSD layout artifact");
+DEFINE_string(ssd_layout_query, "", "text query log replayed after load");
 
 namespace {
 
@@ -149,9 +152,9 @@ public:
 
   uint64_t NextKey() {
     if (distribution_ == "uniform") {
-      return rng_.Uniform(record_count_) + 1;
+      return rng_.Uniform(record_count_);
     }
-    return NextZipfian() + 1;
+    return NextZipfian();
   }
 
   uint64_t NextUint(uint64_t n) { return rng_.Uniform(n); }
@@ -231,7 +234,8 @@ bool HasDramValueStore(const std::string& type) {
 }
 
 bool HasSsdValueStore(const std::string& type) {
-  return type == "SSD_VALUE_STORE" || type == "TIERED_VALUE_STORE";
+  return type == "SSD_VALUE_STORE" || type == "SSD_STATIC_LAYOUT_VALUE_STORE" ||
+         type == "TIERED_VALUE_STORE";
 }
 
 bool IsDirectExternalEngine(const std::string& engine_class) {
@@ -384,6 +388,22 @@ BaseKVConfig BuildConfig() {
           {"base_offset_bytes", 4096}}}};
     config.json_config_["value"]["tiering"] = {{"cache_policy", "LRU"}};
   }
+  if (!FLAGS_ssd_layout_strategy.empty() && FLAGS_ssd_layout_strategy != "plain") {
+    if (FLAGS_ssd_layout_mapping.empty()) {
+      throw std::invalid_argument("ssd_layout_mapping is required");
+    }
+    if (FLAGS_value_store_type != "TIERED_VALUE_STORE") {
+      config.json_config_["value"]["type"] = "SSD_STATIC_LAYOUT_VALUE_STORE";
+      config.json_config_["value"]["path"] = FLAGS_ssd_path + "/value.db";
+      config.json_config_["value"]["io"] = {
+          {"type", FLAGS_ssd_io_backend},
+          {"queue_depth", FLAGS_ssd_queue_depth},
+          {"base_offset_bytes", 0}};
+    }
+    config.json_config_["value"]["ssd_layout"] = {
+        {"strategy", FLAGS_ssd_layout_strategy},
+        {"mapping_path", FLAGS_ssd_layout_mapping}};
+  }
   LOG(INFO) << config.json_config_.dump(2);
   config.num_threads_ = std::max(FLAGS_thread_num, FLAGS_load_thread_num);
   return config;
@@ -398,8 +418,8 @@ PhaseStats LoadRecords(BaseKV* kv, int load_threads, uint64_t record_count) {
     threads.emplace_back([kv, tid, per_thread, record_count, &counts]() {
       base::auto_bind_core();
       std::string value(FLAGS_value_size, static_cast<char>('a' + (tid % 26)));
-      const uint64_t begin = static_cast<uint64_t>(tid) * per_thread + 1;
-      const uint64_t end   = std::min(record_count + 1, begin + per_thread);
+      const uint64_t begin = static_cast<uint64_t>(tid) * per_thread;
+      const uint64_t end   = std::min(record_count, begin + per_thread);
       for (uint64_t key = begin; key < end; ++key) {
         kv->Put(key, std::string_view(value.data(), value.size()), tid);
         ++counts[tid];
@@ -543,6 +563,38 @@ double SecondsSince(std::chrono::steady_clock::time_point start,
       .count();
 }
 
+void ReplayQueryLog(BaseKV* kv) {
+  if (FLAGS_ssd_layout_query.empty()) {
+    return;
+  }
+  const auto graph = ssd_layout::ReadQueryLog(FLAGS_ssd_layout_query, false);
+  uint64_t queries = 0;
+  uint64_t rows    = 0;
+  kv->ResetStats();
+  const auto begin = std::chrono::steady_clock::now();
+  for (size_t query = 0; query + 1 < graph.xpins.size(); ++query) {
+    std::vector<uint64_t> keys;
+    keys.reserve(graph.xpins[query + 1] - graph.xpins[query]);
+    keys.insert(keys.end(),
+                graph.pins.begin() + graph.xpins[query],
+                graph.pins.begin() + graph.xpins[query + 1]);
+    if (keys.empty()) {
+      continue;
+    }
+    std::vector<base::ConstArray<float>> values;
+    kv->BatchGet(base::ConstArray<uint64_t>(keys), &values, 0);
+    ++queries;
+    rows += keys.size();
+  }
+  const double seconds = SecondsSince(begin, std::chrono::steady_clock::now());
+  std::printf(
+      "LAYOUT_RESULT queries=%lu rows=%lu seconds=%.6f%s\n",
+      queries,
+      rows,
+      seconds,
+      kv->ExtraResultFields().c_str());
+}
+
 } // namespace
 
 int RunBenchmark(int argc, char* argv[]) {
@@ -568,6 +620,11 @@ int RunBenchmark(int argc, char* argv[]) {
   if (!IsLegacyDirectEngine(FLAGS_engine_class) &&
       HasSsdValueStore(FLAGS_value_store_type) && FLAGS_ssd_path.empty()) {
     LOG(FATAL) << "ssd_path must be set for SSD/TIERED value store";
+  }
+  if (!IsLegacyDirectEngine(FLAGS_engine_class) &&
+      !FLAGS_ssd_layout_strategy.empty() && FLAGS_ssd_layout_strategy != "plain" &&
+      FLAGS_ssd_path.empty()) {
+    LOG(FATAL) << "ssd_path must be set for a static SSD layout";
   }
   if (!IsLegacyDirectEngine(FLAGS_engine_class) &&
       FLAGS_value_store_type == "TIERED_VALUE_STORE" &&
@@ -658,6 +715,7 @@ int RunBenchmark(int argc, char* argv[]) {
         run_stats.update_ops);
   }
 
+  ReplayQueryLog(kv.get());
   LOG(INFO) << "gracefully exit";
   return 0;
 }

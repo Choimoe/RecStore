@@ -397,6 +397,7 @@ public:
   void BatchReadPages(const std::vector<IOEntry>& entries) override {
     if (entries.empty())
       return;
+    RecordRead(entries);
     struct spdk_nvme_qpair* qpair = get_thread_qpair();
     int max_inflight              = std::max(queue_cnt / 2, 1);
     size_t submitted              = 0;

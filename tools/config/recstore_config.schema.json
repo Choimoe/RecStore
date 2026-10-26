@@ -385,6 +385,7 @@
               "enum": [
                 "DRAM_VALUE_STORE",
                 "SSD_VALUE_STORE",
+                "SSD_STATIC_LAYOUT_VALUE_STORE",
                 "TIERED_VALUE_STORE"
               ]
             },
@@ -454,6 +455,20 @@
               },
               "additionalProperties": true
             },
+            "ssd_layout": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": ["plain", "bandana", "maxembed"]
+                },
+                "mapping_path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "additionalProperties": false
+            },
             "tiering": {
               "type": "object",
               "additionalProperties": true
@@ -493,7 +508,61 @@
                 "required": [
                   "path",
                   "ssd_allocator"
+                ],
+                "properties": {
+                  "ssd_layout": {
+                    "properties": {
+                      "strategy": {
+                        "enum": ["plain"]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "type": {
+                    "const": "SSD_STATIC_LAYOUT_VALUE_STORE"
+                  }
+                },
+                "required": [
+                  "type"
                 ]
+              },
+              "then": {
+                "required": [
+                  "path",
+                  "default_value_size_hint",
+                  "ssd_layout"
+                ],
+                "properties": {
+                  "ssd_layout": {
+                    "required": ["strategy", "mapping_path"],
+                    "properties": {
+                      "strategy": {
+                        "enum": ["bandana", "maxembed"]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "required": ["ssd_layout"]
+              },
+              "then": {
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "SSD_VALUE_STORE",
+                      "SSD_STATIC_LAYOUT_VALUE_STORE",
+                      "TIERED_VALUE_STORE"
+                    ]
+                  }
+                }
               }
             },
             {
