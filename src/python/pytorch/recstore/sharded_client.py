@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import json
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
