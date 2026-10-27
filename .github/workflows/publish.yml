@@ -19,7 +19,7 @@ on:
       init_args:
         description: "Environment variables prefix for init script (manual trigger only)"
         required: false
-        default: "CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_HUGECTR=1 SKIP_LIBIBVERBS=1"
+        default: "CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_LIBIBVERBS=1"
         type: string
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
     env:
       LOCAL_IMAGE: recstore-local:${{ github.sha }}
       FINAL_IMAGE: recstore-final:${{ github.sha }}
-      DEFAULT_INIT_ARGS: CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_HUGECTR=1 SKIP_LIBIBVERBS=1
+      DEFAULT_INIT_ARGS: CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_LIBIBVERBS=1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,7 +45,11 @@ jobs:
         run: |
           set -euo pipefail
           git submodule sync --recursive
-          git submodule update --init --recursive --jobs 4 --depth 1
+          mapfile -t submodules < <(
+            git config -f .gitmodules --get-regexp path |
+              awk '$2 != "third_party/faster" && $2 != "third_party/HugeCTR" { print $2 }'
+          )
+          git submodule update --init --recursive --jobs 4 --depth 1 -- "${submodules[@]}"
 
       - name: Free runner disk space
         run: |

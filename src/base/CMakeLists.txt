@@ -2,9 +2,9 @@ set(CITYHASH_ROOT_DIR ${PROJECT_SOURCE_DIR}/third_party/cityhash)
 include(${PROJECT_SOURCE_DIR}/cmake/FindCityhash.cmake)
 
 find_package(cpptrace REQUIRED)
-find_package(CURL REQUIRED)
 
 if(USE_PERF_REPORT)
+  find_package(CURL REQUIRED)
   add_library(report_client report/report_client.cpp)
   target_link_libraries(report_client PUBLIC curl nlohmann_json::nlohmann_json glog)
 

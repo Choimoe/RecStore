@@ -44,13 +44,13 @@ DISTRIBUTION_LABELS = {
 DEFAULT_RUN_ENGINES = [
     "petkv",
     "dram_pet_dram",
-    "fasterkv",
     # "dram_eh_dram",
     # "dram_eh_ssd",
     # "dram_pet_ssd",
     # "dram_eh_tiered",
     "dram_pet_tiered",
 ]
+THIRD_PARTY_ENGINES = {"fasterkv", "fasterkv_ssd", "hps_rocksdb"}
 
 SUMMARY_FIELDS = [
     "workload",
@@ -601,7 +601,20 @@ def split_engine_props(items: list[str]) -> dict[str, dict[str, str]]:
     return out
 
 
-def ensure_build() -> None:
+def ensure_build(enable_third_party_engines: bool) -> None:
+    subprocess.run(
+        [
+            "cmake",
+            "-S",
+            ".",
+            "-B",
+            "build",
+            "-DRECSTORE_ENABLE_THIRD_PARTY_ENGINES="
+            + ("ON" if enable_third_party_engines else "OFF"),
+        ],
+        cwd=ROOT,
+        check=True,
+    )
     subprocess.run(
         ["cmake", "--build", "build", "--target", "benchmark_kv_engine", "-j"],
         cwd=ROOT,
@@ -875,7 +888,7 @@ def _cmd_draw(args: argparse.Namespace) -> int:
 def _cmd_benchmark(args: argparse.Namespace) -> int:
     """Run the full benchmark suite and emit results."""
     if args.build:
-        ensure_build()
+        ensure_build(bool(set(args.engines) & THIRD_PARTY_ENGINES))
     if not BENCHMARK_BIN.exists():
         raise FileNotFoundError(
             f"{BENCHMARK_BIN} does not exist; build target benchmark_kv_engine first"

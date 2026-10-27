@@ -131,6 +131,7 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
   endif()
   target_link_libraries(hps_native_support PUBLIC
     pthread
+    rt
     base
     TBB::tbb
     rocksdb-shared

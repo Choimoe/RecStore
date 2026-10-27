@@ -5,6 +5,9 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING
 
 option(ENABLE_CUDA "Build with CUDA support" ON)
 option(USE_BRPC_CPU_PROFILER "Enable bRPC builtin CPU profiler" OFF)
+option(USE_PERF_REPORT "Enable performance reporting in Debug mode" OFF)
+option(RECSTORE_ENABLE_THIRD_PARTY_ENGINES
+  "Build the optional FASTERKV and HPS storage engines" OFF)
 
 # Single source of truth for the version: the repository-root VERSION file is
 # read here for the CMake build and by pyproject.toml for the package metadata.
@@ -38,6 +41,7 @@ if(ENABLE_CUDA)
   set(CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
+set(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE OFF)
 if(ENABLE_CUDA)
   find_package(CUDA REQUIRED)
   set(RECSTORE_CUDA_INCLUDE_DIRS ${CUDA_INCLUDE_DIRS} ${CUDA_TOOLKIT_INCLUDE})
@@ -63,11 +67,32 @@ if(ENABLE_CUDA)
       ${RECSTORE_NVML_INCLUDE_DIR}
     )
     list(REMOVE_DUPLICATES RECSTORE_CUDA_INCLUDE_DIRS)
-    set(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE ON)
+    if(RECSTORE_ENABLE_THIRD_PARTY_ENGINES)
+      set(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE ON)
+    endif()
   else()
-    set(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE OFF)
-    message(STATUS
-      "HugeCTR CUDA headers are incomplete; targets including HugeCTR common.hpp will be skipped."
+    if(RECSTORE_ENABLE_THIRD_PARTY_ENGINES)
+      message(FATAL_ERROR
+        "RECSTORE_ENABLE_THIRD_PARTY_ENGINES requires CUDA cublas, curand, and NVML headers."
+      )
+    endif()
+  endif()
+endif()
+
+if(RECSTORE_ENABLE_THIRD_PARTY_ENGINES)
+  if(NOT ENABLE_CUDA)
+    message(FATAL_ERROR
+      "RECSTORE_ENABLE_THIRD_PARTY_ENGINES requires ENABLE_CUDA=ON for HPS."
+    )
+  endif()
+  if(NOT EXISTS "${PROJECT_SOURCE_DIR}/third_party/faster/cc/src/CMakeLists.txt")
+    message(FATAL_ERROR
+      "FASTER is missing; initialize third_party/faster before enabling third-party engines."
+    )
+  endif()
+  if(NOT EXISTS "${PROJECT_SOURCE_DIR}/third_party/HugeCTR/third_party/rocksdb/CMakeLists.txt")
+    message(FATAL_ERROR
+      "HugeCTR is incomplete; initialize third_party/HugeCTR recursively before enabling third-party engines."
     )
   endif()
 endif()

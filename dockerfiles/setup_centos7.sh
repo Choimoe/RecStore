@@ -13,11 +13,29 @@
 # Usage:
 #   bash dockerfiles/setup_centos7.sh            # full setup
 #   bash dockerfiles/setup_centos7.sh --build    # only the RecStore cmake/build step
+#   bash dockerfiles/setup_centos7.sh --build --third-party-engines
+#                                               # incrementally enable/build FASTERKV + HPS
 #
 # Re-runnable: each stage is idempotent. Set RECSTORE_SKIP_SUBMODULES=1 to skip
 # the (slow) git submodule init if already done.
 # =============================================================================
 set -o pipefail
+
+STAGE=all
+ENABLE_THIRD_PARTY_ENGINES=OFF
+
+usage() {
+  echo "usage: $0 [--system|--submodules|--thirdparty|--build|all] [--third-party-engines]"
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --system|--submodules|--thirdparty|--build|all) STAGE="$arg" ;;
+    --third-party-engines) ENABLE_THIRD_PARTY_ENGINES=ON ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 1 ;;
+  esac
+done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DEPS_PREFIX="${RECSTORE_DEPS_PREFIX:-$HOME/recstore_deps}"
@@ -55,15 +73,21 @@ stage_system() {
 }
 
 # =============================================================================
-# Stage 2 — git submodules (skip SSD-only: spdk, HugeCTR, gpudirect-nvme)
+# Stage 2 — git submodules (optional engines are installed only on request)
 # =============================================================================
 stage_submodules() {
   if [ "${RECSTORE_SKIP_SUBMODULES:-0}" = "1" ]; then echo "[setup] skipping submodules"; return; fi
   cd "$REPO"
+  local modules=(
+    third_party/fmt third_party/folly third_party/glog third_party/googletest
+    third_party/json third_party/grpc third_party/jemalloc third_party/liburing
+    third_party/brpc third_party/cityhash third_party/cpptrace
+  )
+  if [ "$ENABLE_THIRD_PARTY_ENGINES" = "ON" ]; then
+    modules+=(third_party/faster third_party/HugeCTR)
+  fi
   git submodule update --init --recursive \
-    third_party/fmt third_party/folly third_party/glog third_party/googletest \
-    third_party/json third_party/grpc third_party/jemalloc third_party/liburing \
-    third_party/brpc third_party/cityhash third_party/cpptrace third_party/faster
+    "${modules[@]}"
 }
 
 # =============================================================================
@@ -233,12 +257,18 @@ stage_thirdparty() {
 # Stage 4 — configure & build RecStore
 # =============================================================================
 stage_build() {
-  cd "$REPO"
-  rm -rf build; mkdir build; cd build
+  if [ "$ENABLE_THIRD_PARTY_ENGINES" = "ON" ] && [ "${RECSTORE_SKIP_SUBMODULES:-0}" != "1" ]; then
+    git -C "$REPO" submodule update --init --recursive \
+      third_party/faster third_party/HugeCTR
+  fi
+  mkdir -p "$REPO/build"
   # -L$DEPS/lib[64] + rpath so BARE -l names (boost_context, leveldb, ...) resolve to
   # the $DEPS builds, not the old CentOS 7 system libs (boost 1.53, leveldb old-ABI).
   local LDFLAGS="-L$DEPS_PREFIX/lib -L$DEPS_PREFIX/lib64 -Wl,-rpath,$DEPS_PREFIX/lib64 -Wl,-rpath,$DEPS_PREFIX/lib"
-  cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+  cmake -S "$REPO" -B "$REPO/build" \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DENABLE_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+    -DUSE_PERF_REPORT=OFF -DUSE_BRPC_CPU_PROFILER=OFF \
+    -DRECSTORE_ENABLE_THIRD_PARTY_ENGINES="$ENABLE_THIRD_PARTY_ENGINES" \
     -DPYBIND11_CMAKE_DIR="$PIP_SITE/pybind11/share/cmake/pybind11" \
     -DTBB_DIR="$DEPS_PREFIX/lib64/cmake/TBB" \
     -Dcpptrace_DIR="$DEPS_PREFIX/lib64/cmake/cpptrace" \
@@ -247,19 +277,17 @@ stage_build() {
     -DPython_EXECUTABLE=/usr/bin/python3 \
     -DCMAKE_EXE_LINKER_FLAGS="$LDFLAGS" -DCMAKE_SHARED_LINKER_FLAGS="$LDFLAGS" \
     -DCMAKE_MODULE_LINKER_FLAGS="$LDFLAGS" \
-    -DCMAKE_BUILD_RPATH="$DEPS_PREFIX/lib64:$DEPS_PREFIX/lib" \
-    ..
-  make -j"$NPROC" recstore_torch_ops ps_server petps_server
-  echo "[setup] _recstore_ops.so: $(ls -la lib/_recstore_ops.so 2>/dev/null)"
-  echo "[setup] ps_server:        $(ls -la bin/ps_server 2>/dev/null)"
-  echo "[setup] petps_server:     $(ls -la bin/petps_server 2>/dev/null)"
+    -DCMAKE_BUILD_RPATH="$DEPS_PREFIX/lib64:$DEPS_PREFIX/lib"
+  cmake --build "$REPO/build" --parallel "$NPROC"
+  echo "[setup] _recstore_ops.so: $(ls -la "$REPO/build/lib/_recstore_ops.so" 2>/dev/null)"
+  echo "[setup] ps_server:        $(ls -la "$REPO/build/bin/ps_server" 2>/dev/null)"
+  echo "[setup] petps_server:     $(ls -la "$REPO/build/bin/petps_server" 2>/dev/null)"
 }
 
-case "${1:-all}" in
+case "$STAGE" in
   --system)     stage_system ;;
   --submodules) stage_submodules ;;
   --thirdparty) stage_thirdparty ;;
   --build)      stage_build ;;
   all) stage_system; stage_submodules; stage_thirdparty; stage_build ;;
-  *) echo "usage: $0 [--system|--submodules|--thirdparty|--build|all]"; exit 1 ;;
 esac

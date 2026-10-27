@@ -12,7 +12,7 @@ RUN apt-get update -y && \
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3 python3-pip python3-setuptools python3-wheel \
       gcc g++ \
-      vim gdb git wget tar unzip curl clang-format libboost-all-dev \
+      vim gdb git wget tar unzip curl clang-format \
       tzdata && \
       rm -rf /var/lib/apt/lists/*
 
@@ -61,7 +61,7 @@ RUN apt-get update -y && \
 RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo 'Asia/Shanghai' >/etc/timezone
 RUN sed -i 's/#Port 22/Port 22222/g' /etc/ssh/sshd_config
 
-RUN pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple numpy pandas scikit-learn ortools jupyter tqdm && \
+RUN pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple numpy tqdm && \
 pip3 cache purge
 
 RUN alias sudo='sudo PATH="$PATH" HOME="$HOME" LD_LIBRARY_PATH="$LD_LIBRARY_PATH"'

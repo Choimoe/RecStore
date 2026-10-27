@@ -1,5 +1,5 @@
 
-if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
+if(TARGET hps_backend_support AND TARGET fasterkv_backend AND TARGET rocksdb-shared)
     add_executable(backend_benchmark storage/backend_benchmark.cc)
     target_link_libraries(backend_benchmark PUBLIC
         pthread
@@ -13,7 +13,7 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
         OpenMP::OpenMP_CXX
     )
 else()
-    message(STATUS "Skipping backend_benchmark: HugeCTR CUDA headers are unavailable.")
+    message(STATUS "Skipping backend_benchmark: optional third-party engines are disabled or unavailable.")
 endif()
 
 add_executable(dataset_wordcount_helper dataset/dataset_wordcount.cc)

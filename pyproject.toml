@@ -12,7 +12,6 @@ dependencies = [
     # the installed torch ABI-identical to the one the extension was built
     # against.
     "torch==2.7.1",
-    "numpy",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

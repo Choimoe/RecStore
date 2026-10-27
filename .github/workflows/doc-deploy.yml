@@ -30,7 +30,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install mkdocs-material mkdocs-git-revision-date-localized-plugin
+          pip install mkdocs-material
 
       - name: Prepare Documentation
         run: |

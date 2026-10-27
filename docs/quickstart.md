@@ -32,7 +32,11 @@ RecStore 推荐使用 Docker 进行环境配置。在开始之前，请确保你
 ```bash
 git clone --depth 1 --single-branch https://github.com/RecStore/RecStore.git
 cd RecStore
-git submodule update --init --recursive
+mapfile -t submodules < <(
+    git config -f .gitmodules --get-regexp path |
+        awk '$2 != "third_party/faster" && $2 != "third_party/HugeCTR" { print $2 }'
+)
+git submodule update --init --recursive -- "${submodules[@]}"
 git config core.hooksPath .githooks  # 启用仓库自带的提交前格式化检查
 ```
 
@@ -99,6 +103,12 @@ cd dockerfiles
 bash init_env_inside_docker.sh > init_env.log 2>&1
 ```
 
+FASTERKV 和 HPS 默认不安装。如需使用，可增量执行：
+
+```bash
+bash init_env_inside_docker.sh --third-party-engines > init_engines.log 2>&1
+```
+
 ```bash title="初始化 PyTorch 依赖"
 # in RecStore/dockerfiles directory
 bash init_dlrm.sh --mirror=0
@@ -115,7 +125,15 @@ mkdir -p build && cd build
 
 ```bash title="编译 RecStore"
 # in RecStore/build directory
-cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.10 ..
+cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.10 ..
+make -j
+```
+
+Release 默认构建测试，关闭性能上报和第三方存储引擎。启用 FASTERKV 和 HPS 时，增加：
+
+```bash
+cmake -DCMAKE_BUILD_TYPE=Release \
+    -DRECSTORE_ENABLE_THIRD_PARTY_ENGINES=ON ..
 make -j
 ```
 

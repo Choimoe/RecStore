@@ -97,7 +97,11 @@ jobs:
         run: |
           set -euo pipefail
           git submodule sync --recursive
-          git submodule update --init --recursive --jobs 4 --depth 0
+          mapfile -t submodules < <(
+            git config -f .gitmodules --get-regexp path |
+              awk '$2 != "third_party/faster" && $2 != "third_party/HugeCTR" { print $2 }'
+          )
+          git submodule update --init --recursive --jobs 4 --depth 0 -- "${submodules[@]}"
 
       - name: Free disk space
         run: |
@@ -117,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_HUGECTR=1 SKIP_LIBIBVERBS=1 \
+          CI_THROTTLE_MAKE=1 LIBTORCH_VARIANT=cpu SKIP_SPDK=1 SKIP_LIBIBVERBS=1 \
             bash dockerfiles/init_env_inside_docker.sh
 
       - name: Install PyTorch wheel
