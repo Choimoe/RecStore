@@ -24,6 +24,18 @@ class HpsBackendCompareTest(unittest.TestCase):
                 (
                     [
                         "cmake",
+                        "-S",
+                        ".",
+                        "-B",
+                        "build",
+                        "-DRECSTORE_ENABLE_THIRD_PARTY_ENGINES=ON",
+                    ],
+                    run_hps_backend_compare.ROOT,
+                    True,
+                ),
+                (
+                    [
+                        "cmake",
                         "--build",
                         "build",
                         "--target",

@@ -175,6 +175,18 @@ def ensure_build(build_jobs: int) -> None:
     subprocess.run(
         [
             "cmake",
+            "-S",
+            ".",
+            "-B",
+            "build",
+            "-DRECSTORE_ENABLE_THIRD_PARTY_ENGINES=ON",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "cmake",
             "--build",
             "build",
             "--target",

@@ -6,6 +6,7 @@ add_library(local_shm_common SHARED
 
 target_link_libraries(local_shm_common PUBLIC
     base
+    rt
 )
 
 add_library(local_shm_ps_client SHARED

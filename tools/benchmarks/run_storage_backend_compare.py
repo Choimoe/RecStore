@@ -109,6 +109,18 @@ def parse_args() -> argparse.Namespace:
 
 def ensure_build() -> None:
     subprocess.run(
+        [
+            "cmake",
+            "-S",
+            ".",
+            "-B",
+            "build",
+            "-DRECSTORE_ENABLE_THIRD_PARTY_ENGINES=ON",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
         ["cmake", "--build", "build", "--target", "backend_benchmark", "-j"],
         cwd=ROOT,
         check=True,

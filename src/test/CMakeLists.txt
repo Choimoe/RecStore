@@ -47,6 +47,7 @@ target_link_libraries(coroutine PUBLIC
     ${BOOST_LIBRARIES}
     boost_context
     boost_coroutine
+    glog
 )
 
 add_executable(test_extendible_hash test_extendible_hash.cpp)
@@ -120,7 +121,7 @@ add_executable(test_io_uring_test_utils test_io_uring_test_utils.cpp)
 target_link_libraries(test_io_uring_test_utils PUBLIC
     gtest
     gtest_main
-    uring
+    iouring_backend
     pthread
 )
 add_test(NAME test_io_uring_test_utils COMMAND test_io_uring_test_utils)
@@ -223,7 +224,7 @@ target_link_libraries(test_kvengine_checkpoint PUBLIC
 )
 add_test(NAME test_kvengine_checkpoint COMMAND test_kvengine_checkpoint)
 
-if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
+if(TARGET hps_backend_support)
     add_executable(test_hps_recstore_backend
         test_hps_recstore_backend.cpp
     )
@@ -237,7 +238,7 @@ if(RECSTORE_HUGECTR_CUDA_HEADERS_AVAILABLE)
     add_test(NAME test_hps_recstore_backend COMMAND test_hps_recstore_backend)
 else()
     message(STATUS
-        "Skipping test_hps_recstore_backend: HugeCTR CUDA headers are unavailable."
+        "Skipping test_hps_recstore_backend: HPS is disabled or unavailable."
     )
 endif()
 

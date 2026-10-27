@@ -1,4 +1,20 @@
 #!/bin/bash
+
+ENABLE_THIRD_PARTY_ENGINES=0
+MARKER_DIR="/tmp/env_setup_markers"
+
+usage() {
+    echo "Usage: $0 [--third-party-engines|--clean|--help]"
+}
+
+case "${1:-}" in
+    "") ;;
+    --third-party-engines) ENABLE_THIRD_PARTY_ENGINES=1 ;;
+    --clean) rm -rf "${MARKER_DIR:?}"; exit 0 ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 1 ;;
+esac
+
 SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 source "${SCRIPT_DIR}/git_ref.sh"
@@ -51,8 +67,6 @@ reset_cmake_build_if_stale() {
 TORCH_VERSION="2.7.1"
 CUDA_VERSION="cu118"
 LIBTORCH_VARIANT="${LIBTORCH_VARIANT:-${CUDA_VERSION}}"  # default to CUDA variant (e.g., cu118); set to cpu to force CPU libtorch
-
-MARKER_DIR="/tmp/env_setup_markers"
 
 if [ "$USER" = "root" ]; then
     target_dir="/root"
@@ -242,28 +256,26 @@ step_libtorch_abi() {
     fi
 }
 
-step_HugeCTR() {
-    if [ "${SKIP_HUGECTR:-}" = "1" ]; then
-        echo "Skipping HugeCTR build because SKIP_HUGECTR=1"
-        return 0
-    fi
+step_third_party_engines() {
     if ! command -v nvcc >/dev/null 2>&1; then
-        echo "Skipping HugeCTR build because nvcc (CUDA toolkit) is not available"
-        return 0
+        echo "--third-party-engines requires nvcc for HPS" >&2
+        return 1
     fi
-    # find /usr -name "libparquet.so"
-    # find /usr -name "properties.h" | grep "parquet/properties.h"
-    cd ${PROJECT_PATH}/third_party/HugeCTR
-    rm -rf _build
-    mkdir -p _build
-    cd _build
-    cmake -DCMAKE_BUILD_TYPE=Release \
-        ${CMAKE_REQUIRE} \
-        ..
-    make ${MAKE_OPTS} embedding
+
+    git -C "${PROJECT_PATH}" submodule update --init --recursive \
+        third_party/faster third_party/HugeCTR
+
+    local hugectr_source="${PROJECT_PATH}/third_party/HugeCTR"
+    local hugectr_build="${hugectr_source}/_build"
+    mkdir -p "${hugectr_build}"
+    reset_cmake_build_if_stale "${hugectr_build}" "${hugectr_source}"
+    cmake -S "${hugectr_source}" -B "${hugectr_build}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        ${CMAKE_REQUIRE}
+    cmake --build "${hugectr_build}" --target embedding -- ${MAKE_OPTS}
     sudo mkdir -p /usr/local/hugectr/lib/
-    sudo find . -name "*.so" -exec cp {} /usr/local/hugectr/lib/ \;
-    make clean
+    sudo find "${hugectr_build}" -name "*.so" \
+        -exec cp -u {} /usr/local/hugectr/lib/ \;
 }
 
 
@@ -379,7 +391,6 @@ step_brpc() {
 }
 
 mkdir -p "${MARKER_DIR}"
-[ "$1" = "--clean" ]&&{ echo "Cleaning all markers..."; rm -rf "${MARKER_DIR:?}"; exit 0; };
 marker_path(){ echo "${MARKER_DIR}/${1}.done"; }
 steps=($(grep -oE '^step_[a-zA-Z0-9_]+\(\)' "$SCRIPT_PATH" | cut -d '(' -f1))
 declare -a step_names=()
@@ -387,11 +398,20 @@ declare -A step_status=()
 declare -A step_duration_sec=()
 
 for STEP in "${steps[@]}"; do
+    if [ "$STEP" = "step_third_party_engines" ] && [ "$ENABLE_THIRD_PARTY_ENGINES" != "1" ]; then
+        echo "Step $STEP: Skipping (enable with --third-party-engines)"
+        continue
+    fi
+
     step_names+=("$STEP")
     step_start_ts=$(date +%s)
     MARKER=$(marker_path "$STEP")
 
-    if [ -f "$MARKER" ]; then
+    if [ "$STEP" = "step_third_party_engines" ]; then
+        echo "Step $STEP: Running incrementally..."
+        $STEP
+        step_status["$STEP"]="DONE"
+    elif [ -f "$MARKER" ]; then
         echo "Step $STEP: Skipping (already completed)"
         step_status["$STEP"]="SKIPPED"
     else
