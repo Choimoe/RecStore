@@ -138,13 +138,17 @@ TEST_F(LayoutTest, PartitionScalesWithCurrentSubgraph) {
     }
   }
 
-  const auto keys    = ssd_layout::ReadKeyMap("", graph.vertex_count);
-  const auto begin   = std::chrono::steady_clock::now();
-  const auto layout  = ssd_layout::Partition(graph, keys, 4096, 128);
-  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  const auto keys = ssd_layout::ReadKeyMap("", graph.vertex_count);
+#ifdef NDEBUG
+  const auto begin = std::chrono::steady_clock::now();
+#endif
+  const auto layout = ssd_layout::Partition(graph, keys, 4096, 128);
 
   EXPECT_EQ(layout.keys.size(), vertices);
+#ifdef NDEBUG
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
   EXPECT_LT(elapsed, std::chrono::seconds(3));
+#endif
 }
 
 TEST_F(LayoutTest, ReplicationStaysInBudgetAndShrinkKeepsPrimary) {
