@@ -415,6 +415,52 @@ TEST(PetPSIntegrationTest, AdapterWaitTimeoutReleasesSynchronousBatch) {
             std::chrono::milliseconds(1500));
 }
 
+TEST(PetPSIntegrationTest, AdapterMultiChunkTimeoutRetiresAllSubmittedLanes) {
+  if (std::getenv("RECSTORE_RDMA_ADAPTER_WAIT_TIMEOUT_TEST") == nullptr) {
+    GTEST_SKIP() << "requires the adapter timeout driver and delayed GET workers";
+  }
+  ASSERT_EQ(FLAGS_num_server_processes, 1);
+  ASSERT_EQ(FLAGS_rdma_rc_qps_per_client_per_shard, 2);
+  ASSERT_EQ(FLAGS_rdma_rc_slots_per_qp, 1);
+  ASSERT_EQ(FLAGS_rdma_wait_timeout_ms, 100);
+  ASSERT_GE(FLAGS_rdma_rc_server_get_worker_hold_us, 2000000);
+  ASSERT_FALSE(FLAGS_rdma_lane_rebuild_enabled);
+  const char* config_path = std::getenv("RECSTORE_CONFIG");
+  ASSERT_NE(config_path, nullptr);
+  const json config = ParseFile2Json(config_path);
+  ASSERT_EQ(config["distributed_client"]["max_keys_per_request"].get<int>(), 1);
+  recstore::RDMAPSClientAdapter adapter(config);
+  const int dim = FLAGS_value_size / sizeof(float);
+  ASSERT_EQ(adapter.InitEmbeddingTable("window_timeout", {1024, uint64_t(dim)}),
+            0);
+  const std::vector<uint64_t> keys{711, 712};
+  const auto values = MakeValues(keys, dim);
+  ASSERT_EQ(adapter.PutParameter(keys, values), 0);
+
+  const auto wait_start = std::chrono::steady_clock::now();
+  {
+    base::RecTensor output({2, dim}, base::DataType::FLOAT32);
+    try {
+      adapter.GetParameter(keys, output);
+      FAIL() << "the delayed two-chunk GET did not time out";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("wait timeout"), std::string::npos)
+          << error.what();
+    }
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - wait_start,
+            std::chrono::milliseconds(1500));
+  base::RecTensor empty({0, dim}, base::DataType::FLOAT32);
+  ASSERT_EQ(adapter.GetParameter({}, empty), 0);
+
+  // Both delayed RPCs still have remote work pending. Neither lane may be reused.
+  const std::vector<uint64_t> probe{711};
+  const auto submit_start = std::chrono::steady_clock::now();
+  EXPECT_THROW(adapter.PrefetchParameter(probe), petps::ShardUnreachableError);
+  EXPECT_LT(std::chrono::steady_clock::now() - submit_start,
+            std::chrono::milliseconds(500));
+}
+
 TEST(PetPSIntegrationTest, AdapterSplitGetRoundTripMultiShard) {
   const int embedding_dim = FLAGS_value_size / sizeof(float);
   const char* config_path = std::getenv("RECSTORE_CONFIG");

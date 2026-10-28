@@ -197,10 +197,25 @@ int RdmaDistributedExecutor::SubmitGetParameter(
       }
     }
   } catch (...) {
-    ReleaseShardRpcs(&window);
-    ReleaseShardRpcs(&batch.shard_rpcs);
-    RecycleReceiveBuffers(&batch.receive_buffers);
-    throw;
+    const auto error = std::current_exception();
+    // Accepted RPCs must finish or retire their lanes before slots are reused.
+    try {
+      WaitShardRpcs(window);
+    } catch (...) {
+    }
+    try {
+      ReleaseShardRpcs(&window);
+    } catch (...) {
+    }
+    try {
+      ReleaseShardRpcs(&batch.shard_rpcs);
+    } catch (...) {
+    }
+    try {
+      RecycleReceiveBuffers(&batch.receive_buffers);
+    } catch (...) {
+    }
+    std::rethrow_exception(error);
   }
   for (auto& pending : window) {
     batch.shard_rpcs.push_back(std::move(pending));
@@ -378,10 +393,22 @@ void RdmaDistributedExecutor::ReleasePrefetch(std::uint64_t prefetch_id) {
 void RdmaDistributedExecutor::WaitShardRpcs(
     const std::vector<shard_routing::PendingShardRpc>& shard_rpcs) const {
   // Every RPC in this window is already submitted; waiting preserves overlap.
+  std::exception_ptr first_error;
   for (const auto& pending : shard_rpcs) {
-    if (!pending.released) {
-      ClientAt(pending.client_index)->WaitRPCFinish(pending.rpc_id);
+    if (pending.released) {
+      continue;
     }
+    try {
+      ClientAt(pending.client_index)->WaitRPCFinish(pending.rpc_id);
+    } catch (...) {
+      if (first_error == nullptr) {
+        first_error = std::current_exception();
+      }
+    }
+  }
+  // Later RPCs must also finish or retire before the caller releases the window.
+  if (first_error != nullptr) {
+    std::rethrow_exception(first_error);
   }
 }
 
