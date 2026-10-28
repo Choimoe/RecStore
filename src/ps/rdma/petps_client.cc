@@ -279,6 +279,24 @@ const float* PetPSClient::BorrowGetResultPayload(
   return reinterpret_cast<const float*>(slot.view.response_payload);
 }
 
+bool PetPSClient::HasAvailableSlots(std::size_t required) const {
+  std::lock_guard<std::mutex> guard(mu_);
+  std::size_t available = 0;
+  for (const auto& qp : qps_) {
+    // Drain old GETs before an acquire can rebuild a lane and invalidate them.
+    if (qp.dead.load(std::memory_order_relaxed) ||
+        qp.dirty.load(std::memory_order_relaxed)) {
+      return false;
+    }
+    for (const auto& slot : qp.slots) {
+      if (!slot.busy) {
+        ++available;
+      }
+    }
+  }
+  return available >= required;
+}
+
 PetPSClient::SlotHandle PetPSClient::AcquireIdleSlot() {
   if (FLAGS_rdma_rc_profile_interval_ms > 0) {
     profile_.acquire_qp_count.fetch_add(1, std::memory_order_relaxed);

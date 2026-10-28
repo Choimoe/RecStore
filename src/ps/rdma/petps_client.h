@@ -59,6 +59,8 @@ public:
   bool QueryRPCFinished(int rpc_id);
   void WaitRPCFinish(int rpc_id);
   void RevokeRPCResource(int rpc_id);
+  // Snapshot only: callers must serialize submissions around this check.
+  bool HasAvailableSlots(std::size_t required) const;
 
   int PutParameter(const std::vector<uint64_t>& keys,
                    const base::RecTensor& values);
@@ -291,7 +293,7 @@ private:
       receive_buffer_index_; // data() pointer -> receive_buffers_ index, used
                              // to return a buffer to the pool at revoke time.
   std::unordered_map<int, PendingRpc> pending_rpcs_; // In-flight RPC table.
-  std::mutex mu_; // Guards transport setup and pending RPC state.
+  mutable std::mutex mu_; // Guards transport setup and pending RPC state.
   std::atomic<int> next_rpc_id_{1}; // Monotonic RPC handle generator.
   std::mutex prefetch_mu_;          // Guards the prefetch handle table.
   std::unordered_map<uint64_t, PrefetchState> prefetches_;
