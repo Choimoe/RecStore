@@ -626,7 +626,7 @@ class TestRunBenchmarkPS(unittest.TestCase):
         self.assertEqual(cmd[:4], ["ssh", "worker-a", "bash", "-lc"])
         self.assertEqual(cmd[-1], "'cd /app/RecStore && mkdir -p /tmp/recstore sync'")
 
-    def test_remote_rdma_client_reads_synced_config_from_environment(self):
+    def test_remote_rdma_preserves_config_affinity_and_environment_whitelist(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             remote_repo = root / "repo 'quoted' $(false)"
@@ -637,7 +637,9 @@ class TestRunBenchmarkPS(unittest.TestCase):
                 "import json, os, sys\n"
                 "path = os.environ['RECSTORE_CONFIG']\n"
                 "with open(path) as source: config = json.load(source)\n"
-                "print(json.dumps([path, sys.argv[1:], config]))\n"
+                "print(json.dumps([path, sys.argv[1:], config, "
+                "os.environ['RECSTORE_BIND_CORE_OFFSET'], "
+                "os.environ['RECSTORE_RDMA_VALIDATE_ROUTING']]))\n"
             )
             binary.chmod(0o755)
             config = root / "local_config.json"
@@ -647,10 +649,16 @@ class TestRunBenchmarkPS(unittest.TestCase):
                 "--remote-repo", str(remote_repo),
                 "--remote-runtime-root", str(root / "runtime 'quoted' $(false)"),
                 "--output-dir", str(root / "output"),
+                "--client-threads-per-process", "1",
+                "--server-rdma-threads", "4",
+                "--rdma-rc-server-get-workers", "0",
+                "--rdma-server-bind-core-offset", "3",
+                "--rdma-client-bind-core-offset", "5",
+                "--rdma-client-bind-core-stride", "2",
             ]):
                 args = parse_args()
             topology = build_topology_plan(
-                "RDMA", ["server"], ["client"], 1, 25000
+                "RDMA", ["server-a", "server-b"], ["client"], 2, 25000
             )
             synced_paths = []
 
@@ -661,22 +669,39 @@ class TestRunBenchmarkPS(unittest.TestCase):
                 synced_paths.append(remote_path)
 
             def run_client(specs, _timeout):
-                self.assertEqual(len(specs), 1)
-                self.assertEqual(specs[0].cmd[:2], ["ssh", "client"])
-                # Execute the SSH shell payload locally to exercise its quoting.
-                completed = subprocess.run(
-                    ["bash", "-c", " ".join(specs[0].cmd[2:])],
-                    env={**os.environ, "RECSTORE_CONFIG": "/stale/config.json"},
-                    text=True, capture_output=True, check=True,
-                )
-                path, argv, actual = json.loads(completed.stdout)
-                self.assertEqual(set(synced_paths), {path})
-                self.assertIn(f"--config_path={path}", argv)
-                self.assertNotIn("--config_path=/local/old.json", argv)
-                self.assertEqual(actual, {"deployment": "this-run"})
+                self.assertEqual(len(specs), 2)
+                offsets = []
+                for spec in specs:
+                    self.assertEqual(spec.cmd[:2], ["ssh", "client"])
+                    self.assertNotIn("DO_NOT_FORWARD", spec.cmd[-1])
+                    # Execute the SSH shell payload locally to exercise its quoting.
+                    completed = subprocess.run(
+                        ["bash", "-c", " ".join(spec.cmd[2:])],
+                        env={**os.environ, "RECSTORE_CONFIG": "/stale/config.json",
+                             "RECSTORE_BIND_CORE_OFFSET": "999",
+                             "RECSTORE_RDMA_VALIDATE_ROUTING": "0"},
+                        text=True, capture_output=True, check=True,
+                    )
+                    path, argv, actual, offset, routing = json.loads(completed.stdout)
+                    self.assertEqual(set(synced_paths), {path})
+                    self.assertIn(f"--config_path={path}", argv)
+                    self.assertNotIn("--config_path=/local/old.json", argv)
+                    self.assertEqual(actual, {"deployment": "this-run"})
+                    self.assertEqual(routing, "1")
+                    offsets.append(offset)
+                self.assertEqual(offsets, ["5", "7"])
                 return []
 
             with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {
+                    "RECSTORE_RDMA_VALIDATE_ROUTING": "1",
+                    "RECSTORE_BIND_CORE_OFFSET": "999",
+                    "DO_NOT_FORWARD": "unrelated-environment-value",
+                }))
+                server_command = stack.enter_context(mock.patch.object(
+                    benchmark_runner, "build_remote_background_server_cmd",
+                    wraps=benchmark_runner.build_remote_background_server_cmd,
+                ))
                 for name in (
                     "ensure_remote_path", "ensure_remote_binary_state",
                     "wait_rdma_control_plane_ready", "fetch_remote_text_file",
@@ -703,6 +728,18 @@ class TestRunBenchmarkPS(unittest.TestCase):
                 )
                 self.assertTrue(ok)
                 run_group.assert_called_once()
+                self.assertEqual(server_command.call_count, 2)
+                for call, expected_offset in zip(server_command.call_args_list, [3, 7]):
+                    argv = call.args[3]
+                    self.assertEqual(argv[0], "env")
+                    self.assertIn(f"RECSTORE_BIND_CORE_OFFSET={expected_offset}", argv)
+                    self.assertIn("RECSTORE_RDMA_VALIDATE_ROUTING=1", argv)
+                    self.assertIn(f"RECSTORE_CONFIG={synced_paths[0]}", argv)
+                    assignments = argv[1:argv.index(str(remote_repo / "build/bin/petps_server"))]
+                    self.assertEqual({part.split("=", 1)[0] for part in assignments}, {
+                        "RECSTORE_CONFIG", "RECSTORE_BIND_CORE_OFFSET",
+                        "RECSTORE_RDMA_VALIDATE_ROUTING",
+                    })
 
     def test_replace_config_path_arg_rewrites_existing_flag(self):
         cmd = replace_config_path_arg(
