@@ -157,11 +157,13 @@ public:
 
     for (size_t i = 0; i < items.size(); ++i) {
       Value_t old_handle = index_->Put(items[i].key, new_handles[i], tid);
+      if (old_handle == kValueHandleNone) {
+        TrackKey(items[i].key, tid);
+      }
       if (old_handle != kValueHandleNone && old_handle != new_handles[i]) {
         value_store_->Retire(old_handle);
       }
     }
-    TrackKeys(keys, tid);
   }
 
   uint64_t BatchDelete(base::ConstArray<uint64_t> keys, unsigned tid) override {
@@ -1122,7 +1124,11 @@ private:
     if (old_handle != kValueHandleNone && old_handle != new_handle) {
       value_store_->Retire(old_handle);
     }
-    TrackKey(key, tid);
+    // Checkpoint tracking already contains overwritten keys. Delete removes
+    // them under the exclusive checkpoint lock, so reinsertion tracks again.
+    if (old_handle == kValueHandleNone) {
+      TrackKey(key, tid);
+    }
   }
 
   inline static constexpr std::array<char, 8> kCheckpointMagic = {
