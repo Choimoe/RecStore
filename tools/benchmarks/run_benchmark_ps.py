@@ -1979,15 +1979,17 @@ def run_remote_case(
                     client.ssh_host,
                     args.remote_repo,
                     args.remote_container,
-                    quote_argv(
-                        rdma_builder.build_client_cmd(
+                    quote_argv([
+                        "env",
+                        f"RECSTORE_CONFIG={remote_config_path}",
+                        *rdma_builder.build_client_cmd(
                             replace_config_path_arg(
                                 [remote_benchmark_binary, *base_cmd[1:]],
                                 remote_config_path,
                             ),
                             client_index=client.client_index,
-                        )
-                    ),
+                        ),
+                    ]),
                 ),
                 cwd=str(REPO_ROOT),
             )

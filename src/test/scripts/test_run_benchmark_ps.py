@@ -1,5 +1,7 @@
 import json
 import argparse
+import contextlib
+import os
 import io
 import subprocess
 import sys
@@ -7,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from tools.benchmarks import run_benchmark_ps as benchmark_runner
 
 from tools.benchmarks.run_benchmark_ps import (  # noqa: E402
     apply_interactive_prompts,
@@ -621,6 +625,84 @@ class TestRunBenchmarkPS(unittest.TestCase):
         )
         self.assertEqual(cmd[:4], ["ssh", "worker-a", "bash", "-lc"])
         self.assertEqual(cmd[-1], "'cd /app/RecStore && mkdir -p /tmp/recstore sync'")
+
+    def test_remote_rdma_client_reads_synced_config_from_environment(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            remote_repo = root / "repo 'quoted' $(false)"
+            binary = remote_repo / "build/bin/ps_transport_benchmark"
+            binary.parent.mkdir(parents=True)
+            binary.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "path = os.environ['RECSTORE_CONFIG']\n"
+                "with open(path) as source: config = json.load(source)\n"
+                "print(json.dumps([path, sys.argv[1:], config]))\n"
+            )
+            binary.chmod(0o755)
+            config = root / "local_config.json"
+            config.write_text('{"deployment": "this-run"}')
+            with mock.patch.object(sys, "argv", [
+                "run_benchmark_ps.py", "--transports", "rdma",
+                "--remote-repo", str(remote_repo),
+                "--remote-runtime-root", str(root / "runtime 'quoted' $(false)"),
+                "--output-dir", str(root / "output"),
+            ]):
+                args = parse_args()
+            topology = build_topology_plan(
+                "RDMA", ["server"], ["client"], 1, 25000
+            )
+            synced_paths = []
+
+            def sync_config(local_path, host, remote_path, *_args):
+                target = Path(remote_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(local_path.read_bytes())
+                synced_paths.append(remote_path)
+
+            def run_client(specs, _timeout):
+                self.assertEqual(len(specs), 1)
+                self.assertEqual(specs[0].cmd[:2], ["ssh", "client"])
+                # Execute the SSH shell payload locally to exercise its quoting.
+                completed = subprocess.run(
+                    ["bash", "-c", " ".join(specs[0].cmd[2:])],
+                    env={**os.environ, "RECSTORE_CONFIG": "/stale/config.json"},
+                    text=True, capture_output=True, check=True,
+                )
+                path, argv, actual = json.loads(completed.stdout)
+                self.assertEqual(set(synced_paths), {path})
+                self.assertIn(f"--config_path={path}", argv)
+                self.assertNotIn("--config_path=/local/old.json", argv)
+                self.assertEqual(actual, {"deployment": "this-run"})
+                return []
+
+            with contextlib.ExitStack() as stack:
+                for name in (
+                    "ensure_remote_path", "ensure_remote_binary_state",
+                    "wait_rdma_control_plane_ready", "fetch_remote_text_file",
+                ):
+                    stack.enter_context(mock.patch.object(benchmark_runner, name))
+                stack.enter_context(mock.patch.object(
+                    benchmark_runner, "check_remote_rdma_available", return_value=None
+                ))
+                stack.enter_context(mock.patch.object(
+                    benchmark_runner, "sync_file_to_remote", side_effect=sync_config
+                ))
+                stack.enter_context(mock.patch.object(
+                    benchmark_runner, "run_command",
+                    return_value=subprocess.CompletedProcess([], 0, "123\n", ""),
+                ))
+                run_group = stack.enter_context(mock.patch.object(
+                    benchmark_runner, "run_client_process_group", side_effect=run_client
+                ))
+                _rows, ok = benchmark_runner.run_remote_case(
+                    args, transport="RDMA", topology=topology, config_path=config,
+                    benchmark_cmd=["local-benchmark", "--config_path=/local/old.json"],
+                    repeat_index=0, rdma_namespace="config-test",
+                    rdma_control_plane_host="server", rdma_control_plane_port=25100,
+                )
+                self.assertTrue(ok)
+                run_group.assert_called_once()
 
     def test_replace_config_path_arg_rewrites_existing_flag(self):
         cmd = replace_config_path_arg(
