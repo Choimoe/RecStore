@@ -33,7 +33,12 @@ torch::Tensor
 emb_wait_result_torch(int64_t prefetch_id, int64_t embedding_dim) {
   TORCH_CHECK(embedding_dim > 0, "Embedding dimension must be positive");
   auto op = GetKVClientOp();
-  op->WaitForPrefetch(static_cast<uint64_t>(prefetch_id));
+  // RDMA result consumption waits internally and can borrow the slot payload.
+  // For a single RPC, a prior wait would materialize the borrowed payload.
+  auto kv_op = std::dynamic_pointer_cast<KVClientOp>(op);
+  if (kv_op == nullptr || kv_op->CurrentPSBackend() != "rdma") {
+    op->WaitForPrefetch(static_cast<uint64_t>(prefetch_id));
+  }
   auto owned = std::make_shared<base::RecTensor>(
       std::vector<int64_t>{0, embedding_dim}, base::DataType::FLOAT32);
   op->GetPretchResult(static_cast<uint64_t>(prefetch_id), *owned);
