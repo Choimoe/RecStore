@@ -72,12 +72,12 @@ async function notifyFormat(github, context, run) {
 }
 
 async function notifyDocker(github, context, run, logsUrl) {
-  // A rerun keeps the same run ID; report each failed run only once, even if closed.
   const marker = `<!-- recstore:docker-test-failure:${run.id} -->`;
   const issues = await github.paginate(github.rest.issues.listForRepo, {
-    ...context.repo, state: 'all', creator: 'github-actions[bot]', per_page: 100,
+    ...context.repo, state: 'all', per_page: 100,
   });
-  if (issues.some(issue => !issue.pull_request && isActionsBot(issue) && issue.body?.includes(marker))) return;
+  if (issues.some(issue => !issue.pull_request && isActionsBot(issue) &&
+      issue.body?.includes(marker))) return;
   const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
     ...context.repo, run_id: run.id, attempt_number: run.run_attempt, per_page: 100,
   });
@@ -85,10 +85,7 @@ async function notifyDocker(github, context, run, logsUrl) {
     ...context.repo, run_id: run.id, per_page: 100,
   });
   const failures = jobs.filter(job => failed(job.conclusion));
-  // Follow .github/ISSUE_TEMPLATE/bug_report.yml's fields and bug label.
   const body = [
-    marker,
-    '',
     '### Type',
     '',
     'Other',
@@ -122,9 +119,32 @@ async function notifyDocker(github, context, run, logsUrl) {
     ...artifacts.filter(artifact => !artifact.expired && artifact.name === 'docker-image-test-logs')
       .map(artifact => `[Download docker-image-test-logs (ZIP)](${run.html_url}/artifacts/${artifact.id})`),
   ].join('\n');
+  const existing = issues
+    .filter(issue => !issue.pull_request && issue.state === 'open' &&
+      issue.title?.includes('Docker Test CI failed'))
+    .sort((left, right) => left.number - right.number)[0];
+  const labels = ['bug', 'CI/CD'];
+  if (existing) {
+    const title = `[Bug][CI]: ${existing.title.slice(existing.title.indexOf('Docker Test CI failed'))}`;
+    if (existing.title !== title) {
+      await github.rest.issues.update({
+        ...context.repo, issue_number: existing.number, title,
+      });
+    }
+    const currentLabels = new Set((existing.labels || []).map(label => label.name || label));
+    const missingLabels = labels.filter(label => !currentLabels.has(label));
+    if (missingLabels.length) {
+      await github.rest.issues.addLabels({
+        ...context.repo, issue_number: existing.number, labels: missingLabels,
+      });
+    }
+    await upsertComment(github, context.repo, existing.number,
+      `docker-test-failure:${run.id}`, body);
+    return;
+  }
   await github.rest.issues.create({
-    ...context.repo, title: `[Bug]: Docker Test CI failed (run #${run.run_number})`,
-    labels: ['bug'], body,
+    ...context.repo, title: `[Bug][CI]: Docker Test CI failed (run #${run.run_number})`,
+    labels, body: `${marker}\n\n${body}`,
   });
 }
 
