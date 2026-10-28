@@ -579,19 +579,6 @@ int64_t NsSince(std::chrono::steady_clock::time_point start,
 
 using BenchmarkClient = std::unique_ptr<recstore::BasePSClient>;
 
-struct DirectRdmaClient {
-  std::unique_ptr<recstore::RDMAPSClientAdapter> adapter;
-  std::unique_ptr<recstore::RdmaRawAccess> raw;
-};
-
-DirectRdmaClient
-CreateDirectRdmaClientFromConfig(const nlohmann::json& config) {
-  DirectRdmaClient direct;
-  direct.adapter = std::make_unique<recstore::RDMAPSClientAdapter>(config);
-  direct.raw = std::make_unique<recstore::RdmaRawAccess>(direct.adapter.get());
-  return direct;
-}
-
 PhaseStats LoadRecords(
     const std::string& transport,
     int load_threads,
@@ -907,7 +894,10 @@ PhaseStats RunPrefetchFetchTransactions(
   return total;
 }
 
-PhaseStats RunRdmaDirectAsyncFetchTransactions(int dim, int prefetch_depth) {
+PhaseStats RunRdmaDirectAsyncFetchTransactions(
+    int dim,
+    int prefetch_depth,
+    std::vector<BenchmarkClient>& reusable_clients) {
   CHECK_GT(prefetch_depth, 0);
   CHECK_EQ(FLAGS_mode, "fetch")
       << "--rdma_direct_async_fetch currently supports fetch mode only";
@@ -915,7 +905,7 @@ PhaseStats RunRdmaDirectAsyncFetchTransactions(int dim, int prefetch_depth) {
       << "RDMA direct async fetch supports one worker thread per benchmark "
          "process; scale with client processes";
 
-  const nlohmann::json config = LoadClientConfig("RDMA");
+  CHECK_EQ(static_cast<int>(reusable_clients.size()), FLAGS_thread_num);
   std::atomic<bool> start{false};
   std::atomic<bool> stop{false};
   std::vector<std::thread> threads;
@@ -931,9 +921,11 @@ PhaseStats RunRdmaDirectAsyncFetchTransactions(int dim, int prefetch_depth) {
   for (int tid = 0; tid < FLAGS_thread_num; ++tid) {
     threads.emplace_back([&, tid]() {
       base::auto_bind_core();
-      DirectRdmaClient direct      = CreateDirectRdmaClientFromConfig(config);
-      recstore::RdmaRawAccess* raw = direct.raw.get();
-      CHECK_NE(raw, nullptr);
+      // Preserve the load connection and its request sequence numbers.
+      auto* adapter = dynamic_cast<recstore::RDMAPSClientAdapter*>(
+          reusable_clients.at(static_cast<std::size_t>(tid)).get());
+      CHECK_NE(adapter, nullptr);
+      recstore::RdmaRawAccess raw(adapter);
       KeyGenerator key_gen(
           FLAGS_distribution,
           static_cast<uint64_t>(FLAGS_record_count),
@@ -967,7 +959,7 @@ PhaseStats RunRdmaDirectAsyncFetchTransactions(int dim, int prefetch_depth) {
       auto submit_slot = [&](DirectSlot* slot) {
         fill_keys(&slot->keys);
         const auto submit_begin = std::chrono::steady_clock::now();
-        slot->rpc_id            = raw->SubmitGetParameter(
+        slot->rpc_id            = raw.SubmitGetParameter(
             base::ConstArray<uint64_t>(slot->keys),
             slot->output.data(),
             true,
@@ -980,7 +972,7 @@ PhaseStats RunRdmaDirectAsyncFetchTransactions(int dim, int prefetch_depth) {
 
       auto consume_slot = [&](DirectSlot* slot) {
         const auto consume_begin = std::chrono::steady_clock::now();
-        raw->WaitRPCFinish(slot->rpc_id);
+        raw.WaitRPCFinish(slot->rpc_id);
         const auto* status_word = petps::FixedSlotStatusWord(
             slot->output.data(), slot->keys.size(), FLAGS_value_size);
         CHECK_EQ(*status_word, static_cast<std::int32_t>(petps::RpcStatus::kOk))
@@ -992,7 +984,7 @@ PhaseStats RunRdmaDirectAsyncFetchTransactions(int dim, int prefetch_depth) {
               dim,
               static_cast<uint64_t>(FLAGS_record_count));
         }
-        raw->RevokeRPCResource(slot->rpc_id);
+        raw.RevokeRPCResource(slot->rpc_id);
         const auto consume_end = std::chrono::steady_clock::now();
         local_profile.consume_ns +=
             static_cast<uint64_t>(NsSince(consume_begin, consume_end));
@@ -1168,9 +1160,6 @@ int main(int argc, char** argv) {
     if (FLAGS_load_only) {
       return 0;
     }
-    if (FLAGS_rdma_direct_async_fetch) {
-      reusable_clients.clear();
-    }
 
     LocalShmTransportStats run_transport_stats;
     LocalShmTransportStatsByOpcode run_transport_stats_by_opcode;
@@ -1197,7 +1186,7 @@ int main(int argc, char** argv) {
     const PhaseStats run =
         FLAGS_rdma_direct_async_fetch
             ? RunRdmaDirectAsyncFetchTransactions(
-                  dim, std::max(1, effective_prefetch_depth))
+                  dim, std::max(1, effective_prefetch_depth), reusable_clients)
         : effective_prefetch_depth > 0
             ? RunPrefetchFetchTransactions(
                   transport,

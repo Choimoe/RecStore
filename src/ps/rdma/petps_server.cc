@@ -756,6 +756,10 @@ private:
   }
 
   void DrainGetPayloadCompletions(int poll_thread_id, bool profile_enabled) {
+    if (!GetPayloadOffloadEnabled()) {
+      MaybeReportRebuildFenceStats();
+      return;
+    }
     GetPayloadCompletion completion;
     while (TryPopGetPayloadCompletion(poll_thread_id, &completion)) {
       if (completion.stale ||

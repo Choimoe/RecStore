@@ -123,6 +123,7 @@ public:
                          bool isAsync,
                          int async_req_id,
                          int64_t embedding_dim) {
+    std::lock_guard<std::mutex> io_guard(adapter_->io_mu_);
     return adapter_->SubmitGetParameter(
         keys, values, isAsync, async_req_id, embedding_dim);
   }

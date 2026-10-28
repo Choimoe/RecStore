@@ -1,5 +1,7 @@
 import json
 import argparse
+import contextlib
+import os
 import io
 import subprocess
 import sys
@@ -7,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from tools.benchmarks import run_benchmark_ps as benchmark_runner
 
 from tools.benchmarks.run_benchmark_ps import (  # noqa: E402
     apply_interactive_prompts,
@@ -621,6 +625,121 @@ class TestRunBenchmarkPS(unittest.TestCase):
         )
         self.assertEqual(cmd[:4], ["ssh", "worker-a", "bash", "-lc"])
         self.assertEqual(cmd[-1], "'cd /app/RecStore && mkdir -p /tmp/recstore sync'")
+
+    def test_remote_rdma_preserves_config_affinity_and_environment_whitelist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            remote_repo = root / "repo 'quoted' $(false)"
+            binary = remote_repo / "build/bin/ps_transport_benchmark"
+            binary.parent.mkdir(parents=True)
+            binary.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "path = os.environ['RECSTORE_CONFIG']\n"
+                "with open(path) as source: config = json.load(source)\n"
+                "print(json.dumps([path, sys.argv[1:], config, "
+                "os.environ['RECSTORE_BIND_CORE_OFFSET'], "
+                "os.environ['RECSTORE_RDMA_VALIDATE_ROUTING']]))\n"
+            )
+            binary.chmod(0o755)
+            config = root / "local_config.json"
+            config.write_text('{"deployment": "this-run"}')
+            with mock.patch.object(sys, "argv", [
+                "run_benchmark_ps.py", "--transports", "rdma",
+                "--remote-repo", str(remote_repo),
+                "--remote-runtime-root", str(root / "runtime 'quoted' $(false)"),
+                "--output-dir", str(root / "output"),
+                "--client-threads-per-process", "1",
+                "--server-rdma-threads", "4",
+                "--rdma-rc-server-get-workers", "0",
+                "--rdma-server-bind-core-offset", "3",
+                "--rdma-client-bind-core-offset", "5",
+                "--rdma-client-bind-core-stride", "2",
+            ]):
+                args = parse_args()
+            topology = build_topology_plan(
+                "RDMA", ["server-a", "server-b"], ["client"], 2, 25000
+            )
+            synced_paths = []
+
+            def sync_config(local_path, host, remote_path, *_args):
+                target = Path(remote_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(local_path.read_bytes())
+                synced_paths.append(remote_path)
+
+            def run_client(specs, _timeout):
+                self.assertEqual(len(specs), 2)
+                offsets = []
+                for spec in specs:
+                    self.assertEqual(spec.cmd[:2], ["ssh", "client"])
+                    self.assertNotIn("DO_NOT_FORWARD", spec.cmd[-1])
+                    # Execute the SSH shell payload locally to exercise its quoting.
+                    completed = subprocess.run(
+                        ["bash", "-c", " ".join(spec.cmd[2:])],
+                        env={**os.environ, "RECSTORE_CONFIG": "/stale/config.json",
+                             "RECSTORE_BIND_CORE_OFFSET": "999",
+                             "RECSTORE_RDMA_VALIDATE_ROUTING": "0"},
+                        text=True, capture_output=True, check=True,
+                    )
+                    path, argv, actual, offset, routing = json.loads(completed.stdout)
+                    self.assertEqual(set(synced_paths), {path})
+                    self.assertIn(f"--config_path={path}", argv)
+                    self.assertNotIn("--config_path=/local/old.json", argv)
+                    self.assertEqual(actual, {"deployment": "this-run"})
+                    self.assertEqual(routing, "1")
+                    offsets.append(offset)
+                self.assertEqual(offsets, ["5", "7"])
+                return []
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {
+                    "RECSTORE_RDMA_VALIDATE_ROUTING": "1",
+                    "RECSTORE_BIND_CORE_OFFSET": "999",
+                    "DO_NOT_FORWARD": "unrelated-environment-value",
+                }))
+                server_command = stack.enter_context(mock.patch.object(
+                    benchmark_runner, "build_remote_background_server_cmd",
+                    wraps=benchmark_runner.build_remote_background_server_cmd,
+                ))
+                for name in (
+                    "ensure_remote_path", "ensure_remote_binary_state",
+                    "wait_rdma_control_plane_ready", "fetch_remote_text_file",
+                ):
+                    stack.enter_context(mock.patch.object(benchmark_runner, name))
+                stack.enter_context(mock.patch.object(
+                    benchmark_runner, "check_remote_rdma_available", return_value=None
+                ))
+                stack.enter_context(mock.patch.object(
+                    benchmark_runner, "sync_file_to_remote", side_effect=sync_config
+                ))
+                stack.enter_context(mock.patch.object(
+                    benchmark_runner, "run_command",
+                    return_value=subprocess.CompletedProcess([], 0, "123\n", ""),
+                ))
+                run_group = stack.enter_context(mock.patch.object(
+                    benchmark_runner, "run_client_process_group", side_effect=run_client
+                ))
+                _rows, ok = benchmark_runner.run_remote_case(
+                    args, transport="RDMA", topology=topology, config_path=config,
+                    benchmark_cmd=["local-benchmark", "--config_path=/local/old.json"],
+                    repeat_index=0, rdma_namespace="config-test",
+                    rdma_control_plane_host="server", rdma_control_plane_port=25100,
+                )
+                self.assertTrue(ok)
+                run_group.assert_called_once()
+                self.assertEqual(server_command.call_count, 2)
+                for call, expected_offset in zip(server_command.call_args_list, [3, 7]):
+                    argv = call.args[3]
+                    self.assertEqual(argv[0], "env")
+                    self.assertIn(f"RECSTORE_BIND_CORE_OFFSET={expected_offset}", argv)
+                    self.assertIn("RECSTORE_RDMA_VALIDATE_ROUTING=1", argv)
+                    self.assertIn(f"RECSTORE_CONFIG={synced_paths[0]}", argv)
+                    assignments = argv[1:argv.index(str(remote_repo / "build/bin/petps_server"))]
+                    self.assertEqual({part.split("=", 1)[0] for part in assignments}, {
+                        "RECSTORE_CONFIG", "RECSTORE_BIND_CORE_OFFSET",
+                        "RECSTORE_RDMA_VALIDATE_ROUTING",
+                    })
 
     def test_replace_config_path_arg_rewrites_existing_flag(self):
         cmd = replace_config_path_arg(

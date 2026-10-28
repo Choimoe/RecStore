@@ -499,6 +499,8 @@ int RDMAPSClientAdapter::PutParameter(const base::ConstArray<uint64_t>& keys,
     return 0;
   }
   EnsureThreadInitialized();
+  std::lock_guard<std::mutex> io_guard(io_mu_);
+  executor_->DrainBatchSlots();
   return executor_->PutParameter(
       BuildChunks(keys, MaxPutKeysPerRpc(values.shape(1))), values);
 }
@@ -609,6 +611,8 @@ uint64_t RDMAPSClientAdapter::SubmitUpdateParameterAsync(
   const int64_t embedding_dim = grads.shape(1);
   EnsureTableReady(table_name, embedding_dim);
   EnsureThreadInitialized();
+  std::lock_guard<std::mutex> io_guard(io_mu_);
+  executor_->DrainBatchSlots();
   return executor_->SubmitUpdateParameterFlat(
       table_name,
       keys,
@@ -625,6 +629,8 @@ int RDMAPSClientAdapter::WaitUpdateParameter(uint64_t update_id) {
 int RDMAPSClientAdapter::InitEmbeddingTable(
     const std::string& table_name, const EmbeddingTableConfig& config) {
   EnsureThreadInitialized();
+  std::lock_guard<std::mutex> io_guard(io_mu_);
+  executor_->DrainBatchSlots();
   int tag = -1;
   for (auto& shard_client : shard_clients_) {
     const int rc = shard_client->InitEmbeddingTable(
@@ -672,19 +678,19 @@ uint64_t
 RDMAPSClientAdapter::PrefetchParameter(const base::ConstArray<uint64_t>& keys) {
   EnsureThreadInitialized();
   std::lock_guard<std::mutex> io_guard(io_mu_);
-  executor_->DrainBatchSlots();
   if (keys.Size() == 0) {
     throw std::invalid_argument("RDMA prefetch requires at least one key");
   }
   const int64_t embedding_dim = EmbeddingDimForKeys(keys);
   const int value_size =
       static_cast<int>(static_cast<std::size_t>(embedding_dim) * sizeof(float));
+  const auto chunks = BuildChunks(keys, MaxGetKeysPerRpc(embedding_dim));
+  const std::size_t max_in_flight = MaxInFlightGetRpcs();
+  if (!executor_->HasGetSlotCapacity(chunks, max_in_flight)) {
+    executor_->DrainBatchSlots();
+  }
   return executor_->SubmitPrefetch(
-      BuildChunks(keys, MaxGetKeysPerRpc(embedding_dim)),
-      keys.Size(),
-      embedding_dim,
-      value_size,
-      MaxInFlightGetRpcs());
+      chunks, keys.Size(), embedding_dim, value_size, max_in_flight);
 }
 
 bool RDMAPSClientAdapter::IsPrefetchDone(uint64_t prefetch_id) {
@@ -699,6 +705,8 @@ void RDMAPSClientAdapter::WaitForPrefetch(uint64_t prefetch_id) {
 
 bool RDMAPSClientAdapter::GetPrefetchResult(uint64_t prefetch_id,
                                             base::RecTensor& values) {
+  // Keep borrowed MR payloads live until the consumer has copied them.
+  std::lock_guard<std::mutex> io_guard(io_mu_);
   const auto result  = executor_->ReadPrefetch(prefetch_id);
   const bool discard = values.data() == nullptr && values.dim() == 0;
   if (!discard && !EnsureEmbeddingOutput(values, result.key_count)) {

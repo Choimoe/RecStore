@@ -1751,6 +1751,15 @@ def run_local_rdma_case(
     return rows, ok
 
 
+def with_remote_rdma_env(argv: list[str], env: dict[str, str]) -> list[str]:
+    keys = (
+        "RECSTORE_CONFIG",
+        "RECSTORE_BIND_CORE_OFFSET",
+        "RECSTORE_RDMA_VALIDATE_ROUTING",
+    )
+    return ["env", *(f"{key}={env[key]}" for key in keys if key in env), *argv]
+
+
 def build_remote_background_server_cmd(
     host: str,
     remote_repo: str,
@@ -1902,7 +1911,10 @@ def run_remote_case(
                         server.ssh_host,
                         args.remote_repo,
                         args.remote_container,
-                        rdma_builder.build_server_cmd(server.server_index),
+                        with_remote_rdma_env(
+                            rdma_builder.build_server_cmd(server.server_index),
+                            rdma_builder.build_server_env(server.server_index),
+                        ),
                         remote_log_path,
                     ),
                     remote_log_path,
@@ -1979,15 +1991,16 @@ def run_remote_case(
                     client.ssh_host,
                     args.remote_repo,
                     args.remote_container,
-                    quote_argv(
+                    quote_argv(with_remote_rdma_env(
                         rdma_builder.build_client_cmd(
                             replace_config_path_arg(
                                 [remote_benchmark_binary, *base_cmd[1:]],
                                 remote_config_path,
                             ),
                             client_index=client.client_index,
-                        )
-                    ),
+                        ),
+                        rdma_builder.build_client_env(client.client_index),
+                    )),
                 ),
                 cwd=str(REPO_ROOT),
             )

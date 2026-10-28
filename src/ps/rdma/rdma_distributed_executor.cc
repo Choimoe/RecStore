@@ -185,7 +185,7 @@ int RdmaDistributedExecutor::SubmitGetParameter(
       pending.rpc_id = client->GetParameter(
           base::ConstArray<std::uint64_t>(chunk.keys),
           static_cast<float*>(recv),
-          is_async,
+          /*isAsync=*/true,
           async_req_id,
           value_size / static_cast<int>(sizeof(float)));
       if (pending.rpc_id < 0) {
@@ -197,10 +197,25 @@ int RdmaDistributedExecutor::SubmitGetParameter(
       }
     }
   } catch (...) {
-    ReleaseShardRpcs(&window);
-    ReleaseShardRpcs(&batch.shard_rpcs);
-    RecycleReceiveBuffers(&batch.receive_buffers);
-    throw;
+    const auto error = std::current_exception();
+    // Accepted RPCs must finish or retire their lanes before slots are reused.
+    try {
+      WaitShardRpcs(window);
+    } catch (...) {
+    }
+    try {
+      ReleaseShardRpcs(&window);
+    } catch (...) {
+    }
+    try {
+      ReleaseShardRpcs(&batch.shard_rpcs);
+    } catch (...) {
+    }
+    try {
+      RecycleReceiveBuffers(&batch.receive_buffers);
+    } catch (...) {
+    }
+    std::rethrow_exception(error);
   }
   for (auto& pending : window) {
     batch.shard_rpcs.push_back(std::move(pending));
@@ -208,7 +223,17 @@ int RdmaDistributedExecutor::SubmitGetParameter(
 
   const int batch_id = RegisterBatch(std::move(batch));
   if (!is_async) {
-    WaitBatch(batch_id);
+    try {
+      WaitBatch(batch_id);
+    } catch (...) {
+      const auto error = std::current_exception();
+      try {
+        ReleaseBatch(batch_id);
+      } catch (...) {
+        // Preserve the wait failure; the caller never received this handle.
+      }
+      std::rethrow_exception(error);
+    }
   }
   return batch_id;
 }
@@ -367,33 +392,24 @@ void RdmaDistributedExecutor::ReleasePrefetch(std::uint64_t prefetch_id) {
 
 void RdmaDistributedExecutor::WaitShardRpcs(
     const std::vector<shard_routing::PendingShardRpc>& shard_rpcs) const {
-  std::vector<bool> finished(shard_rpcs.size(), false);
-  std::size_t remaining = 0;
-  for (std::size_t i = 0; i < shard_rpcs.size(); ++i) {
-    finished[i] = shard_rpcs[i].released;
-    if (!finished[i]) {
-      ++remaining;
+  // Every RPC in this window is already submitted; waiting preserves overlap.
+  std::exception_ptr first_error;
+  for (const auto& pending : shard_rpcs) {
+    if (pending.released) {
+      continue;
+    }
+    try {
+      ClientAt(pending.client_index)->WaitRPCFinish(pending.rpc_id);
+    } catch (...) {
+      if (first_error == nullptr) {
+        first_error = std::current_exception();
+      }
     }
   }
-  while (remaining > 0) {
-    bool made_progress = false;
-    for (std::size_t i = 0; i < shard_rpcs.size(); ++i) {
-      if (finished[i]) {
-        continue;
-      }
-      const auto& pending = shard_rpcs[i];
-      auto* client        = ClientAt(pending.client_index);
-      if (!client->QueryRPCFinished(pending.rpc_id)) {
-        continue;
-      }
-      client->WaitRPCFinish(pending.rpc_id);
-      finished[i]   = true;
-      made_progress = true;
-      --remaining;
-    }
-    if (!made_progress) {
-      std::this_thread::yield();
-    }
+  // Later RPCs must also finish or retire before the caller releases the
+  // window.
+  if (first_error != nullptr) {
+    std::rethrow_exception(first_error);
   }
 }
 
@@ -622,6 +638,29 @@ bool RdmaDistributedExecutor::WaitBatch(int batch_id) {
     throw std::runtime_error("RDMA distributed batch released while waiting");
   }
   return FinalizeBatch(&it->second);
+}
+
+bool RdmaDistributedExecutor::HasGetSlotCapacity(
+    const std::vector<shard_routing::ShardChunk>& chunks,
+    std::size_t max_in_flight) const {
+  if (max_in_flight == 0) {
+    return false;
+  }
+  std::vector<std::size_t> required(clients_.size(), 0);
+  for (const auto& chunk : chunks) {
+    auto& count = required.at(static_cast<std::size_t>(chunk.client_index));
+    // Each submission window has at most max_in_flight RPCs across all shards.
+    if (count < max_in_flight) {
+      ++count;
+    }
+  }
+  for (std::size_t client = 0; client < required.size(); ++client) {
+    if (required[client] > 0 && !ClientAt(static_cast<int>(client))
+                                     ->HasAvailableSlots(required[client])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void RdmaDistributedExecutor::DrainBatchSlots() {
