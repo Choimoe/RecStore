@@ -639,6 +639,29 @@ bool RdmaDistributedExecutor::WaitBatch(int batch_id) {
   return FinalizeBatch(&it->second);
 }
 
+bool RdmaDistributedExecutor::HasGetSlotCapacity(
+    const std::vector<shard_routing::ShardChunk>& chunks,
+    std::size_t max_in_flight) const {
+  if (max_in_flight == 0) {
+    return false;
+  }
+  std::vector<std::size_t> required(clients_.size(), 0);
+  for (const auto& chunk : chunks) {
+    auto& count = required.at(static_cast<std::size_t>(chunk.client_index));
+    // Each submission window has at most max_in_flight RPCs across all shards.
+    if (count < max_in_flight) {
+      ++count;
+    }
+  }
+  for (std::size_t client = 0; client < required.size(); ++client) {
+    if (required[client] > 0 &&
+        !ClientAt(static_cast<int>(client))->HasAvailableSlots(required[client])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void RdmaDistributedExecutor::DrainBatchSlots() {
   std::lock_guard<std::mutex> guard(batches_mu_);
   for (auto& entry : batches_) {

@@ -53,6 +53,9 @@ public:
   // Materialize outstanding GETs in their CPU buffers and release RC slots,
   // preserving their public handles until consumers retrieve the results.
   void DrainBatchSlots();
+  bool HasGetSlotCapacity(
+      const std::vector<shard_routing::ShardChunk>& chunks,
+      std::size_t max_in_flight) const;
   void WaitShardRpcs(
       const std::vector<shard_routing::PendingShardRpc>& shard_rpcs) const;
   void ReleaseShardRpcs(
