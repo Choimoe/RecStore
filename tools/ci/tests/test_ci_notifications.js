@@ -33,7 +33,14 @@ function fixture() {
         listForRepo: read('issues', () => state.issues),
         createComment: write('createComment', args => state.comments.push({ id: state.comments.length + 1, user: bot, ...args })),
         updateComment: write('updateComment', args => Object.assign(state.comments.find(c => c.id === args.comment_id), { body: args.body })),
-        create: write('createIssue', args => state.issues.push({ number: 101, user: bot, ...args })),
+        addLabels: write('addLabels', args => {
+          const issue = state.issues.find(item => item.number === args.issue_number);
+          issue.labels = [...(issue.labels || []), ...args.labels];
+        }),
+        update: write('updateIssue', args => Object.assign(
+          state.issues.find(item => item.number === args.issue_number), args,
+        )),
+        create: write('createIssue', args => state.issues.push({ number: 101, state: 'open', user: bot, ...args })),
       },
       pulls: {
         get: read('pr', args => state.prs.find(pr => pr.number === args.pull_number)),
@@ -162,7 +169,7 @@ test('successful, cancelled, skipped, and unrelated workflows do not notify', as
   assert.equal(state.writes.length, 0);
 });
 
-test('Docker failures follow the bug template, link the failed attempt, and deduplicate even closed issues', async () => {
+test('Docker failures follow the bug template, use CI labels, and deduplicate the same run', async () => {
   const { github, state, context, run } = fixture();
   Object.assign(run, {
     name: 'Docker Test', head_branch: 'main', event: 'push',
@@ -177,7 +184,8 @@ test('Docker failures follow the bug template, link the failed attempt, and dedu
   const logsUrl = 'https://github.com/RecStore/RecStore/actions/runs/701/artifacts/801';
   await notifyFailure(github, context, logsUrl);
   const issue = state.issues[0];
-  assert.deepEqual(issue.labels, ['bug']);
+  assert.equal(issue.title, '[Bug][CI]: Docker Test CI failed (run #50)');
+  assert.deepEqual(issue.labels, ['bug', 'CI/CD']);
   for (const text of ['### Type\n\nOther', '### 🐛 Description', '### 🛠️ Environment', run.html_url,
     '#42', 'Build &lt;core&gt;', 'ubuntu-latest', 'docker-image-test-logs', logsUrl, `${run.html_url}/artifacts/800`]) {
     assert.ok(issue.body.includes(text), text);
@@ -190,6 +198,40 @@ test('Docker failures follow the bug template, link the failed attempt, and dedu
   run.id += 1;
   await notifyFailure(github, context);
   assert.equal(state.writes.length, 2);
+});
+
+test('Docker failures reply to an existing open tracker instead of creating another issue', async () => {
+  const { github, state, context, run } = fixture();
+  Object.assign(run, {
+    name: 'Docker Test', head_branch: 'main', event: 'push',
+    head_repository: { full_name: 'RecStore/RecStore' },
+  });
+  state.issues.push({
+    number: 99, state: 'open', user: bot, labels: [{ name: 'bug' }],
+    title: '[Bug]: Docker Test CI failed (run #49)',
+    body: '<!-- recstore:docker-test-failure:699 -->',
+  });
+  state.issues.push({
+    number: 100, state: 'open', user: bot, labels: ['bug', 'CI/CD'],
+    title: '[Bug][CI]: Docker Test CI failed (run #50)',
+    body: '<!-- recstore:docker-test-failure:698 -->',
+  });
+
+  await notifyFailure(github, context);
+
+  assert.equal(state.writes.some(write => write.name === 'createIssue'), false);
+  assert.deepEqual(state.writes.map(write => write.name), ['updateIssue', 'addLabels', 'createComment']);
+  assert.equal(state.issues[0].title, '[Bug][CI]: Docker Test CI failed (run #49)');
+  assert.deepEqual(state.writes[1].args.labels, ['CI/CD']);
+  assert.equal(state.comments[0].issue_number, 99);
+  assert.ok(state.comments[0].body.includes('<!-- recstore:docker-test-failure:700 -->'));
+  assert.ok(state.comments[0].body.includes(run.html_url));
+
+  run.run_attempt = 2;
+  await notifyFailure(github, context);
+  assert.equal(state.comments.length, 1);
+  assert.equal(state.writes.at(-1).name, 'updateComment');
+  assert.ok(state.comments[0].body.includes('attempt 2'));
 });
 
 test('Docker timeouts without failed job details still create an actionable issue', async () => {

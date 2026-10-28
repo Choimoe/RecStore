@@ -13,6 +13,7 @@ on:
   workflow_run:
     workflows: ["Docker Build and Publish"]
     types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       image_tag:
@@ -27,9 +28,44 @@ permissions:
   packages: read
 
 jobs:
+  detect-image-change:
+    name: Detect environment image changes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.image.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check Docker publish inputs
+        id: image
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${BEFORE_SHA}" =~ ^0+$ ]]; then
+            changed_files=$(git diff-tree --root --no-commit-id --name-only -r "${CURRENT_SHA}")
+          else
+            changed_files=$(git diff --name-only "${BEFORE_SHA}" "${CURRENT_SHA}")
+          fi
+          if grep -Eq '^(dockerfiles/(Dockerfile\.recstore|init_env_inside_docker\.sh|git_ref\.sh)|\.gitmodules|third_party/.*|\.github/workflows/publish\.yml)$' <<< "${changed_files}"; then
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            echo "Environment image inputs changed; defer Docker Test until Docker Build and Publish completes."
+          else
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          fi
+
   test-image:
     name: Pull image and run tests
+    needs: detect-image-change
     if: >-
+      always() &&
+      (needs.detect-image-change.result == 'skipped' ||
+       (needs.detect-image-change.result == 'success' && needs.detect-image-change.outputs.changed != 'true')) &&
       (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name != github.repository)
@@ -42,9 +78,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # workflow_run 触发时固定拉取默认分支最新代码，镜像仅提供构建环境。
+          # workflow_run 使用与已发布镜像相同的源码提交。
           # pull_request_target 触发时显式检出 PR merge ref，避免回到基线分支代码。
-          ref: ${{ github.event_name == 'workflow_run' && format('refs/heads/{0}', github.event.repository.default_branch) || (github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number)) || github.ref }}
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || (github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number)) || github.ref }}
           # third_party 已在发布镜像阶段缓存并在测试容器中恢复，这里仅拉取主仓库代码。
           submodules: false
           fetch-depth: 0
@@ -58,29 +94,21 @@ jobs:
         env:
           INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag || '' }}
           EVENT_NAME: ${{ github.event_name }}
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
-          CURRENT_REPO: ${{ github.repository }}
           WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha || '' }}
-          CURRENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           REPO_LOWER="$(echo "${IMAGE_REPO}" | tr '[:upper:]' '[:lower:]')"
 
-          if { [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "pull_request_target" ]; } && [ "${PR_HEAD_REPO}" != "${CURRENT_REPO}" ]; then
-            PRIMARY_SHA_TAG="latest"
+          if [ -n "${INPUT_IMAGE_TAG}" ]; then
+            IMAGE_TAG="${INPUT_IMAGE_TAG}"
           elif [ "${EVENT_NAME}" = "workflow_run" ] && [ -n "${WORKFLOW_RUN_HEAD_SHA}" ]; then
-            PRIMARY_SHA_TAG="sha-$(echo "${WORKFLOW_RUN_HEAD_SHA}" | cut -c1-7)"
-          elif { [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "pull_request_target" ]; } && [ -n "${PR_HEAD_SHA}" ]; then
-            PRIMARY_SHA_TAG="sha-$(echo "${PR_HEAD_SHA}" | cut -c1-7)"
+            IMAGE_TAG="sha-$(echo "${WORKFLOW_RUN_HEAD_SHA}" | cut -c1-7)"
           else
-            PRIMARY_SHA_TAG="sha-$(echo "${CURRENT_SHA}" | cut -c1-7)"
+            IMAGE_TAG="latest"
           fi
 
           echo "repo=${REPO_LOWER}" >> "${GITHUB_OUTPUT}"
-          echo "input_tag=${INPUT_IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
-          echo "event_name=${EVENT_NAME}" >> "${GITHUB_OUTPUT}"
-          echo "primary_sha_tag=${PRIMARY_SHA_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${IMAGE_TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -94,54 +122,11 @@ jobs:
         run: |
           set -euo pipefail
           REPO="${{ steps.image.outputs.repo }}"
-          INPUT_TAG="${{ steps.image.outputs.input_tag }}"
-          PRIMARY_SHA_TAG="${{ steps.image.outputs.primary_sha_tag }}"
-          EVENT_NAME="${{ steps.image.outputs.event_name }}"
-
-          try_pull() {
-            local tag_to_try=$1
-            local img="${REPO}:${tag_to_try}"
-            echo "Trying image: ${img}"
-            if docker pull "${img}" 2>/dev/null; then
-              echo "pulled_image=${img}" >> "${GITHUB_OUTPUT}"
-              echo "✓ Successfully pulled image: ${img}"
-              return 0
-            fi
-            return 1
-          }
-
-          # 用户显式指定 tag 时优先尝试。
-          if [ -n "${INPUT_TAG}" ] && try_pull "${INPUT_TAG}"; then
-            exit 0
-          fi
-
-          # 外部 fork PR 没有同提交镜像时，primary_sha_tag 会被预先解析为 latest。
-          if try_pull "${PRIMARY_SHA_TAG}"; then
-            exit 0
-          fi
-
-          if [ "${PRIMARY_SHA_TAG}" != "latest" ] && try_pull "latest"; then
-            exit 0
-          fi
-
-          # manual 仅用于 workflow_dispatch 手动触发兜底。
-          if [ "${EVENT_NAME}" = "workflow_dispatch" ] && try_pull "manual"; then
-            exit 0
-          fi
-
-          # Try to find any available tag (as last resort)
-          echo "Commit-specific tags not found. Searching for any available images..."
-          available_tags=$(docker search "${REPO}" --format "table {{.Name}}\t{{.Stars}}" 2>/dev/null | grep "${REPO}" | head -1 || echo "")
-          if [ -n "${available_tags}" ]; then
-            echo "Note: Available images exist but none match your search criteria."
-            echo "Available: ${available_tags}"
-          fi
-
-          echo "" >&2
-          echo "Failed to find image at ${REPO}" >&2
-          echo "Please run Docker Publish workflow first to build the image." >&2
-          echo "Or manually trigger Docker Publish from Actions tab." >&2
-          exit 1
+          TAG="${{ steps.image.outputs.tag }}"
+          IMAGE="${REPO}:${TAG}"
+          echo "Pulling image: ${IMAGE}"
+          docker pull "${IMAGE}"
+          echo "pulled_image=${IMAGE}" >> "${GITHUB_OUTPUT}"
 
       - name: Start test container
         env:

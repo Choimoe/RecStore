@@ -12,7 +12,7 @@ permissions:
   issues: write
 
 concurrency:
-  group: ci-notifications-${{ github.event.workflow_run.name }}-${{ github.event.workflow_run.name == 'Docker Test' && github.event.workflow_run.id || github.event.workflow_run.head_branch }}
+  group: ci-notifications-${{ github.event.workflow_run.name }}-${{ github.event.workflow_run.name == 'Docker Test' && 'tracker' || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:

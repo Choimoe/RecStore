@@ -7,8 +7,9 @@ Parses a ctest --output-on-failure log and emits workflow commands:
 
 - one ``::error`` annotation per failed / timed-out / not-run test, with the
   test name, its lane, duration, and a few lines of failure context,
-- a final ``::error`` summary if anything failed, or a ``::notice`` if
-  everything passed, so the annotation area always states where ctest stood.
+- skipped tests are counted but do not produce failure annotations,
+- a final ``::error`` summary if anything failed, or a ``::notice`` otherwise,
+  so the annotation area always states where ctest stood.
 
 Annotation bodies are multi-line plain text (GitHub's Markdown rendering in
 annotations is unreliable; titles do render backticks). When run inside
@@ -193,15 +194,17 @@ def main() -> int:
 
     results = collect_results(log_text)
     lanes = detect_lane(log_text)
-    failures = [r for r in results if r["status"] != "Passed"]
+    failures = [r for r in results if r["status"] not in ("Passed", "Skipped")]
     passed = [r for r in results if r["status"] == "Passed"]
+    skipped = [r for r in results if r["status"] == "Skipped"]
 
     link = run_link()
     link_line = f"Run: {link}" if link else None
 
     if not failures:
         total = len(passed)
-        print(f"::notice::ctest passed: {total} test(s) green")
+        print(f"::notice::ctest passed: {total} test(s) green, "
+              f"{len(skipped)} skipped")
         return 0
 
     print(f"::error::ctest: {len(failures)} test(s) failed or did not run "
