@@ -236,11 +236,24 @@ class ConcurrentSlabMemoryPool : public MallocApi {
   };
 
   struct ThreadLocalPool {
+    uint64_t generation = 0;
+    bool recover_active = false;
     std::unordered_map<int, SlabChunk*> hot_by_slab;
   };
 
-  static ThreadLocalPool& PoolTls() {
+  static uint64_t NextGeneration() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  ThreadLocalPool& PoolTls() {
     thread_local ThreadLocalPool tls;
+    if (tls.generation != generation_) {
+      // Cached chunks may belong to a destroyed or reinitialized pool.
+      tls.recover_active = tls.generation != 0;
+      tls.hot_by_slab.clear();
+      tls.generation = generation_;
+    }
     return tls;
   }
 
@@ -340,6 +353,7 @@ public:
   }
 
   void Initialize() override {
+    // As with chunk reset, callers must exclude concurrent allocator access.
     for (auto* chunk : chunks_) {
       chunk->Initialize();
     }
@@ -352,7 +366,7 @@ public:
       state.partial.clear();
       state.active.clear();
     }
-    PoolTls().hot_by_slab.clear();
+    generation_ = NextGeneration();
     total_malloc_.store(0, std::memory_order_relaxed);
   }
 
@@ -449,7 +463,7 @@ private:
         AbandonHotChunk(slab_size, hot);
       }
 
-      SlabChunk* chunk = AcquireChunk(slab_size, &hot);
+      SlabChunk* chunk = AcquireChunk(slab_size, &hot, tls.recover_active);
       char* ptr        = chunk->Malloc();
       if (ptr != nullptr) {
         total_malloc_.fetch_add(1, std::memory_order_relaxed);
@@ -463,7 +477,8 @@ private:
     }
   }
 
-  SlabChunk* AcquireChunk(int slab_size, SlabChunk** hot_slot) {
+  SlabChunk*
+  AcquireChunk(int slab_size, SlabChunk** hot_slot, bool recover_active) {
     auto state_it = slab_states_.find(slab_size);
     CHECK(state_it != slab_states_.end());
     SlabState& state = state_it->second;
@@ -487,6 +502,23 @@ private:
       return chunk;
     }
 
+    const auto reuse_active = [&]() -> SlabChunk* {
+      for (SlabChunk* chunk : state.active) {
+        if (!chunk->Full()) {
+          chunk->ClearListedInPartial();
+          hot = chunk;
+          return chunk;
+        }
+      }
+      return nullptr;
+    };
+    // Recover discarded TLS capacity without changing fresh-thread spreading.
+    if (recover_active) {
+      if (SlabChunk* chunk = reuse_active()) {
+        return chunk;
+      }
+    }
+
     {
       base::AutoLock free_lock(free_chunks_lock_);
       if (!free_chunks_.empty()) {
@@ -500,12 +532,8 @@ private:
       }
     }
 
-    for (SlabChunk* chunk : state.active) {
-      if (!chunk->Full()) {
-        chunk->ClearListedInPartial();
-        hot = chunk;
-        return chunk;
-      }
+    if (SlabChunk* chunk = reuse_active()) {
+      return chunk;
     }
 
     LOG(FATAL) << fmt::format(
@@ -523,6 +551,7 @@ private:
     return offset / static_cast<int64>(kChunkSize);
   }
 
+  uint64_t generation_ = NextGeneration();
   std::unique_ptr<ShmFile> shm_file_;
   int64 nr_chunks_ = 0;
   std::vector<SlabChunk*> chunks_;
