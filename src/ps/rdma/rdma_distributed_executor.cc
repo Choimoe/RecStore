@@ -406,7 +406,8 @@ void RdmaDistributedExecutor::WaitShardRpcs(
       }
     }
   }
-  // Later RPCs must also finish or retire before the caller releases the window.
+  // Later RPCs must also finish or retire before the caller releases the
+  // window.
   if (first_error != nullptr) {
     std::rethrow_exception(first_error);
   }
@@ -654,8 +655,8 @@ bool RdmaDistributedExecutor::HasGetSlotCapacity(
     }
   }
   for (std::size_t client = 0; client < required.size(); ++client) {
-    if (required[client] > 0 &&
-        !ClientAt(static_cast<int>(client))->HasAvailableSlots(required[client])) {
+    if (required[client] > 0 && !ClientAt(static_cast<int>(client))
+                                     ->HasAvailableSlots(required[client])) {
       return false;
     }
   }

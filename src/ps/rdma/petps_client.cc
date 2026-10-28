@@ -569,7 +569,8 @@ std::int32_t PetPSClient::WaitForStatusWord(
               transport_->HarvestLaneCompletion(qp_index, &completion_error);
         } catch (...) {
           // A failed CQ poll/repost leaves completion unknown. Retire the lane
-          // before cleanup can release its slots, preserving the original error.
+          // before cleanup can release its slots, preserving the original
+          // error.
           MarkLaneDirty(qp_index,
                         "cq_harvest_exception",
                         nullptr,

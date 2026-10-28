@@ -356,7 +356,8 @@ TEST(PetPSIntegrationTest, AdapterSparseGradientCommitWithOutstandingPrefetch) {
 
 TEST(PetPSIntegrationTest, AdapterWaitTimeoutReleasesSynchronousBatch) {
   if (std::getenv("RECSTORE_RDMA_ADAPTER_WAIT_TIMEOUT_TEST") == nullptr) {
-    GTEST_SKIP() << "requires the adapter timeout driver and delayed GET workers";
+    GTEST_SKIP()
+        << "requires the adapter timeout driver and delayed GET workers";
   }
   ASSERT_EQ(FLAGS_num_server_processes, 1);
   ASSERT_EQ(FLAGS_rdma_rc_qps_per_client_per_shard, 2);
@@ -368,8 +369,8 @@ TEST(PetPSIntegrationTest, AdapterWaitTimeoutReleasesSynchronousBatch) {
   ASSERT_NE(config_path, nullptr);
   recstore::RDMAPSClientAdapter adapter(ParseFile2Json(config_path));
   const int dim = FLAGS_value_size / sizeof(float);
-  ASSERT_EQ(adapter.InitEmbeddingTable("adapter_timeout", {1024, uint64_t(dim)}),
-            0);
+  ASSERT_EQ(
+      adapter.InitEmbeddingTable("adapter_timeout", {1024, uint64_t(dim)}), 0);
   const std::vector<uint64_t> keys{711};
   const auto values = MakeValues(keys, dim);
   ASSERT_EQ(adapter.PutParameter(keys, values), 0);
@@ -381,7 +382,8 @@ TEST(PetPSIntegrationTest, AdapterWaitTimeoutReleasesSynchronousBatch) {
       adapter.GetParameter(keys, output);
       FAIL() << "the delayed GET did not time out";
     } catch (const std::runtime_error& error) {
-      EXPECT_NE(std::string(error.what()).find("wait timeout"), std::string::npos)
+      EXPECT_NE(std::string(error.what()).find("wait timeout"),
+                std::string::npos)
           << error.what();
     }
   }
@@ -417,7 +419,8 @@ TEST(PetPSIntegrationTest, AdapterWaitTimeoutReleasesSynchronousBatch) {
 
 TEST(PetPSIntegrationTest, AdapterMultiChunkTimeoutRetiresAllSubmittedLanes) {
   if (std::getenv("RECSTORE_RDMA_ADAPTER_WAIT_TIMEOUT_TEST") == nullptr) {
-    GTEST_SKIP() << "requires the adapter timeout driver and delayed GET workers";
+    GTEST_SKIP()
+        << "requires the adapter timeout driver and delayed GET workers";
   }
   ASSERT_EQ(FLAGS_num_server_processes, 1);
   ASSERT_EQ(FLAGS_rdma_rc_qps_per_client_per_shard, 2);
@@ -444,7 +447,8 @@ TEST(PetPSIntegrationTest, AdapterMultiChunkTimeoutRetiresAllSubmittedLanes) {
       adapter.GetParameter(keys, output);
       FAIL() << "the delayed two-chunk GET did not time out";
     } catch (const std::runtime_error& error) {
-      EXPECT_NE(std::string(error.what()).find("wait timeout"), std::string::npos)
+      EXPECT_NE(std::string(error.what()).find("wait timeout"),
+                std::string::npos)
           << error.what();
     }
   }
@@ -453,7 +457,8 @@ TEST(PetPSIntegrationTest, AdapterMultiChunkTimeoutRetiresAllSubmittedLanes) {
   base::RecTensor empty({0, dim}, base::DataType::FLOAT32);
   ASSERT_EQ(adapter.GetParameter({}, empty), 0);
 
-  // Both delayed RPCs still have remote work pending. Neither lane may be reused.
+  // Both delayed RPCs still have remote work pending. Neither lane may be
+  // reused.
   const std::vector<uint64_t> probe{711};
   const auto submit_start = std::chrono::steady_clock::now();
   EXPECT_THROW(adapter.PrefetchParameter(probe), petps::ShardUnreachableError);
@@ -501,7 +506,8 @@ TEST(PetPSIntegrationTest, AdapterPrefetchOverCapacityReverseConsumption) {
       ExpectHashedFlatSlots(
           actual.data_as<float>(), request_keys[request], embedding_dim);
     }
-    // The second round must reuse slots without returning the first round's data.
+    // The second round must reuse slots without returning the first round's
+    // data.
   }
 }
 
@@ -511,7 +517,8 @@ TEST(PetPSIntegrationTest, AdapterWritesWithOutstandingPrefetch) {
   const int capacity =
       FLAGS_rdma_rc_qps_per_client_per_shard * FLAGS_rdma_rc_slots_per_qp;
   if (capacity < 2) {
-    GTEST_SKIP() << "the baseline needs a spare slot to write before consuming GETs";
+    GTEST_SKIP()
+        << "the baseline needs a spare slot to write before consuming GETs";
   }
   recstore::RDMAPSClientAdapter adapter(ParseFile2Json(config_path));
   const int dim = FLAGS_value_size / sizeof(float);
@@ -569,10 +576,11 @@ TEST(PetPSIntegrationTest, AdapterPrefetchWithPendingAsyncUpdate) {
   }
   recstore::RDMAPSClientAdapter adapter(config);
   const int dim = FLAGS_value_size / sizeof(float);
-  ASSERT_EQ(adapter.InitEmbeddingTable(
-                "pending_update", {static_cast<uint64_t>(capacity + 1),
-                                   static_cast<uint64_t>(dim)}),
-            0);
+  ASSERT_EQ(
+      adapter.InitEmbeddingTable(
+          "pending_update",
+          {static_cast<uint64_t>(capacity + 1), static_cast<uint64_t>(dim)}),
+      0);
   std::vector<uint64_t> keys;
   for (int key = 0; key <= capacity; ++key) {
     keys.push_back(static_cast<uint64_t>(key));
@@ -582,7 +590,8 @@ TEST(PetPSIntegrationTest, AdapterPrefetchWithPendingAsyncUpdate) {
   base::RecTensor grads(gradients.data(), {1, dim});
   ASSERT_EQ(adapter.PutParameter(keys, values), 0);
   const std::vector<uint64_t> update_keys{0};
-  // One tail UPDATE keeps a physical slot until WaitUpdateParameter consumes it.
+  // One tail UPDATE keeps a physical slot until WaitUpdateParameter consumes
+  // it.
   const auto update =
       adapter.SubmitUpdateParameterAsync("pending_update", update_keys, grads);
   std::vector<uint64_t> handles;
