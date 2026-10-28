@@ -34,6 +34,7 @@ DECLARE_int32(rdma_lane_rebuild_max_attempts);
 DECLARE_int32(rdma_lane_rebuild_cooldown_ms);
 DECLARE_int32(rdma_lane_rebuild_wait_ms);
 DECLARE_int32(rdma_rc_slots_per_qp);
+DECLARE_int32(rdma_wait_timeout_ms);
 DECLARE_string(rdma_get_response_mode);
 DECLARE_bool(rdma_lane_rebuild_enabled);
 
@@ -351,6 +352,67 @@ TEST(PetPSIntegrationTest, AdapterSparseGradientCommitWithOutstandingPrefetch) {
   ASSERT_EQ(adapter.GetParameter(keys, actual), 0);
   for (int i = 0; i < rows * dim; ++i)
     EXPECT_NEAR(actual.data_as<float>()[i], .97f, 1e-6);
+}
+
+TEST(PetPSIntegrationTest, AdapterWaitTimeoutReleasesSynchronousBatch) {
+  if (std::getenv("RECSTORE_RDMA_ADAPTER_WAIT_TIMEOUT_TEST") == nullptr) {
+    GTEST_SKIP() << "requires the adapter timeout driver and delayed GET workers";
+  }
+  ASSERT_EQ(FLAGS_num_server_processes, 1);
+  ASSERT_EQ(FLAGS_rdma_rc_qps_per_client_per_shard, 2);
+  ASSERT_EQ(FLAGS_rdma_rc_slots_per_qp, 1);
+  ASSERT_EQ(FLAGS_rdma_wait_timeout_ms, 100);
+  ASSERT_GE(FLAGS_rdma_rc_server_get_worker_hold_us, 2000000);
+  ASSERT_FALSE(FLAGS_rdma_lane_rebuild_enabled);
+  const char* config_path = std::getenv("RECSTORE_CONFIG");
+  ASSERT_NE(config_path, nullptr);
+  recstore::RDMAPSClientAdapter adapter(ParseFile2Json(config_path));
+  const int dim = FLAGS_value_size / sizeof(float);
+  ASSERT_EQ(adapter.InitEmbeddingTable("adapter_timeout", {1024, uint64_t(dim)}),
+            0);
+  const std::vector<uint64_t> keys{711};
+  const auto values = MakeValues(keys, dim);
+  ASSERT_EQ(adapter.PutParameter(keys, values), 0);
+
+  const auto sync_start = std::chrono::steady_clock::now();
+  {
+    base::RecTensor output({1, dim}, base::DataType::FLOAT32);
+    try {
+      adapter.GetParameter(keys, output);
+      FAIL() << "the delayed GET did not time out";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("wait timeout"), std::string::npos)
+          << error.what();
+    }
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - sync_start,
+            std::chrono::milliseconds(1500));
+
+  // This drains registered batches before handling empty keys. The failed
+  // synchronous batch must be gone before its caller's output is destroyed.
+  base::RecTensor empty({0, dim}, base::DataType::FLOAT32);
+  ASSERT_EQ(adapter.GetParameter({}, empty), 0);
+
+  // Only QP 0 timed out above; QP 1 must accept this single-chunk prefetch.
+  const auto handle = adapter.PrefetchParameter(keys);
+  ASSERT_GT(handle, 0);
+  const auto prefetch_start = std::chrono::steady_clock::now();
+  try {
+    adapter.WaitForPrefetch(handle);
+    FAIL() << "the delayed prefetch did not time out";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("wait timeout"), std::string::npos)
+        << error.what();
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - prefetch_start,
+            std::chrono::milliseconds(1500));
+
+  // The failed prefetch still owns its private buffer until adapter teardown.
+  // A following synchronous drain must report the retired lane promptly.
+  const auto drain_start = std::chrono::steady_clock::now();
+  EXPECT_THROW(adapter.GetParameter({}, empty), petps::ShardUnreachableError);
+  EXPECT_LT(std::chrono::steady_clock::now() - drain_start,
+            std::chrono::milliseconds(1500));
 }
 
 TEST(PetPSIntegrationTest, AdapterSplitGetRoundTripMultiShard) {
