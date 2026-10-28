@@ -546,8 +546,19 @@ std::int32_t PetPSClient::WaitForStatusWord(
       {
         // Harvest under the client mutex so it serializes with submit drains.
         std::lock_guard<std::mutex> guard(mu_);
-        lane_failed =
-            transport_->HarvestLaneCompletion(qp_index, &completion_error);
+        try {
+          lane_failed =
+              transport_->HarvestLaneCompletion(qp_index, &completion_error);
+        } catch (...) {
+          // A failed CQ poll/repost leaves completion unknown. Retire the lane
+          // before cleanup can release its slots, preserving the original error.
+          MarkLaneDirty(qp_index,
+                        "cq_harvest_exception",
+                        nullptr,
+                        elapsed_ms,
+                        /*rebuildable=*/false);
+          throw;
+        }
       }
       if (lane_failed) {
         FailLaneOnCompletionError(qp_index, completion_error, elapsed_ms);
