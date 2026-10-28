@@ -187,6 +187,16 @@ target_link_libraries(test_concurrent_slab_memory_pool PUBLIC
 )
 add_test(NAME test_concurrent_slab_memory_pool COMMAND test_concurrent_slab_memory_pool)
 
+add_executable(test_persist_loop_slab_allocator test_persist_loop_slab_allocator.cpp)
+target_link_libraries(test_persist_loop_slab_allocator PUBLIC
+    base
+    base_memory
+    gtest
+    gtest_main
+    pthread
+)
+add_test(NAME test_persist_loop_slab_allocator COMMAND test_persist_loop_slab_allocator)
+
 set(RECSTORE_KVENGINE_TEST_DEFS)
 if(TARGET fasterkv_backend)
     list(APPEND RECSTORE_KVENGINE_TEST_DEFS RECSTORE_TEST_ENABLE_FASTERKV_ENGINE)
