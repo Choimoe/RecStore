@@ -10,16 +10,10 @@ namespace {
 
 // Async prefetch: returns a unique prefetch id (uint64_t)
 int64_t emb_prefetch_torch(const torch::Tensor& keys) {
-  TORCH_CHECK(keys.dim() == 1, "Keys tensor must be 1-dimensional");
-  TORCH_CHECK(keys.scalar_type() == torch::kInt64,
-              "Keys tensor must have dtype int64");
-  TORCH_CHECK(keys.is_contiguous(), "Keys tensor must be contiguous");
+  CheckKeys(keys);
 
-  auto op                = GetKVClientOp();
-  torch::Tensor cpu_keys = keys;
-  if (keys.is_cuda()) {
-    cpu_keys = keys.cpu();
-  }
+  auto op                  = GetKVClientOp();
+  torch::Tensor cpu_keys   = ToCpuTensor(keys);
   base::RecTensor rec_keys = ToRecTensor(cpu_keys, base::DataType::UINT64);
   // Dummy values tensor (unused by backend prefetch implementation)
   auto dummy_vals = torch::empty({0, 0}, keys.options().dtype(torch::kFloat32));
@@ -32,16 +26,15 @@ int64_t emb_prefetch_torch(const torch::Tensor& keys) {
 torch::Tensor
 emb_wait_result_torch(int64_t prefetch_id, int64_t embedding_dim) {
   TORCH_CHECK(embedding_dim > 0, "Embedding dimension must be positive");
-  auto op = GetKVClientOp();
+  auto kv_op = GetConcreteKVClientOp();
   // RDMA result consumption waits internally and can borrow the slot payload.
   // For a single RPC, a prior wait would materialize the borrowed payload.
-  auto kv_op = std::dynamic_pointer_cast<KVClientOp>(op);
-  if (kv_op == nullptr || kv_op->CurrentPSBackend() != "rdma") {
-    op->WaitForPrefetch(static_cast<uint64_t>(prefetch_id));
+  if (kv_op->CurrentPSBackend() != "rdma") {
+    kv_op->WaitForPrefetch(static_cast<uint64_t>(prefetch_id));
   }
   auto owned = std::make_shared<base::RecTensor>(
       std::vector<int64_t>{0, embedding_dim}, base::DataType::FLOAT32);
-  op->GetPretchResult(static_cast<uint64_t>(prefetch_id), *owned);
+  kv_op->GetPretchResult(static_cast<uint64_t>(prefetch_id), *owned);
   auto options =
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
   const int64_t L = owned->dim() == 2 ? owned->shape(0) : 0;

@@ -61,6 +61,10 @@ StageCudaTensorToPinnedCpuAsyncNoCast(const torch::Tensor& tensor) {
   return cpu_tensor;
 }
 
+inline torch::Tensor ToCpuTensor(const torch::Tensor& tensor) {
+  return tensor.is_cuda() ? tensor.cpu() : tensor;
+}
+
 inline std::shared_ptr<KVClientOp> GetConcreteKVClientOp() {
   auto op    = GetKVClientOp();
   auto kv_op = std::dynamic_pointer_cast<KVClientOp>(op);

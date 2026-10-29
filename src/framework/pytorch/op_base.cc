@@ -28,14 +28,8 @@ void emb_update_table_torch(const std::string& table_name,
     return;
   }
 
-  torch::Tensor cpu_keys  = keys;
-  torch::Tensor cpu_grads = grads;
-  if (keys.is_cuda()) {
-    cpu_keys = keys.cpu();
-  }
-  if (grads.is_cuda()) {
-    cpu_grads = grads.cpu();
-  }
+  torch::Tensor cpu_keys  = ToCpuTensor(keys);
+  torch::Tensor cpu_grads = ToCpuTensor(grads);
 
   base::RecTensor rec_keys  = ToRecTensor(cpu_keys, base::DataType::UINT64);
   base::RecTensor rec_grads = ToRecTensor(cpu_grads, base::DataType::FLOAT32);
@@ -50,8 +44,8 @@ int64_t emb_update_async_torch(const std::string& table_name,
   TORCH_CHECK(!table_name.empty(), "table_name must be non-empty");
   CheckRows(keys, grads);
 
-  torch::Tensor cpu_keys   = keys.is_cuda() ? keys.cpu() : keys;
-  torch::Tensor cpu_grads  = grads.is_cuda() ? grads.cpu() : grads;
+  torch::Tensor cpu_keys   = ToCpuTensor(keys);
+  torch::Tensor cpu_grads  = ToCpuTensor(grads);
   auto kv_op               = GetConcreteKVClientOp();
   const uint64_t update_id = kv_op->EmbUpdateAsync(
       table_name,
@@ -107,14 +101,8 @@ void emb_write_torch(const torch::Tensor& keys, const torch::Tensor& values) {
     return;
   }
 
-  torch::Tensor cpu_keys   = keys;
-  torch::Tensor cpu_values = values;
-  if (keys.is_cuda()) {
-    cpu_keys = keys.cpu();
-  }
-  if (values.is_cuda()) {
-    cpu_values = values.cpu();
-  }
+  torch::Tensor cpu_keys   = ToCpuTensor(keys);
+  torch::Tensor cpu_values = ToCpuTensor(values);
 
   base::RecTensor rec_keys   = ToRecTensor(cpu_keys, base::DataType::UINT64);
   base::RecTensor rec_values = ToRecTensor(cpu_values, base::DataType::FLOAT32);
