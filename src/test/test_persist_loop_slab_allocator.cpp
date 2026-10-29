@@ -103,4 +103,34 @@ TEST_F(PersistLoopSlabBitmapTest, ZeroSizeSentinelPreservesLiveAllocation) {
   EXPECT_EQ(allocator->total_malloc(), 0);
 }
 
+TEST_F(PersistLoopSlabBitmapTest, StatisticsCountSuccessfulAllocations) {
+  auto allocator    = MakeAllocator("statistics");
+  auto expect_total = [&](const std::string& name, int total) {
+    const std::string info = allocator->GetInfo();
+    const auto start       = info.find("[" + name + "]");
+    ASSERT_NE(start, std::string::npos);
+    const std::string line = info.substr(start, info.find('\n', start) - start);
+    const auto count       = line.rfind("total: ");
+    ASSERT_NE(count, std::string::npos);
+    EXPECT_EQ(line.substr(count), "total: " + std::to_string(total));
+  };
+  char* first = allocator->New(512);
+  ASSERT_NE(first, nullptr);
+  ASSERT_TRUE(allocator->Free(first));
+  char* reused = allocator->New(512);
+  ASSERT_EQ(reused, first);
+  allocator->DisableFastMalloc();
+  char* slow = allocator->New(512);
+  ASSERT_NE(slow, nullptr);
+  EXPECT_NE(allocator->New(0), nullptr);
+  EXPECT_EQ(allocator->New(allocator->BackingSize()), nullptr);
+  expect_total("total_fast_malloc", 1);
+  expect_total("total_loop_malloc", 2);
+  ASSERT_TRUE(allocator->Free(reused));
+  ASSERT_TRUE(allocator->Free(slow));
+  expect_total("total_fast_malloc", 1);
+  expect_total("total_loop_malloc", 2);
+  EXPECT_EQ(allocator->total_malloc(), 0);
+}
+
 } // namespace
