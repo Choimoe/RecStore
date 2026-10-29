@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace recstore {
@@ -125,9 +126,8 @@ public:
   using Apply = std::function<void(
       const std::vector<uint64_t>&, const std::vector<float>&)>;
 
-  int64_t Exchange(const std::string& table,
-                   const std::string& payload,
-                   const Apply& apply) {
+  int64_t
+  Exchange(const std::string& table, std::string payload, const Apply& apply) {
     const auto h = DecodeSparseGradientCommit(payload);
     // ponytail: one lock per PS shard; split by table if independent jobs need
     // concurrent commits. The fused BagPipe table already requires ordering.
@@ -187,7 +187,7 @@ public:
         throw std::runtime_error("Conflicting gradient chunk retry");
       return state.committed;
     }
-    chunks[h.chunk] = payload;
+    chunks[h.chunk] = std::move(payload);
     for (const auto& rank : state.ranks) {
       if (rank.empty())
         return state.committed;

@@ -487,7 +487,7 @@ public:
   /// optimizer interface
 
   int64_t SparseGradientCommit(
-      const std::string& table, const std::string& payload, unsigned tid) {
+      const std::string& table, std::string payload, unsigned tid) {
     const auto h    = recstore::DecodeSparseGradientCommit(payload);
     const auto* sgd = dynamic_cast<SGD*>(optimizer_.get());
     if (!sgd || sgd->LearningRate() != h.learning_rate) {
@@ -502,7 +502,7 @@ public:
     }
     return sparse_gradient_commits_.Exchange(
         table,
-        payload,
+        std::move(payload),
         [&](const std::vector<uint64_t>& keys,
             const std::vector<float>& grads) {
           if (!UpdateParameterFlat(

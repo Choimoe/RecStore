@@ -1,4 +1,5 @@
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -32,7 +33,9 @@ protected:
 
   void TearDown() override { std::filesystem::remove_all(root_); }
 
-  std::unique_ptr<KVEngineComposite> MakeEngine(const std::string& name) {
+  std::unique_ptr<KVEngineComposite>
+  MakeEngine(const std::string& name,
+             const std::string& index_type = "DRAM_UNORDERED_MAP") {
     const std::filesystem::path value_path = root_ / name / "value";
     std::filesystem::create_directories(value_path.parent_path());
 
@@ -41,7 +44,7 @@ protected:
     config.json_config_ = {
         {"engine_type", "KVEngineComposite"},
         {"capacity", 1024},
-        {"index", {{"type", "DRAM_UNORDERED_MAP"}}},
+        {"index", {{"type", index_type}}},
         {"value",
          {{"type", "DRAM_VALUE_STORE"},
           {"path", value_path.string()},
@@ -133,6 +136,109 @@ TEST_F(KVEngineCheckpointTest, RoundTripsConcurrentWriterKeys) {
   EXPECT_EQ(actual, value);
   restored->Get(2 * keys_per_thread - 1, actual, 1);
   EXPECT_EQ(actual, value);
+}
+
+TEST_F(KVEngineCheckpointTest, RoundTripsOverwriteDeleteAndReinsert) {
+  for (const std::string index : {"DRAM_UNORDERED_MAP", "DRAM_PET_HASH"}) {
+    SCOPED_TRACE(index);
+    auto source                       = MakeEngine(index + "-overwrite", index);
+    const std::array<float, 4> first  = {1, 1, 1, 1};
+    const std::array<float, 4> second = {2, 2, 2, 2};
+    const std::array<float, 4> last   = {3, 3, 3, 3};
+    for (uint64_t key : {10, 20, 30}) {
+      source->Put(key, FloatBytes(first), 0);
+      source->Put(key, FloatBytes(second), 1);
+    }
+    const std::vector<uint64_t> batch_keys = {20, 30, 40};
+    std::vector<base::ConstArray<float>> batch_values(
+        batch_keys.size(), base::ConstArray<float>(last.data(), last.size()));
+    source->BatchPut(base::ConstArray<uint64_t>(batch_keys), &batch_values, 1);
+    const std::vector<uint64_t> deleted = {10, 20, 999};
+    ASSERT_EQ(source->BatchDelete(base::ConstArray<uint64_t>(deleted), 0), 2);
+    ASSERT_EQ(source->CheckpointRecordCount(), 2);
+    source->Put(10, FloatBytes(first), 1);
+    const std::vector<uint64_t> duplicate_keys            = {20, 20};
+    std::vector<base::ConstArray<float>> duplicate_values = {
+        base::ConstArray<float>(second.data(), second.size()),
+        base::ConstArray<float>(last.data(), last.size())};
+    source->BatchPut(
+        base::ConstArray<uint64_t>(duplicate_keys), &duplicate_values, 0);
+    ASSERT_EQ(source->CheckpointRecordCount(), 4);
+    const auto checkpoint = root_ / (index + "-overwrite.ckpt");
+    ASSERT_TRUE(source->SaveCheckpoint(checkpoint.string(), index));
+    source.reset();
+    auto restored = MakeEngine(index + "-restored", index);
+    ASSERT_TRUE(restored->LoadCheckpoint(checkpoint.string(), index));
+    ASSERT_EQ(restored->CheckpointRecordCount(), 4);
+    std::string value;
+    restored->Get(10, value, 0);
+    EXPECT_EQ(value, FloatBytes(first));
+    for (uint64_t key : {20, 30, 40}) {
+      restored->Get(key, value, 0);
+      EXPECT_EQ(value, FloatBytes(last));
+    }
+    restored->Get(999, value, 0);
+    EXPECT_TRUE(value.empty());
+  }
+}
+
+TEST_F(KVEngineCheckpointTest, SnapshotsConcurrentPetHashWriters) {
+  auto source               = MakeEngine("pet-concurrent", "DRAM_PET_HASH");
+  const std::string initial = FloatBytes(std::array<float, 4>{1, 1, 1, 1});
+  const std::array<std::string, 2> updates = {
+      FloatBytes(std::array<float, 4>{2, 2, 2, 2}),
+      FloatBytes(std::array<float, 4>{3, 3, 3, 3})};
+  for (uint64_t key = 0; key < 64; ++key)
+    source->Put(key, initial, 0);
+  std::atomic<unsigned> ready{0};
+  std::atomic<bool> start{false};
+  std::vector<std::thread> writers;
+  for (unsigned tid = 0; tid < 2; ++tid) {
+    writers.emplace_back([&, tid] {
+      ready.fetch_add(1);
+      while (!start.load())
+        std::this_thread::yield();
+      for (unsigned round = 0; round < 100; ++round) {
+        for (uint64_t key = 0; key < 128; ++key) {
+          source->Put(key, updates[tid], tid);
+        }
+      }
+    });
+  }
+  while (ready.load() != 2)
+    std::this_thread::yield();
+  start.store(true);
+  std::vector<std::filesystem::path> checkpoints;
+  bool saved = true;
+  for (int i = 0; i < 3; ++i) {
+    checkpoints.push_back(
+        root_ / ("concurrent-" + std::to_string(i) + ".ckpt"));
+    saved &= source->SaveCheckpoint(checkpoints.back().string(), "concurrent");
+  }
+  for (auto& writer : writers)
+    writer.join();
+  ASSERT_TRUE(saved);
+  ASSERT_EQ(source->CheckpointRecordCount(), 128);
+  checkpoints.push_back(root_ / "concurrent-final.ckpt");
+  ASSERT_TRUE(
+      source->SaveCheckpoint(checkpoints.back().string(), "concurrent"));
+  source.reset();
+  for (size_t i = 0; i < checkpoints.size(); ++i) {
+    auto restored =
+        MakeEngine("snapshot-" + std::to_string(i), "DRAM_PET_HASH");
+    ASSERT_TRUE(
+        restored->LoadCheckpoint(checkpoints[i].string(), "concurrent"));
+    EXPECT_GE(restored->CheckpointRecordCount(), 64);
+    EXPECT_LE(restored->CheckpointRecordCount(), 128);
+    for (uint64_t key = 0; key < 128; ++key) {
+      std::string value;
+      restored->Get(key, value, 0);
+      if (key < 64 || i + 1 == checkpoints.size())
+        EXPECT_FALSE(value.empty());
+      EXPECT_TRUE(value.empty() || value == initial || value == updates[0] ||
+                  value == updates[1]);
+    }
+  }
 }
 
 TEST_F(KVEngineCheckpointTest, RejectsMetadataMismatchAndMalformedFiles) {

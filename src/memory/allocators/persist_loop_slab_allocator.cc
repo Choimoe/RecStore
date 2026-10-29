@@ -8,6 +8,14 @@ DEFINE_double(shm_malloc_healthy_rate, 0.95, "shm malloc healthy rate");
 DECLARE_double(shm_malloc_healthy_rate);
 
 namespace base {
+namespace {
+
+uint64_t BitmapRangeMask(int bit_offset, int count) {
+  return (~uint64{0} >> (64 - count)) << bit_offset;
+}
+
+} // namespace
+
 PersistLoopShmMalloc::PersistLoopShmMalloc(
     const std::string& filename, int64 memory_size, std::string medium) {
   block_num_ = 0;
@@ -75,12 +83,15 @@ bool PersistLoopShmMalloc::UnusedMemoryValid(int64 block_index) const {
     LOG(ERROR) << "block_index + memory_block_num > block_num_";
     return false;
   }
-  for (int i = 0; i < memory_block_num; ++i) {
-    if (!Used(block_index + i)) {
-      // LOG(ERROR) << "!Used(block_index + i)\t"
-      //            << "block_index=" << block_index << "; i=" << i;
+  while (memory_block_num > 0) {
+    const int bit_offset = block_index & 63;
+    const int count      = std::min<int64>(64 - bit_offset, memory_block_num);
+    const uint64 mask    = BitmapRangeMask(bit_offset, count);
+    if ((used_bits_[block_index >> 6] & mask) != mask) {
       return false;
     }
+    block_index += count;
+    memory_block_num -= count;
   }
   return true;
 }
@@ -211,8 +222,15 @@ bool PersistLoopShmMalloc::Free(void* memory_data) {
         fast_malloc_list->push_back(block_index);
       }
     }
-    for (int i = 0; i < memory_block_num + 1; ++i) {
-      FreeBlock(block_index + i);
+    int64 index   = block_index;
+    int remaining = memory_block_num + 1;
+    while (remaining > 0) {
+      const int bit_offset = index & 63;
+      const int count      = std::min(64 - bit_offset, remaining);
+      const uint64 mask    = BitmapRangeMask(bit_offset, count);
+      used_bits_[index >> 6] &= ~mask;
+      index += count;
+      remaining -= count;
     }
     total_used_ -= memory_block_num + 1;
     total_malloc_--;

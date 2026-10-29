@@ -3,8 +3,11 @@
 #include "memory/allocators/concurrent_slab_memory_pool.h"
 
 #include <atomic>
+#include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -25,7 +28,147 @@ std::string TempPoolPath(const std::string& name) {
 
 std::vector<int> FactoryPayloadSizes() { return {32, 64, 128, 512, 1024}; }
 
+bool OwnsAllocation(
+    const base::MallocApi& pool, const char* ptr, size_t bytes) {
+  const auto begin = reinterpret_cast<uintptr_t>(pool.BackingData());
+  const auto addr  = reinterpret_cast<uintptr_t>(ptr);
+  const auto size  = static_cast<uintptr_t>(pool.BackingSize());
+  return ptr != nullptr && size >= bytes && addr >= begin &&
+         addr - begin <= size - bytes;
+}
+
 } // namespace
+
+TEST(ConcurrentSlabMemoryPoolOwnershipTest, AlternatingPoolsRetainCapacity) {
+  constexpr int64_t kChunkBytes = 1024 * 1024;
+  base::ConcurrentSlabMemoryPoolMalloc a(
+      TempPoolPath("owner_a"), kChunkBytes, "DRAM");
+  base::ConcurrentSlabMemoryPoolMalloc b(
+      TempPoolPath("owner_b"), kChunkBytes, "DRAM");
+  for (int round = 0; round < 2; ++round) {
+    std::vector<char*> a_ptrs, b_ptrs;
+    // Each pool has only one chunk, so every TLS switch must rediscover it.
+    for (int i = 0; i < 1900; ++i) {
+      char* pa = a.New(512);
+      char* pb = b.New(512);
+      ASSERT_TRUE(OwnsAllocation(a, pa, 512));
+      ASSERT_TRUE(OwnsAllocation(b, pb, 512));
+      a_ptrs.push_back(pa);
+      b_ptrs.push_back(pb);
+    }
+    EXPECT_EQ(std::set<char*>(a_ptrs.begin(), a_ptrs.end()).size(),
+              a_ptrs.size());
+    EXPECT_EQ(std::set<char*>(b_ptrs.begin(), b_ptrs.end()).size(),
+              b_ptrs.size());
+    for (size_t i = 0; i < a_ptrs.size(); ++i) {
+      EXPECT_TRUE(a.Free(a_ptrs[i]));
+      EXPECT_TRUE(b.Free(b_ptrs[i]));
+    }
+    EXPECT_EQ(a.total_malloc(), 0u);
+    EXPECT_EQ(b.total_malloc(), 0u);
+  }
+}
+
+TEST(ConcurrentSlabMemoryPoolOwnershipTest,
+     AlternatingPoolsKeepChunksForOtherClasses) {
+  constexpr int64_t kChunkBytes = 1024 * 1024;
+  base::ConcurrentSlabMemoryPoolMalloc a(
+      TempPoolPath("owner_classes_a"), 2 * kChunkBytes, "DRAM");
+  base::ConcurrentSlabMemoryPoolMalloc b(
+      TempPoolPath("owner_classes_b"), 2 * kChunkBytes, "DRAM");
+  for (int i = 0; i < 2; ++i) {
+    for (auto* pool : {&a, &b}) {
+      char* ptr = pool->New(512);
+      ASSERT_TRUE(OwnsAllocation(*pool, ptr, 512));
+      EXPECT_LT(pool->GetMallocOffset(ptr), kChunkBytes);
+    }
+  }
+  for (auto* pool : {&a, &b}) {
+    char* ptr = pool->New(64);
+    ASSERT_TRUE(OwnsAllocation(*pool, ptr, 64));
+    EXPECT_GE(pool->GetMallocOffset(ptr), kChunkBytes);
+    EXPECT_EQ(pool->total_malloc(), 3u);
+  }
+}
+
+TEST(ConcurrentSlabMemoryPoolOwnershipTest, FreshWorkersUseSeparateChunks) {
+  constexpr int64_t kChunkBytes = 1024 * 1024;
+  base::ConcurrentSlabMemoryPoolMalloc pool(
+      TempPoolPath("owner_fresh_workers"), 2 * kChunkBytes, "DRAM");
+  char* ptrs[2] = {};
+  std::vector<std::thread> workers;
+  for (int i = 0; i < 2; ++i) {
+    workers.emplace_back([&, i] { ptrs[i] = pool.New(512); });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  ASSERT_TRUE(OwnsAllocation(pool, ptrs[0], 512));
+  ASSERT_TRUE(OwnsAllocation(pool, ptrs[1], 512));
+  EXPECT_NE(pool.GetMallocOffset(ptrs[0]) / kChunkBytes,
+            pool.GetMallocOffset(ptrs[1]) / kChunkBytes);
+  EXPECT_TRUE(pool.Free(ptrs[0]));
+  EXPECT_TRUE(pool.Free(ptrs[1]));
+  EXPECT_EQ(pool.total_malloc(), 0u);
+}
+
+TEST(ConcurrentSlabMemoryPoolOwnershipTest, InitializeInvalidatesWorkerCache) {
+  constexpr int64_t kChunkBytes = 1024 * 1024;
+  base::ConcurrentSlabMemoryPoolMalloc pool(
+      TempPoolPath("owner_reset"), 2 * kChunkBytes, "DRAM");
+  std::promise<void> cached, resume;
+  auto resume_future = resume.get_future();
+  char* result       = nullptr;
+  std::thread worker([&] {
+    pool.New(512);
+    cached.set_value();
+    resume_future.wait();
+    result = pool.New(512);
+  });
+  cached.get_future().wait();
+  pool.Initialize();
+  // Rebind the worker's former chunk to another class.
+  char* small = pool.New(64);
+  resume.set_value();
+  worker.join();
+
+  ASSERT_TRUE(OwnsAllocation(pool, result, 512));
+  EXPECT_GE(pool.GetMallocOffset(result), kChunkBytes);
+  EXPECT_EQ(pool.total_malloc(), 2u);
+  EXPECT_TRUE(pool.Free(small));
+  EXPECT_TRUE(pool.Free(result));
+}
+
+TEST(ConcurrentSlabMemoryPoolOwnershipTest,
+     SameAddressRebuildInvalidatesWorkerCache) {
+  using Pool                    = base::ConcurrentSlabMemoryPoolMalloc;
+  constexpr int64_t kChunkBytes = 1024 * 1024;
+  std::optional<Pool> pool(
+      std::in_place, TempPoolPath("owner_old"), 2 * kChunkBytes, "DRAM");
+  Pool* original = &*pool;
+  std::promise<void> cached, resume;
+  auto resume_future = resume.get_future();
+  char* result       = nullptr;
+  std::thread worker([&] {
+    pool->New(512);
+    cached.set_value();
+    resume_future.wait();
+    result = pool->New(512);
+  });
+  cached.get_future().wait();
+  pool.reset();
+  pool.emplace(TempPoolPath("owner_new"), 2 * kChunkBytes, "DRAM");
+  EXPECT_EQ(&*pool, original);
+  char* small = pool->New(64);
+  resume.set_value();
+  worker.join();
+
+  ASSERT_TRUE(OwnsAllocation(*pool, result, 512));
+  EXPECT_GE(pool->GetMallocOffset(result), kChunkBytes);
+  EXPECT_EQ(pool->total_malloc(), 2u);
+  EXPECT_TRUE(pool->Free(small));
+  EXPECT_TRUE(pool->Free(result));
+}
 
 class ConcurrentSlabMemoryPoolTest : public ::testing::Test {
 protected:
@@ -196,12 +339,13 @@ TEST_F(ConcurrentSlabMemoryPoolTest, ConcurrentAllocatesBeyondSingleChunk) {
 TEST_F(ConcurrentSlabMemoryPoolTest, AllocatedPointersDoNotOverlap) {
   std::set<char*> unique_ptrs;
   std::mutex ptr_mu;
+  std::vector<std::vector<char*>> ptrs(kNumThreads);
   std::vector<std::thread> threads;
   threads.reserve(kNumThreads);
 
   for (int t = 0; t < kNumThreads; ++t) {
-    threads.emplace_back([this, &unique_ptrs, &ptr_mu]() {
-      std::vector<char*> local;
+    threads.emplace_back([this, t, &ptrs, &unique_ptrs, &ptr_mu]() {
+      auto& local = ptrs[t];
       for (int i = 0; i < 50; ++i) {
         local.push_back(pool_->New(128));
       }
@@ -211,15 +355,19 @@ TEST_F(ConcurrentSlabMemoryPoolTest, AllocatedPointersDoNotOverlap) {
           EXPECT_TRUE(unique_ptrs.insert(p).second) << "duplicate allocation";
         }
       }
-      for (char* p : local) {
-        pool_->Free(p);
-      }
     });
   }
 
   for (auto& th : threads) {
     th.join();
   }
+  // Keep all allocations alive until every thread has checked uniqueness.
+  for (const auto& local : ptrs) {
+    for (char* p : local) {
+      EXPECT_TRUE(pool_->Free(p));
+    }
+  }
+  EXPECT_EQ(pool_->total_malloc(), 0u);
 }
 
 TEST_F(ConcurrentSlabMemoryPoolTest, DefaultClassesIncludeEmbeddingWidths) {
