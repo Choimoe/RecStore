@@ -789,7 +789,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -2972,10 +2972,9 @@
 </code></pre></div>
 <p>每个 engine、workload、repeat 都有独立数据目录。默认会删除同名旧目录，避免复用上次 load 的数据。需要保留数据时加 <code>--keep-data</code>。</p>
 <h2 id="kvengine-batch-lookup">KVEngine 随机 batch lookup 对齐<a class="headerlink" href="#kvengine-batch-lookup" title="Permanent link">&para;</a></h2>
-<p>当目标是对齐 PS RDMA GET 的 <code>batch_keys=N</code> 形态时，优先使用
-<code>benchmark_kv_engine</code> 的 <code>batch_get_flat</code> 模式，而不是普通 YCSB 单 key read。
-这个模式每次生成一组随机 key，并直接调用 <code>BaseKV::BatchGetFlat</code>，吞吐单位按
-keys/s 统计。</p>
+<p>对齐 PS RDMA GET 的 <code>batch_keys=N</code> 时，使用 <code>benchmark_kv_engine</code> 的
+<code>batch_get_flat</code> 模式。普通 YCSB read 每次读取单个 key；<code>batch_get_flat</code> 每次生成
+一组随机 key，直接调用 <code>BaseKV::BatchGetFlat</code>，吞吐单位为 keys/s。</p>
 <p>通过对比 storage-only 与 PS/network，可以判断 PS RDMA 是否已经被 KVEngine 本地
 lookup 上限卡住。2026-05-31 的 RDMA GET 报告使用了 <code>batch_keys=500</code>：</p>
 <table>

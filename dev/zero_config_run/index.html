@@ -804,17 +804,6 @@
   
 </li>
       
-        <li class="md-nav__item">
-  <a href="#5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        5. 常见说明
-      
-    </span>
-  </a>
-  
-</li>
-      
     </ul>
   
 </nav>
@@ -1027,7 +1016,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -3068,17 +3057,6 @@
   
 </li>
       
-        <li class="md-nav__item">
-  <a href="#5" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        5. 常见说明
-      
-    </span>
-  </a>
-  
-</li>
-      
     </ul>
   
 </nav>
@@ -3109,18 +3087,13 @@
 <p class="admonition-title">待重写</p>
 <p>统一镜像来源、标签和构建步骤，消除与源码构建指南的重复。</p>
 </div>
-<p>为了方便开发者快速体验 RecStore 而无需在本地搭建完整编译环境，我们现在提供基于 Docker 镜像的免配置运行方式。</p>
-<p>推荐直接使用已经构建好的开发镜像：</p>
+<p>Docker 开发镜像提供 RecStore 的编译和运行环境。</p>
+<p>开发镜像：</p>
 <ul>
 <li>包页面：<a href="https://github.com/Choimoe/RecStore/pkgs/container/recstore%2Frecstore-devel">https://github.com/Choimoe/RecStore/pkgs/container/recstore%2Frecstore-devel</a></li>
 <li>镜像地址：<code>ghcr.io/choimoe/recstore/recstore-devel</code></li>
 </ul>
-<details class="warning" open="open">
-<summary>注意</summary>
-<p>该方式主要面向 Linux 环境。</p>
-<p>当前公开镜像默认是 CPU 开发环境，主要用于本地调试、单机测试和快速验证，不等同于生产部署方案。</p>
-</details>
-<p>通过直接拉取云端构建好的 Docker 镜像，你可以在标准 Linux 环境（如 Ubuntu 20.04/22.04）中快速进入可运行的 RecStore 环境。</p>
+<p>镜像主要面向 Linux 环境（如 Ubuntu 20.04/22.04），默认提供 CPU 开发环境，用于本地调试、单机测试和快速验证。</p>
 <h2 id="1">1. 获取镜像<a class="headerlink" href="#1" title="Permanent link">&para;</a></h2>
 <h3 id="11">1.1 在网页上查看镜像<a class="headerlink" href="#11" title="Permanent link">&para;</a></h3>
 <p>打开 GitHub Packages 页面：</p>
@@ -3132,9 +3105,9 @@
 <p>通常直接拉取 <code>latest</code> 即可：</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>docker<span class="w"> </span>pull<span class="w"> </span>ghcr.io/choimoe/recstore/recstore-devel:latest
 </code></pre></div>
-<p>如果你需要固定某个版本，也可以把 <code>latest</code> 替换为具体 tag。</p>
+<p>固定环境版本时，将 <code>latest</code> 替换为具体 tag。</p>
 <h2 id="2">2. 环境准备<a class="headerlink" href="#2" title="Permanent link">&para;</a></h2>
-<p>宿主机只需要准备 Docker 即可，不再要求本地提前安装编译依赖。</p>
+<p>宿主机安装 Docker，编译依赖由镜像提供。</p>
 <h3 id="21">2.1 准备代码仓库<a class="headerlink" href="#21" title="Permanent link">&para;</a></h3>
 <p>建议克隆仓库，并把代码目录挂载进容器。这样可以直接复用仓库里的配置、脚本和示例：</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>git<span class="w"> </span>clone<span class="w"> </span>--depth<span class="w"> </span><span class="m">1</span><span class="w"> </span>--single-branch<span class="w"> </span>https://github.com/RecStore/RecStore.git
@@ -3198,12 +3171,6 @@
 <div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nb">cd</span><span class="w"> </span>/workspace/build
 <a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>ctest<span class="w"> </span>-R<span class="w"> </span>pytorch_client_test<span class="w"> </span>-VV
 </code></pre></div>
-<h2 id="5">5. 常见说明<a class="headerlink" href="#5" title="Permanent link">&para;</a></h2>
-<ul>
-<li>这个页面讲的是“直接使用已构建 Docker 环境”，不是下载二进制 tar 包后在宿主机手动拼运行时依赖。</li>
-<li>如果你只是想快速进入一个可工作的 RecStore 开发环境，优先使用 <code>ghcr.io/choimoe/recstore/recstore-devel</code>。</li>
-<li>如果你需要固定环境，请显式指定镜像 tag，而不是依赖 <code>latest</code>。</li>
-</ul>
 
 
 

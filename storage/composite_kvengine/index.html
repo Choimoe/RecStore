@@ -789,7 +789,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -3292,17 +3292,17 @@
 <thead>
 <tr>
 <th><code>value.type</code></th>
-<th>允许 / 禁止</th>
+<th>字段约束</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>DRAM_VALUE_STORE</code></td>
-<td><code>dram_allocator</code> 必填；不要 <code>ssd_allocator</code></td>
+<td><code>dram_allocator</code> 必填；不接受 <code>ssd_allocator</code></td>
 </tr>
 <tr>
 <td><code>SSD_VALUE_STORE</code></td>
-<td><code>ssd_allocator</code> 必填；不要 <code>dram_allocator</code>；文件路径仅 <code>value.path</code></td>
+<td><code>ssd_allocator</code> 必填；不接受 <code>dram_allocator</code>；文件路径为 <code>value.path</code></td>
 </tr>
 <tr>
 <td><code>TIERED_VALUE_STORE</code></td>

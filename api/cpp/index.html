@@ -789,7 +789,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -2721,14 +2721,6 @@
 <a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="p">};</span>
 </code></pre></div>
 <p><code>KVClientOp</code> 是默认实现。它根据配置选择远程 PS client 或本地 HierKV runtime。</p>
-<details class="note">
-<summary>新增接口时要改哪些文件</summary>
-<p>至少同步修改 <code>op.h</code>、<code>op.cc</code>、<code>op_torch.cc</code>。mock 路径也要补齐，否则 Python 单测可能只覆盖假实现。</p>
-</details>
-<details class="warning">
-<summary>占位接口</summary>
-<p><code>EmbWriteAsync</code>、<code>IsWriteDone</code>、<code>WaitForWrite</code>、<code>SaveToFile</code>、<code>LoadFromFile</code> 仍是占位接口。不要写成可用能力。</p>
-</details>
 
 
 

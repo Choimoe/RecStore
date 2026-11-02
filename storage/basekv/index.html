@@ -789,7 +789,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -2970,7 +2970,7 @@
 <a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">base_kv_</span><span class="p">.</span><span class="n">reset</span><span class="p">(</span><span class="n">base</span><span class="o">::</span><span class="n">Factory</span><span class="o">&lt;</span><span class="n">BaseKV</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">BaseKVConfig</span><span class="o">&amp;&gt;::</span><span class="n">NewInstance</span><span class="p">(</span>
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="n">resolved</span><span class="p">.</span><span class="n">engine</span><span class="p">,</span><span class="w"> </span><span class="n">resolved</span><span class="p">.</span><span class="n">cfg</span><span class="p">));</span>
 </code></pre></div>
-<p><code>ResolveEngine</code>（<code>engine_selector.h</code>）只做两件事：读取 <code>engine_type</code>（缺省为 <code>KVEngineComposite</code>），校验名称在已知集合内。<strong>不</strong>解析 <code>index</code> / <code>value</code> 嵌套字段；具体校验在引擎或 <code>ValueStore</code> / <code>Index</code> 构造时完成。</p>
+<p><code>ResolveEngine</code>（<code>engine_selector.h</code>）读取 <code>engine_type</code>（缺省为 <code>KVEngineComposite</code>）并校验引擎名称。<code>index</code> / <code>value</code> 嵌套字段的校验在引擎或 <code>ValueStore</code> / <code>Index</code> 构造时完成。</p>
 <p>已移除 <code>external_engine_type</code>；配置中若仍出现该字段会抛出 <code>invalid_argument</code>。</p>
 <h3 id="engine_type">已知 <code>engine_type</code><a class="headerlink" href="#engine_type" title="Permanent link">&para;</a></h3>
 <table>

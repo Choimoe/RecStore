@@ -789,7 +789,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -1479,7 +1479,7 @@
   <a href="#7" class="md-nav__link">
     <span class="md-ellipsis">
       
-        7. 维护边界
+        7. 相关文档
       
     </span>
   </a>
@@ -3187,7 +3187,7 @@
   <a href="#7" class="md-nav__link">
     <span class="md-ellipsis">
       
-        7. 维护边界
+        7. 相关文档
       
     </span>
   </a>
@@ -3222,18 +3222,18 @@
 <h1 id="rdma">RDMA 模块说明<a class="headerlink" href="#rdma" title="Permanent link">&para;</a></h1>
 <p>本文档说明 RecStore Parameter Server 的 RDMA 主路径、入口边界和运行时约束。
 可执行的构建、正确性测试、benchmark 命令、默认值和报告规则统一维护在
-<code>rs-benchmark-ps</code> skill；不要在本页复制测试命令或临时性能数字。
+<code>rs-benchmark-ps</code> skill。
 面向真实跨机部署的配置、IB/RoCE v1/RoCE v2 选择和改造边界，以代码中的
 <code>ResolvedRdmaDeployment</code> 配置契约和本页的稳定架构说明为准。</p>
 <p>默认工作目录为仓库根目录：</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nb">cd</span><span class="w"> </span>/app/RecStore
 </code></pre></div>
 <h2 id="1">1. 适用范围<a class="headerlink" href="#1" title="Permanent link">&para;</a></h2>
-<p>当前文档只覆盖 Parameter Server 的 RDMA 主路径，不讨论 gRPC / bRPC 的通用网络栈。</p>
-<p>当前实现的两个重要边界：</p>
+<p>本页介绍 Parameter Server 的 RDMA 主路径。</p>
+<p>当前实现：</p>
 <ul>
-<li>RDMA 数据面使用仓内 verbs RC-write slot transport，不再依赖 Mayfly <code>RawMessage</code>。</li>
-<li>RDMA 控制面由 shard 0 的 <code>petps_server</code> 内置 gRPC 控制面承担，不再依赖 memcached。</li>
+<li>RDMA 数据面使用仓内 verbs RC-write slot transport。</li>
+<li>RDMA 控制面由 shard 0 的 <code>petps_server</code> 内置 gRPC 控制面承担。</li>
 </ul>
 <p>RecStore 有两条 RDMA 入口：</p>
 <table>
@@ -3261,11 +3261,9 @@
 <ul>
 <li>PetPS integration / benchmark 主要使用 C++ gflags 和对应 runner。</li>
 <li>Op-layer / Python client 使用环境变量和测试配置。</li>
-<li>不要将某个 runner 的参数复制到另一条入口。</li>
 </ul>
-<p>Op-layer RDMA 目前不是 gRPC/bRPC 的完整替代：<code>AsyncGetParameter</code> 已复用统一的
-<code>RdmaDistributedExecutor</code>，<code>Command</code> 当前只通过首个 shard 的 <code>Barrier</code> 提供同步语义；
-它主要用于 correctness / integration，而不是完整性能替代路径。</p>
+<p>Op-layer RDMA 主要用于 correctness / integration。<code>AsyncGetParameter</code> 已复用统一的
+<code>RdmaDistributedExecutor</code>，<code>Command</code> 当前只通过首个 shard 的 <code>Barrier</code> 提供同步语义。</p>
 <h2 id="2">2. 架构<a class="headerlink" href="#2" title="Permanent link">&para;</a></h2>
 <h3 id="21-rc-write-slot-transport">2.1 RC-write slot transport<a class="headerlink" href="#21-rc-write-slot-transport" title="Permanent link">&para;</a></h3>
 <ul>
@@ -3277,7 +3275,7 @@
 <p>同一条 QP 可以复用多个逻辑 slot。单 client 到单 shard 的在途上限是：</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>qps-per-client-per-shard * slots-per-qp
 </code></pre></div>
-<p>因此 <code>qps-per-client-per-shard</code> 是 QP 池规模，不是单独的吞吐结论。</p>
+<p><code>qps-per-client-per-shard</code> 表示 QP 池规模。</p>
 <h3 id="22">2.2 代码分工<a class="headerlink" href="#22" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
@@ -3305,7 +3303,7 @@
 </tr>
 </tbody>
 </table>
-<p><code>raw_verbs_transport</code> 直接走真实 verbs RC 路径，不是 <code>shm_open + mmap</code> baseline。
+<p><code>raw_verbs_transport</code> 直接使用 verbs RC 传输。
 <code>GlobalAddress</code>、QP metadata exchange 和 ready 协调由 RecStore 自维护。</p>
 <h3 id="23">2.3 控制面<a class="headerlink" href="#23" title="Permanent link">&para;</a></h3>
 <p><code>global_id=0</code> 的 <code>petps_server</code> 在启动时监听 TCP 控制面端口。client 和其他
@@ -3478,8 +3476,8 @@ server 通过它交换 <code>RawVerbsNodeMeta</code> 并等待 ready。控制面
 <li><strong>对端进程被杀死、但 WRITE 已被 ACK</strong>：这次 WRITE 的 CQE 是成功；下一次 WRITE 才会撞
   <code>RETRY_EXC_ERR</code>。杀死瞬间在飞的请求没有设备层信号。</li>
 <li><strong>对端重启但链路空闲</strong>：QP 空闲不发包，本地看不到任何异常，旧 QPN 的 QP 看起来正常。</li>
-<li><strong>控制面本身不可达</strong>：<code>GetServerHealth</code> 返回 <code>known=false</code>，这<strong>不是</strong>"不健康"，
-  请求退回自己的等待预算，不会误判。</li>
+<li><strong>控制面本身不可达</strong>：<code>GetServerHealth</code> 返回 <code>known=false</code>，表示节点健康状态未知。
+  请求继续按自身的等待预算处理。</li>
 </ul>
 <p>前两种只能靠节点层心跳（<code>dead</code> 阈值默认 9 s）或等待超时兜住——这是"设备层 + 节点层"
 两条检测通道必须同时在的原因。</p>
@@ -3505,7 +3503,7 @@ server 通过它交换 <code>RawVerbsNodeMeta</code> 并等待 ready。控制面
 <tr>
 <td>传输</td>
 <td>tracked-write 重等：复用 slot 前先等上一个 CQE</td>
-<td>完成事件（不是请求）</td>
+<td>完成事件</td>
 <td>不可见</td>
 <td>恒开</td>
 </tr>
@@ -3527,15 +3525,14 @@ server 通过它交换 <code>RawVerbsNodeMeta</code> 并等待 ready。控制面
 </table>
 <p>lane 重建的几个稳定语义：</p>
 <ul>
-<li><strong>触发点是取 slot，不是后台线程。</strong> 没有流量就不会重建；一条 lane 能服务时，其余降级
-  lane 不会被主动修（无 sweep），容量会持续偏低直到流量落到那条 lane。</li>
-<li><strong>预算是进程生命周期累计。</strong> <code>rebuild_attempts</code> 只增不减，成功恢复也不清零：默认 3 次是
-  "这条 lane 一生能救几次"，不是"每次中断的配额"。</li>
-<li><strong>握手成功的判据是对端 generation 变大</strong>，不是"我 reset 完就算成功"。两侧独立计数，
-  所以一次失败的握手把 generation 推高，也不会让下一次误判成功。</li>
-<li><strong>重建成功后，被打断的请求是失败，不是重放。</strong> 重建时无法判断该请求是否已被服务端执行
-  （<code>UPDATE</code> 走 optimizer 应用梯度，重复执行会改变结果），所以在"可能重复执行"和"一定失败"
-  之间选择后者，由上层决定是否整批重来。</li>
+<li><strong>重建在获取 slot 时触发。</strong> 系统没有后台 sweep；没有流量时不触发重建。一条 lane 能服务时，
+  其余降级 lane 要等流量再次落到该 lane 才会尝试恢复，期间可用容量持续偏低。</li>
+<li><strong>重建预算按进程生命周期累计。</strong> 每条 lane 默认最多尝试 3 次；<code>rebuild_attempts</code> 只增不减，
+  成功恢复后也保留累计次数。</li>
+<li><strong>握手以对端 generation 增大为成功条件。</strong> 两侧独立计数，失败握手引起的 generation 增长
+  不会导致下一次握手误判成功。</li>
+<li><strong>重建后，被中断的请求以失败结束，由上层决定是否整批重试。</strong> 此时无法确定请求是否已被
+  服务端执行。<code>UPDATE</code> 会通过 optimizer 应用梯度，重复执行会改变结果，因此传输层不自动重放请求。</li>
 <li><strong><code>num_os_clients &gt; 1</code> 拒绝重建。</strong> 服务端一条 lane 的 CQ 上挂着多个 client 进程的 QP，
   reset 后无法安全 drain，两端都保持终态置脏并记一次 warning。</li>
 </ul>
@@ -3605,9 +3602,8 @@ CQE；<strong>等到接近等待超时</strong>说明收割与慢路径都被关
 <li><code>read</code> 和 <code>push</code> 是不同的 PUT-v2 payload 路径，结果不能直接混合比较。</li>
 <li><code>rdma-get-response-mode=auto</code> 会按 index/value layout 选择 GET response path；
   当前 <code>DRAM_PET_HASH</code> 使用 <code>staging_copy</code>，其他 index 默认使用 <code>direct_sg</code>。</li>
-<li>Debug/O0 适合调试，不应作为吞吐结果；benchmark 报告使用 Release 构建。</li>
-<li>源码修改后必须重编对应的 <code>petps_server</code>、benchmark、integration 或 op-layer target，
-  否则旧 binary 可能掩盖修改结果。</li>
+<li>调试使用 Debug/O0 构建，吞吐基准使用 Release 构建。</li>
+<li>修改源码后，重新编译对应的 <code>petps_server</code>、benchmark、integration 或 op-layer target，再验证结果。</li>
 <li>热点路径零开销：正常请求（µs 级完成）既不查控制面（1 s 后才查）也不收割 CQ
   （50 ms 后才收割）；lane 重建检查在开关关闭时直接返回。</li>
 </ul>
@@ -3722,14 +3718,14 @@ CQE；<strong>等到接近等待超时</strong>说明收割与慢路径都被关
 </table>
 <p>拓扑参数要按入口理解：generic PS runner 使用 <code>--server-shard-ips</code>、
 <code>--client-ips</code> 和 <code>--client-processes-per-ip</code>；专项 RC runner 使用
-<code>--server-count</code>、<code>--client-count</code> 和 <code>--thread-num</code>。不要混用两组参数。</p>
+<code>--server-count</code>、<code>--client-count</code> 和 <code>--thread-num</code>。两组参数分别对应各自的 runner。</p>
 <h2 id="5-profile">5. Profile 解读<a class="headerlink" href="#5-profile" title="Permanent link">&para;</a></h2>
 <p>Profile 主要分为三层，先确认 benchmark 所属层级，再解释数字。</p>
 <h3 id="clientcomponentrdma_rc_client_profile">Client：<code>component=rdma_rc_client_profile</code><a class="headerlink" href="#clientcomponentrdma_rc_client_profile" title="Permanent link">&para;</a></h3>
 <p>重点字段：<code>submit_request_ns</code>、<code>wait_status_ns</code>、<code>copy_response_ns</code>、
 <code>revoke_resource_ns</code>、<code>pending_rpc_peak</code>、<code>acquire_qp_failures</code>。</p>
 <p>提交、等待或 response copy 分别偏高时，对应 client 固定开销、completion/服务端处理、
-或数据搬运可能是瓶颈；<code>acquire_qp_failures</code> 表示资源不足，不是性能变慢。</p>
+或数据搬运可能是瓶颈；<code>acquire_qp_failures</code> 表示 QP 资源不足。</p>
 <h3 id="servercomponentrdma_rc_server_profile">Server：<code>component=rdma_rc_server_profile</code><a class="headerlink" href="#servercomponentrdma_rc_server_profile" title="Permanent link">&para;</a></h3>
 <p>重点字段：<code>poll_loop_ns</code>、<code>scan_rounds</code>、<code>ready_slots</code>、<code>empty_scan_rounds</code>、
 <code>handle_get_ns</code>、<code>get_batch_get_ns</code>、<code>get_zero_fill_ns</code>、<code>get_row_copy_ns</code>、
@@ -3791,7 +3787,7 @@ row copy 和 response completion 可分别定位查找、清零、搬运和回�
 <tr>
 <td><code>event=lane_rebuild_skipped</code></td>
 <td>恢复</td>
-<td><code>reason=shared_server_cq</code>，即 <code>num_os_clients&gt;1</code>，属部署形态而非缺陷</td>
+<td><code>reason=shared_server_cq</code>，即 <code>num_os_clients&gt;1</code>；共享 CQ 的多 client 部署会跳过重建</td>
 </tr>
 <tr>
 <td><code>event=handler_exception</code></td>
@@ -3801,18 +3797,17 @@ row copy 和 response completion 可分别定位查找、清零、搬运和回�
 <tr>
 <td><code>event=get_payload_dropped_stale</code></td>
 <td>服务端 fence</td>
-<td>payload 因重建作废、不再写 status；这是"防住了"，不是故障</td>
+<td>服务端 fence 丢弃因重建失效的 payload，并停止回写 status</td>
 </tr>
 </tbody>
 </table>
 <p>构建、RDMA verbs 检查、PetPS integration、op-layer 测试、脚本单测和最小真实 RDMA
 闭环命令见 <code>rs-benchmark-ps</code> skill。</p>
-<h2 id="7">7. 维护边界<a class="headerlink" href="#7" title="Permanent link">&para;</a></h2>
+<h2 id="7">7. 相关文档<a class="headerlink" href="#7" title="Permanent link">&para;</a></h2>
 <ul>
-<li>本页维护稳定的架构事实和参数语义，不维护某次运行的吞吐数字、矩阵结果或路线图。</li>
-<li>benchmark 输出、日志和 <code>summary.md</code> 放在独立的 <code>results/</code> 目录。</li>
-<li>性能比较必须标注 storage-only、PS/network 或 PyTorch/model 层；解释规则见
-  <a href="../../agent/perf/"><code>docs/agent/perf.md</code></a>。</li>
+<li><a href="../../performance/ps/">参数服务器与传输基准</a></li>
+<li><a href="../../agent/perf/">性能比较的层级与指标</a></li>
+<li><a href="../../dev/documentation/">文档维护</a></li>
 </ul>
 
 

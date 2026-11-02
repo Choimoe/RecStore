@@ -783,7 +783,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -2716,7 +2716,7 @@
 
 
 <h1 id="_1">计算层接口<a class="headerlink" href="#_1" title="Permanent link">&para;</a></h1>
-<p>这一页记录计算层的边界接口：Python client、PyTorch op、C++ facade。模型代码通常只用 <code>RecStoreClient</code> 或 embedding 模块，不直接碰 <code>KVClientOp</code>。</p>
+<p>计算层接口分为 Python client、PyTorch op 和 C++ facade。模型代码通常通过 <code>RecStoreClient</code> 或 embedding 模块访问后端。</p>
 <h2 id="python-client">Python client<a class="headerlink" href="#python-client" title="Permanent link">&para;</a></h2>
 <p><a href="../../api/python/">RecStoreClient API</a></p>
 <h2 id="pytorch-op">PyTorch op<a class="headerlink" href="#pytorch-op" title="Permanent link">&para;</a></h2>

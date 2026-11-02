@@ -789,7 +789,7 @@
   <span class="md-ellipsis">
     
   
-    常见问题与排障
+    常见问题
   
 
     
@@ -3226,8 +3226,8 @@
 </table>
 <p>作用位置：字段最终进入 <code>BaseKVConfig.json_config_</code>，在 <code>src/storage/kv_engine/engine_selector.h</code> 中推导引擎类型，并在 <code>src/storage/kv_engine/base_kv.h</code> 及对应引擎实现中用于容量预分配与值大小约束。</p>
 <details class="note" open="open">
-<summary>注意</summary>
-<p>Composite 配置请使用嵌套 <code>index</code> / <code>value</code>，不要混用已废弃的顶层 <code>index_type</code>、<code>value_type</code>、<code>value_memory_management</code> 等字段。组件类型与 allocator 明细见 <a href="../storage/composite_kvengine/">composite_kvengine.md</a>。</p>
+<summary>Composite 配置结构</summary>
+<p>Composite 使用嵌套的 <code>index</code> / <code>value</code> 配置。顶层 <code>index_type</code>、<code>value_type</code>、<code>value_memory_management</code> 字段已废弃。组件类型与 allocator 明细见 <a href="../storage/composite_kvengine/">composite_kvengine.md</a>。</p>
 </details>
 <h4 id="value">value 配置结构<a class="headerlink" href="#value" title="Permanent link">&para;</a></h4>
 <table>
@@ -3483,11 +3483,7 @@
 </tr>
 </tbody>
 </table>
-<p>注意：</p>
-<ul>
-<li>这组配置当前只进入 HugeCTR 侧适配层，不会回流到 <code>CommonOp</code></li>
-<li>如果选择 <code>hierkv</code> 但缺少上述必填字段，HugeCTR 入口会直接抛出配置错误</li>
-</ul>
+<p>这组配置由 HugeCTR 侧适配层读取，<code>CommonOp</code> 不使用这些字段。选择 <code>hierkv</code> 时，缺少必填字段会在 HugeCTR 入口抛出配置错误。</p>
 <h2 id="_4">配置示例<a class="headerlink" href="#_4" title="Permanent link">&para;</a></h2>
 <details class="example" open="open">
 <summary>完整配置示例</summary>
