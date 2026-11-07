@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
     
     
       
@@ -2932,6 +2932,10 @@
 <td><code>tid</code></td>
 <td>保留给调用方；Composite 主要依赖组件内部同步，勿假设 <code>tid</code> 全局唯一</td>
 </tr>
+<tr>
+<td><code>clear</code></td>
+<td>各引擎自行实现；不支持时只打印错误。PetKV 明确不支持，需要重建参数服务器</td>
+</tr>
 </tbody>
 </table>
 <h2 id="_2">配置与创建<a class="headerlink" href="#_2" title="Permanent link">&para;</a></h2>
@@ -3065,6 +3069,15 @@
 <a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="p">}</span>
 </code></pre></div>
 <p><code>BatchGet</code> 行为受 gflag <code>prefetch_method</code> 控制：<code>0</code> 逐 key <code>Get</code>，<code>1</code> 走 <code>PetMultiKV::BatchGet</code>。</p>
+<p>PetKV 的三点限制：</p>
+<ul>
+<li>backing 是匿名 DRAM mmap（<code>ShmFile</code> 的 medium 固定为 <code>DRAM</code>），不跨进程、进程退出后不保留；
+  <code>path</code> 只是 mmap 的名字。</li>
+<li><code>Persistence=true</code> 会触发 <code>clflushopt_range</code>，但 <code>clflushopt()</code> 当前第一行就是 <code>return;</code>，
+  因此 flush 实际是空操作。</li>
+<li>不支持 checkpoint：<code>SaveCheckpoint</code> / <code>LoadCheckpoint</code> 返回 <code>false</code> 并打印
+  <code>KVEnginePetKV does not support ...</code>；<code>clear()</code> 同样只打印错误，需要重建参数服务器才能清空。</li>
+</ul>
 <hr />
 <h2 id="kvenginefasterkv">KVEngineFasterKV<a class="headerlink" href="#kvenginefasterkv" title="Permanent link">&para;</a></h2>
 <p>Microsoft FASTER 单表适配；由 FASTER 内部管理。</p>
@@ -3302,7 +3315,7 @@
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.indexes", "navigation.footer", "navigation.sections", "navigation.top", "navigation.tracking", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate", "content.action.edit"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "\u5df2\u590d\u5236", "clipboard.copy": "\u590d\u5236", "search.result.more.one": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.more.other": "\u5728\u8be5\u9875\u4e0a\u8fd8\u6709 # \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.none": "\u6ca1\u6709\u627e\u5230\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.one": "\u627e\u5230 1 \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.other": "# \u4e2a\u7b26\u5408\u6761\u4ef6\u7684\u7ed3\u679c", "search.result.placeholder": "\u952e\u5165\u4ee5\u5f00\u59cb\u641c\u7d22", "search.result.term.missing": "\u7f3a\u5c11", "select.version": "\u9009\u62e9\u5f53\u524d\u7248\u672c"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>
