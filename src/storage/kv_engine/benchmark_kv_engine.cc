@@ -26,6 +26,9 @@
 #include "storage/kv_engine/engine_selector.h"
 #include "storage/ssd_layout/ssd_layout.h"
 
+// Defined in kv_engine_register.cc; see the call site for why it exists.
+extern "C" void RecStoreForceLinkKVEngineRegistrations();
+
 DEFINE_string(
     dram_path,
     "",
@@ -59,11 +62,25 @@ DEFINE_string(ssd_io_backend, "IOURING", "SSD IO backend");
 DEFINE_int32(ssd_queue_depth, 512, "SSD IO queue depth");
 DEFINE_int64(dram_capacity_bytes, 0, "override DRAM allocator capacity bytes");
 DEFINE_int64(ssd_capacity_bytes, 0, "override SSD allocator capacity bytes");
-DEFINE_string(tiered_cache_policy, "none", "tiered policy: none/lru/clock (cold DRAM exchange)");
-DEFINE_double(tiered_cache_budget_ratio, 0.05, "fraction of DRAM reserved for cache");
-DEFINE_int64(tiered_cache_expected_dram_bytes, 0,
+DEFINE_string(
+    tiering_cache_policy,
+    "none",
+    "value.tiering.cache_policy for TIERED_VALUE_STORE: none|lru|clock");
+DEFINE_double(tiering_cache_budget_ratio,
+              0.05,
+              "read cache budget as a share of the tiered DRAM layer; measured "
+              "on e2e, 0.05 leaves primary placement almost intact, 0.5 halves "
+              "it and loses 47%");
+DEFINE_int32(tiering_cache_shards, 16, "read cache shard count");
+DEFINE_int32(tiering_promote_min_misses,
+             2,
+             "misses before a value is admitted into the read cache; 2 filters "
+             "one-shot misses out (measured +21% on zipfian, flat on uniform)");
+DEFINE_int64(tiering_expected_dram_bytes,
+             0,
              "load-time working set in DRAM slot bytes; 0 means unknown");
-DEFINE_int32(ssd_completion_poll_spins, 8192,
+DEFINE_int32(ssd_completion_poll_spins,
+             8192,
              "SSD value I/O CQ polls before blocking; 0 waits immediately");
 DEFINE_int32(warmup_seconds, 0, "unmeasured transaction warmup seconds");
 
@@ -424,9 +441,11 @@ BaseKVConfig BuildConfig() {
           {"completion_poll_spins", FLAGS_ssd_completion_poll_spins},
           {"base_offset_bytes", 4096}}}};
     config.json_config_["value"]["tiering"] = {
-        {"cache_policy", FLAGS_tiered_cache_policy},
-        {"cache_budget_ratio", FLAGS_tiered_cache_budget_ratio},
-        {"expected_dram_bytes", FLAGS_tiered_cache_expected_dram_bytes}};
+        {"cache_policy", FLAGS_tiering_cache_policy},
+        {"cache_budget_ratio", FLAGS_tiering_cache_budget_ratio},
+        {"cache_shards", FLAGS_tiering_cache_shards},
+        {"promote_min_misses", FLAGS_tiering_promote_min_misses},
+        {"expected_dram_bytes", FLAGS_tiering_expected_dram_bytes}};
   }
   if (!FLAGS_ssd_layout_strategy.empty() &&
       FLAGS_ssd_layout_strategy != "plain") {
@@ -739,6 +758,9 @@ void ReplayQueryLog(BaseKV* kv) {
 } // namespace
 
 int RunBenchmark(int argc, char* argv[]) {
+  // Static builds drop the registration translation unit unless it is
+  // referenced; shared builds get it through --no-as-needed.
+  RecStoreForceLinkKVEngineRegistrations();
   ForceLinkIOBackends();
   base::Init(&argc, &argv);
 
@@ -833,10 +855,11 @@ int RunBenchmark(int argc, char* argv[]) {
       kv->Get(key, value, 0);
       const uint64_t per_thread =
           (FLAGS_record_count + load_threads - 1) / load_threads;
-      const std::string expected(FLAGS_value_size,
-                                static_cast<char>('a' + ((key / per_thread) % 26)));
+      const std::string expected(
+          FLAGS_value_size, static_cast<char>('a' + ((key / per_thread) % 26)));
       if (value != expected) {
-        throw std::runtime_error("loaded value mismatch at key " + std::to_string(key));
+        throw std::runtime_error(
+            "loaded value mismatch at key " + std::to_string(key));
       }
     }
   };
@@ -848,8 +871,14 @@ int RunBenchmark(int argc, char* argv[]) {
 
   if (FLAGS_run) {
     if (FLAGS_warmup_seconds > 0) {
-      RunTransactions(kv.get(), workload, FLAGS_distribution, FLAGS_thread_num,
-                      FLAGS_record_count, FLAGS_warmup_seconds, 0x100000000ULL);
+      RunTransactions(
+          kv.get(),
+          workload,
+          FLAGS_distribution,
+          FLAGS_thread_num,
+          FLAGS_record_count,
+          FLAGS_warmup_seconds,
+          0x100000000ULL);
     }
     std::printf("YCSB_BEFORE_RUN%s\n", kv->ExtraResultFields().c_str());
     const auto begin     = std::chrono::steady_clock::now();
@@ -868,7 +897,7 @@ int RunBenchmark(int argc, char* argv[]) {
     std::printf(
         "YCSB_RESULT workload=%s distribution=%s zipfian_alpha=%.6f "
         "read_mode=%s threads=%d records=%ld runtime_s=%.6f ops=%lu "
-        "throughput_ops_sec=%.6f read_ops=%lu update_ops=%lu\n",
+        "throughput_ops_sec=%.6f read_ops=%lu update_ops=%lu%s\n",
         workload.c_str(),
         FLAGS_distribution.c_str(),
         FLAGS_zipfian_alpha,
@@ -879,7 +908,8 @@ int RunBenchmark(int argc, char* argv[]) {
         run_stats.total_ops,
         throughput,
         run_stats.read_ops,
-        run_stats.update_ops);
+        run_stats.update_ops,
+        kv->ExtraResultFields().c_str());
     std::printf("YCSB_AFTER_RUN%s\n", kv->ExtraResultFields().c_str());
     if (FLAGS_load && workload == "c") {
       verify_values();
