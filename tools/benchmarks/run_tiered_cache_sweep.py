@@ -63,8 +63,8 @@ def main():
     parser.add_argument("--cache-budget-ratios", type=float, nargs="+", default=[.05, .15, .3, .5, 1.0])
     parser.add_argument("--policies", choices=["none", "lru", "clock", "adaptive"], nargs="+", default=["lru"])
     parser.add_argument("--distributions", choices=["uniform", "zipfian"], nargs="+", default=["zipfian"])
-    parser.add_argument("--promote-min-misses", type=int, default=2,
-                        help="misses before a value is admitted (clock and lru)")
+    parser.add_argument("--promote-min-misses", type=int, default=0,
+                        help="misses before a value is admitted; 0 uses the policy default")
     parser.add_argument("--record-count", type=int, default=1000000)
     parser.add_argument("--value-size", type=int, default=128)
     parser.add_argument("--dram-slot-bytes", type=int, required=True,
@@ -112,8 +112,9 @@ def main():
         print(f"START {number}/{len(cases)} {case}", flush=True)
         bench.BENCHMARK_BIN = options.baseline_binary.resolve() if variant == "baseline" else optimized_binary
         args.dram_capacity_bytes = math.ceil(options.record_count * options.dram_slot_bytes * (1 - ratio) / .85)
-        props = {"tiering_cache_policy": policy, "tiering_cache_budget_ratio": str(budget),
-                 "tiering_promote_min_misses": str(options.promote_min_misses)}
+        props = {"tiering_cache_policy": policy, "tiering_cache_budget_ratio": str(budget)}
+        if options.promote_min_misses > 0:
+            props["tiering_promote_min_misses"] = str(options.promote_min_misses)
         if variant == "optimized":
             props.update(tiering_expected_dram_bytes=str(0 if options.disable_fit_check else options.record_count * options.dram_slot_bytes),
                          ssd_completion_poll_spins=str(options.completion_poll_spins))

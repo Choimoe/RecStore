@@ -74,9 +74,9 @@ DEFINE_double(tiering_cache_budget_ratio,
               "it and loses 47%");
 DEFINE_int32(tiering_cache_shards, 16, "read cache shard count");
 DEFINE_int32(tiering_promote_min_misses,
-             2,
-             "misses before a value is admitted into the read cache; 2 filters "
-             "one-shot misses out (measured +21% on zipfian, flat on uniform)");
+             0,
+             "misses before a value is admitted; 0 uses the policy default "
+             "(8 for clock, 2 for lru)");
 DEFINE_int64(tiering_expected_dram_bytes,
              0,
              "load-time working set in DRAM slot bytes; 0 means unknown");
@@ -468,8 +468,11 @@ BaseKVConfig BuildConfig() {
         {"cache_policy", FLAGS_tiering_cache_policy},
         {"cache_budget_ratio", FLAGS_tiering_cache_budget_ratio},
         {"cache_shards", FLAGS_tiering_cache_shards},
-        {"promote_min_misses", FLAGS_tiering_promote_min_misses},
         {"expected_dram_bytes", FLAGS_tiering_expected_dram_bytes}};
+    if (FLAGS_tiering_promote_min_misses > 0) {
+      config.json_config_["value"]["tiering"]["promote_min_misses"] =
+          FLAGS_tiering_promote_min_misses;
+    }
   }
   if (!FLAGS_ssd_layout_strategy.empty() &&
       FLAGS_ssd_layout_strategy != "plain") {

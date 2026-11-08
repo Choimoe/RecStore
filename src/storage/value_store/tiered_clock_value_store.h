@@ -276,6 +276,7 @@ public:
         << " tiered_clock_demotions=" << stats.demotions
         << " tiered_clock_failures=" << stats.failures
         << " tiered_clock_admission_rejects=" << stats.rejects
+        << " tiered_clock_promote_min_misses=" << min_misses_
         << " tiered_clock_clean_evictions=" << stats.clean_evictions
         << " tiered_clock_writebacks=" << stats.writebacks;
     return out.str();

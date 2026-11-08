@@ -1186,6 +1186,24 @@ BaseKVConfig ClockConfig(const std::filesystem::path& root,
 }
 } // namespace
 
+TEST_F(StaticLayoutValueTest, AdmissionDefaultDependsOnPolicy) {
+  auto clock = ClockConfig(root_, "clock-default");
+  clock.json_config_["value"]["tiering"].erase("promote_min_misses");
+  HybridValueStore clock_store(clock);
+  EXPECT_EQ(TieredField(clock_store.ExtraResultFields(),
+                        "tiered_clock_promote_min_misses"),
+            8.0);
+
+  auto lru = ClockConfig(root_, "lru-default");
+  lru.json_config_["value"]["tiering"]["cache_policy"]       = "lru";
+  lru.json_config_["value"]["tiering"]["cache_budget_ratio"] = 0.5;
+  lru.json_config_["value"]["tiering"].erase("promote_min_misses");
+  HybridValueStore lru_store(lru);
+  EXPECT_EQ(TieredField(lru_store.ExtraResultFields(),
+                        "tiered_cache_promote_min_misses"),
+            2.0);
+}
+
 TEST_F(StaticLayoutValueTest, ClockExchangesColdDramWithHotSsd) {
   auto config = ClockConfig(root_, "clock");
   config.json_config_["value"]["tiering"]["expected_dram_bytes"] = 1;
