@@ -127,7 +127,7 @@ def main():
         row.update(variant=variant, ssd_ratio=ratio, policy=policy, budget=budget,
                    configured_dram_bytes=args.dram_capacity_bytes,
                    verified="YCSB_VERIFY samples=1024 ok=1" in raw,
-                   cache_enabled=after.get("tiered_cache_policy") in {"lru", "clock"})
+                   cache_enabled=after.get("tiered_cache_policy") in {"lru", "clock", "adaptive"})
         prefix = "tiered_clock" if after.get("tiered_cache_policy") == "clock" else "tiered_cache"
         for label, field in {"hits": prefix + "_hits", "misses": prefix + "_misses",
                              "pages": "layout_page_reads", "bytes": "layout_bytes_read"}.items():
