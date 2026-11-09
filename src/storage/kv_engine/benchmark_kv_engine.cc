@@ -80,6 +80,10 @@ DEFINE_int32(tiering_promote_min_misses,
 DEFINE_int64(tiering_expected_dram_bytes,
              0,
              "load-time working set in DRAM slot bytes; 0 means unknown");
+DEFINE_bool(tiering_retain_backing_copies,
+            true,
+            "retain SSD copies of promoted CLOCK values (plain layouts only "
+            "when false)");
 DEFINE_int32(ssd_completion_poll_spins,
              8192,
              "SSD value I/O CQ polls before blocking; 0 waits immediately");
@@ -137,7 +141,8 @@ struct PhaseStats {
   static constexpr uint64_t kLatencyBucketNs   = 100;
   static constexpr std::size_t kLatencyBuckets = 1024;
   std::array<uint64_t, kLatencyBuckets> latency_ns{};
-  uint64_t max_latency_ns = 0;
+  uint64_t max_latency_ns   = 0;
+  uint64_t total_latency_ns = 0;
   BaseKV::BatchGetFlatStats get_stats;
 
   void RecordLatency(uint64_t ns) {
@@ -145,6 +150,7 @@ struct PhaseStats {
         std::min<uint64_t>(ns / kLatencyBucketNs, kLatencyBuckets - 1);
     ++latency_ns[static_cast<std::size_t>(bucket)];
     max_latency_ns = std::max(max_latency_ns, ns);
+    total_latency_ns += ns;
   }
 };
 
@@ -468,6 +474,7 @@ BaseKVConfig BuildConfig() {
         {"cache_policy", FLAGS_tiering_cache_policy},
         {"cache_budget_ratio", FLAGS_tiering_cache_budget_ratio},
         {"cache_shards", FLAGS_tiering_cache_shards},
+        {"retain_backing_copies", FLAGS_tiering_retain_backing_copies},
         {"expected_dram_bytes", FLAGS_tiering_expected_dram_bytes}};
     if (FLAGS_tiering_promote_min_misses > 0) {
       config.json_config_["value"]["tiering"]["promote_min_misses"] =
@@ -679,6 +686,7 @@ PhaseStats RunTransactions(
     total.get_stats.row_copy_ns += each.get_stats.row_copy_ns;
     total.get_stats.missing_rows += each.get_stats.missing_rows;
     total.max_latency_ns = std::max(total.max_latency_ns, each.max_latency_ns);
+    total.total_latency_ns += each.total_latency_ns;
   }
   return total;
 }
@@ -722,12 +730,14 @@ void PrintLatencyPercentiles(const PhaseStats& stats) {
   const double max = static_cast<double>(stats.max_latency_ns);
   std::printf(
       "YCSB_LATENCY samples=%lu p50_us=%.3f p90_us=%.3f p99_us=%.3f "
-      "max_us=%.3f\n",
+      "max_us=%.3f avg_us=%.3f overflow_samples=%lu\n",
       samples,
       p50 / 1000.0,
       p90 / 1000.0,
       p99 / 1000.0,
-      max / 1000.0);
+      max / 1000.0,
+      static_cast<double>(stats.total_latency_ns) / samples / 1000.0,
+      stats.latency_ns.back());
 }
 
 void PrintStageBreakdown(const PhaseStats& stats) {
