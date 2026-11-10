@@ -38,6 +38,10 @@ bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes) {
   const std::size_t register_bytes = required_bytes - existing_bytes;
   const cudaError_t err =
       cudaHostRegister(register_ptr, register_bytes, cudaHostRegisterPortable);
+  if (err == cudaErrorHostMemoryAlreadyRegistered) {
+    // Consume the handled status before the next PyTorch CUDA operation.
+    (void)cudaGetLastError();
+  }
   if (err != cudaSuccess && err != cudaErrorHostMemoryAlreadyRegistered) {
     LOG(WARNING) << "cudaHostRegister failed for local_shm payload: "
                  << cudaGetErrorString(err)
