@@ -147,6 +147,26 @@ protected:
   }
 
   std::filesystem::path root_;
+  BaseKVConfig OnlineConfig(size_t hot_rows) {
+    const auto profile = root_ / "online_keys.bin";
+    std::ofstream out(profile, std::ios::binary);
+    for (uint64_t key = 0; key < hot_rows; ++key) {
+      out.write(reinterpret_cast<const char*>(&key), sizeof(key));
+    }
+    out.close();
+    BaseKVConfig config;
+    config.num_threads_ = 4;
+    config.json_config_ = {
+        {"capacity", 128}, {"index", {{"type", "DRAM_UNORDERED_MAP"}}},
+        {"value", {{"type", "TIERED_VALUE_STORE"}, {"default_value_size_hint", 128},
+         {"dram_allocator", {{"type", "CONCURRENT_SLAB_MEMORY_POOL"},
+                             {"capacity_bytes", 64 << 20}, {"path", (root_/"online_dram").string()}}},
+         {"ssd_allocator", {{"type", "SSD_SLAB"}, {"capacity_bytes", 64ULL << 20},
+                            {"path", (root_/"online_ssd").string()},
+                            {"io", {{"type", "INMEMORY"}, {"base_offset_bytes", 0}}}}},
+         {"tiering", {{"dram_keys_path", profile.string()}, {"online_admission", true}}}}}};
+    return config;
+  }
 };
 
 ssd_layout::Artifact Bandana() {
@@ -405,6 +425,33 @@ TEST_F(StaticLayoutValueTest, HybridProfileControlsKeyedPlacement) {
   EXPECT_THROW(HybridValueStore{config}, std::invalid_argument);
   std::filesystem::remove(profile);
   EXPECT_THROW(HybridValueStore{config}, std::invalid_argument);
+}
+
+TEST_F(StaticLayoutValueTest, SgdPersistsColdRowsAndDuplicateGradients) {
+  auto config = OnlineConfig(3);
+  config.json_config_["value"]["tiering"]["online_admission"] = false;
+  KVEngineComposite engine(config);
+  std::array<float, 32> initial;
+  initial.fill(5);
+  for (uint64_t key = 0; key < 5; ++key) {
+    engine.Put(key, std::string_view(reinterpret_cast<const char*>(initial.data()), 128), 0);
+  }
+  std::string value;
+  engine.Get(4, value, 0);  // First probation observation.
+  const std::vector<uint64_t> keys{4, 4, 0, 5, 5};
+  std::array<float, 160> grads;
+  for (size_t row = 0; row < keys.size(); ++row) {
+    std::fill_n(grads.data() + row * 32, 32, row + 1);
+  }
+  ASSERT_TRUE(engine.ApplySgdUpdateFlat(base::ConstArray<uint64_t>(keys),
+                                       grads.data(), keys.size(), 32, .5, 0, 0));
+  for (const auto expected : {std::pair<uint64_t, float>{4, 3.5f}, {0, 3.5f}, {5, -4.5f}}) {
+    engine.Get(expected.first, value, 0);
+    ASSERT_EQ(value.size(), 128U);
+    std::array<float, 32> row;
+    std::memcpy(row.data(), value.data(), value.size());
+    for (float item : row) EXPECT_FLOAT_EQ(item, expected.second);
+  }
 }
 
 TEST_F(StaticLayoutValueTest, HybridWatermarkAndReplicaUpdate) {
