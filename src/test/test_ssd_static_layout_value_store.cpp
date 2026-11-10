@@ -263,6 +263,150 @@ TEST_F(StaticLayoutValueTest, BatchReadUsesFewerPagesThanPlain) {
   EXPECT_EQ(repeated_out[0].data, repeated_out[2].data);
 }
 
+TEST_F(StaticLayoutValueTest, HybridBatchAllocationCoalescesSsdWrites) {
+  BaseKVConfig config;
+  config.num_threads_ = 2;
+  config.json_config_ = {
+      {"value",
+       {{"type", "TIERED_VALUE_STORE"},
+        {"dram_allocator",
+         {{"type", "CONCURRENT_SLAB_MEMORY_POOL"},
+          {"capacity_bytes", 64 << 20},
+          {"path", (root_ / "dram").string()}}},
+        {"tiering", {{"high_watermark_ratio", 1024.0 / (64 << 20)}}},
+        {"ssd_allocator",
+         {{"type", "SSD_SLAB"},
+          {"capacity_bytes", 64ULL << 20},
+          {"size_classes", {128}},
+          {"path", (root_ / "ssd.db").string()},
+          {"io", {{"type", "INMEMORY"}, {"base_offset_bytes", 0}}}}}}}};
+  HybridValueStore store(config);
+  std::vector<std::string> values;
+  std::vector<ValueStore::WriteSpec> specs;
+  for (size_t i = 0; i < 64; ++i) {
+    values.emplace_back(128, static_cast<char>(i));
+  }
+  for (const auto& value : values) {
+    specs.push_back({value.data(), value.size()});
+  }
+  const auto handles = store.BatchAllocAndWrite(specs);
+  ASSERT_EQ(handles.size(), values.size());
+  EXPECT_NE(store.ExtraResultFields().find("tiered_dram_live_allocs=8 "),
+            std::string::npos);
+  EXPECT_NE(store.ExtraResultFields().find("tiered_ssd_live_allocs=56 "),
+            std::string::npos);
+  EXPECT_NE(store.ExtraResultFields().find("layout_page_reads=2 "),
+            std::string::npos);
+  std::vector<ValueStore::ReadResult> out;
+  store.BatchRead(handles, out);
+  for (size_t i = 0; i < values.size(); ++i) {
+    EXPECT_EQ(std::string(out[i].data.begin(), out[i].data.end()), values[i]);
+    store.Free(handles[i]);
+  }
+  EXPECT_NE(store.ExtraResultFields().find("tiered_live_allocs=0 "),
+            std::string::npos);
+
+  std::vector<uint64_t> allocated(1024, kValueHandleNone);
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+  for (size_t tid = 0; tid < 16; ++tid) {
+    threads.emplace_back([&, tid]() {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (size_t i = tid; i < allocated.size(); i += 16) {
+        allocated[i] = store.Alloc(128);
+      }
+    });
+  }
+  start.store(true, std::memory_order_release);
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  size_t dram_rows = 0;
+  for (uint64_t handle : allocated) {
+    ASSERT_NE(handle, kValueHandleNone);
+    dram_rows += store.DirectPtr(handle) != nullptr;
+    store.Free(handle);
+  }
+  EXPECT_EQ(dram_rows, 8U);
+}
+
+TEST_F(StaticLayoutValueTest, HybridProfileControlsKeyedPlacement) {
+  const auto profile = root_ / "dram_keys.bin";
+  const uint64_t fused_key = (uint64_t{1} << 30) + 4;
+  const std::array<uint64_t, 2> hot_keys{2, fused_key};
+  {
+    std::ofstream out(profile, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(hot_keys.data()), sizeof(hot_keys));
+  }
+  for (const char* strategy : {"plain", "bandana"}) {
+    auto artifact = Bandana();
+    artifact.keys.back() = fused_key;
+    auto config = Config(Save(artifact), strategy, "TIERED_VALUE_STORE");
+    auto& value = config.json_config_["value"];
+    value["dram_allocator"] = {
+        {"type", "CONCURRENT_SLAB_MEMORY_POOL"},
+        {"capacity_bytes", 64 << 20},
+        {"path", (root_ / "profile_dram").string()}};
+    value["ssd_allocator"] = {
+        {"type", "SSD_SLAB"},
+        {"capacity_bytes", 64ULL << 20},
+        {"path", (root_ / "profile_ssd.db").string()},
+        {"io", {{"type", "INMEMORY"}, {"base_offset_bytes", 0}}}};
+    value["tiering"] = {{"dram_keys_path", profile.string()}};
+    HybridValueStore store(config);
+    std::vector<uint64_t> keys{0, 1, 2, 3, fused_key};
+    const std::array<float, 5> values{1, 2, 3, 4, 5};
+    std::vector<ValueStore::WriteSpec> specs;
+    for (const auto& item : values) {
+      specs.push_back({&item, sizeof(item)});
+    }
+    auto handles = store.BatchAllocAndWrite(keys, specs);
+    ASSERT_EQ(handles.size(), keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+      EXPECT_EQ(store.DirectPtr(handles[i]) != nullptr, i == 2 || i == 4);
+      float out = 0;
+      ASSERT_EQ(store.Read(handles[i], &out, sizeof(out)), sizeof(out));
+      EXPECT_FLOAT_EQ(out, values[i]);
+    }
+    EXPECT_NE(store.ExtraResultFields().find("tiered_dram_profile_keys=2 "),
+              std::string::npos);
+    store.Free(handles[2]);
+    const float updated = 9;
+    handles[2] = store.AllocAndWrite(2, &updated, sizeof(updated));
+    ASSERT_NE(store.DirectPtr(handles[2]), nullptr);
+    float out = 0;
+    ASSERT_EQ(store.Read(handles[2], &out, sizeof(out)), sizeof(out));
+    EXPECT_FLOAT_EQ(out, updated);
+    for (uint64_t handle : handles) {
+      store.Free(handle);
+    }
+  }
+
+  auto config = Config(Save(Bandana()), "bandana", "TIERED_VALUE_STORE");
+  config.json_config_["value"]["dram_allocator"] = {
+      {"type", "CONCURRENT_SLAB_MEMORY_POOL"},
+      {"capacity_bytes", 64 << 20},
+      {"path", (root_ / "bad_profile_dram").string()}};
+  config.json_config_["value"]["ssd_allocator"] = {
+      {"type", "SSD_SLAB"}, {"capacity_bytes", 64ULL << 20},
+      {"path", (root_ / "bad_profile_ssd.db").string()}};
+  config.json_config_["value"]["tiering"] = {{"dram_keys_path", profile.string()}};
+  for (const auto& invalid : {std::array<uint64_t, 2>{4, 2},
+                              std::array<uint64_t, 2>{2, 2}}) {
+    {
+      std::ofstream file(profile, std::ios::binary | std::ios::trunc);
+      file.write(reinterpret_cast<const char*>(invalid.data()), sizeof(invalid));
+    }
+    EXPECT_THROW(HybridValueStore{config}, std::invalid_argument);
+  }
+  std::filesystem::resize_file(profile, 1);
+  EXPECT_THROW(HybridValueStore{config}, std::invalid_argument);
+  std::filesystem::remove(profile);
+  EXPECT_THROW(HybridValueStore{config}, std::invalid_argument);
+}
+
 TEST_F(StaticLayoutValueTest, HybridWatermarkAndReplicaUpdate) {
   auto mapping        = Save(MaxEmbed());
   BaseKVConfig config = Config(mapping, "maxembed", "TIERED_VALUE_STORE");
