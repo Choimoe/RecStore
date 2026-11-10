@@ -13,8 +13,10 @@ TEST(HostMemoryTest, RejectsEmptyAndOverflowingRanges) {
   EXPECT_FALSE(EnsurePinnedLocalShmPayload(nullptr, 4096));
   EXPECT_FALSE(EnsurePinnedLocalShmPayload(reinterpret_cast<void*>(1), 0));
   const uintptr_t max_address = std::numeric_limits<uintptr_t>::max();
-  EXPECT_FALSE(EnsurePinnedLocalShmPayload(reinterpret_cast<void*>(max_address - 7), 16));
-  EXPECT_FALSE(EnsurePinnedLocalShmPayload(reinterpret_cast<void*>(max_address - 7), 1));
+  EXPECT_FALSE(EnsurePinnedLocalShmPayload(
+      reinterpret_cast<void*>(max_address - 7), 16));
+  EXPECT_FALSE(
+      EnsurePinnedLocalShmPayload(reinterpret_cast<void*>(max_address - 7), 1));
 }
 
 TEST(HostMemoryTest, ClearsHandledRegistrationErrorOnAnActualCudaDevice) {
@@ -26,19 +28,26 @@ TEST(HostMemoryTest, ClearsHandledRegistrationErrorOnAnActualCudaDevice) {
   const long page_size = sysconf(_SC_PAGESIZE);
   ASSERT_GT(page_size, 0);
   const size_t bytes = static_cast<size_t>(page_size);
-  void* memory = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void* memory       = mmap(
+      nullptr,
+      bytes,
+      PROT_READ | PROT_WRITE,
+      MAP_PRIVATE | MAP_ANONYMOUS,
+      -1,
+      0);
   ASSERT_NE(memory, MAP_FAILED);
   struct Mapping {
     void* ptr;
     size_t bytes;
     bool registered = false;
     ~Mapping() {
-      if (registered) (void)cudaHostUnregister(ptr);
+      if (registered)
+        (void)cudaHostUnregister(ptr);
       munmap(ptr, bytes);
     }
   } mapping{memory, bytes};
-  ASSERT_EQ(cudaHostRegister(memory, bytes, cudaHostRegisterPortable), cudaSuccess);
+  ASSERT_EQ(cudaHostRegister(memory, bytes, cudaHostRegisterPortable),
+            cudaSuccess);
   mapping.registered = true;
   (void)cudaGetLastError();
   EXPECT_TRUE(recstore::framework::EnsurePinnedLocalShmPayload(memory, bytes));

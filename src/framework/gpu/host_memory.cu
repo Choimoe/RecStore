@@ -19,7 +19,7 @@ bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes) {
   }
   const std::size_t page_bytes = static_cast<std::size_t>(page_size);
   const uintptr_t raw_begin    = reinterpret_cast<uintptr_t>(ptr);
-  const uintptr_t max_address = std::numeric_limits<uintptr_t>::max();
+  const uintptr_t max_address  = std::numeric_limits<uintptr_t>::max();
   if (bytes > max_address - raw_begin) {
     return false;
   }
