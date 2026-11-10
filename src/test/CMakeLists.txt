@@ -1041,3 +1041,16 @@ if(CMAKE_BUILD_TYPE MATCHES "Debug" AND USE_PERF_REPORT)
     )
     add_test(NAME test_report COMMAND test_report)
 endif()
+
+if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
+    add_executable(test_host_memory
+        test_host_memory.cpp
+        ../framework/gpu/host_memory.cu)
+    target_include_directories(test_host_memory PRIVATE
+        ${PROJECT_SOURCE_DIR}/src ${RECSTORE_CUDA_INCLUDE_DIRS})
+    target_link_libraries(test_host_memory PRIVATE
+        gtest gtest_main glog::glog pthread)
+    set_target_properties(test_host_memory PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON)
+    add_test(NAME test_host_memory COMMAND test_host_memory)
+endif()

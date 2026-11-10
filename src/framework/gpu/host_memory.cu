@@ -2,6 +2,7 @@
 #include <cuda_runtime_api.h>
 #include <unistd.h>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <memory>
@@ -18,7 +19,14 @@ bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes) {
   }
   const std::size_t page_bytes = static_cast<std::size_t>(page_size);
   const uintptr_t raw_begin    = reinterpret_cast<uintptr_t>(ptr);
-  const uintptr_t raw_end      = raw_begin + bytes;
+  const uintptr_t max_address = std::numeric_limits<uintptr_t>::max();
+  if (bytes > max_address - raw_begin) {
+    return false;
+  }
+  const uintptr_t raw_end = raw_begin + bytes;
+  if (raw_end > max_address - (page_bytes - 1U)) {
+    return false;
+  }
   const uintptr_t page_begin =
       raw_begin & ~(static_cast<uintptr_t>(page_bytes) - 1U);
   const uintptr_t page_end =
@@ -38,6 +46,10 @@ bool EnsurePinnedLocalShmPayload(const void* ptr, std::size_t bytes) {
   const std::size_t register_bytes = required_bytes - existing_bytes;
   const cudaError_t err =
       cudaHostRegister(register_ptr, register_bytes, cudaHostRegisterPortable);
+  if (err == cudaErrorHostMemoryAlreadyRegistered) {
+    // Consume the handled status before the next PyTorch CUDA operation.
+    (void)cudaGetLastError();
+  }
   if (err != cudaSuccess && err != cudaErrorHostMemoryAlreadyRegistered) {
     LOG(WARNING) << "cudaHostRegister failed for local_shm payload: "
                  << cudaGetErrorString(err)
