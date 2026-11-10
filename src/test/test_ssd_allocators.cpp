@@ -584,6 +584,40 @@ TEST(SsdSlabAllocatorTest, BatchAllocAndWriteKeepsSlotsCrossingPageBoundaries) {
         << "slot=" << i;
     EXPECT_EQ(std::string(out.begin(), out.end()), values[i]) << "slot=" << i;
   }
+
+  // A batch shares page images across rows, including duplicate handles and
+  // the values that straddle page boundaries.
+  std::vector<std::array<char, kValueSize>> buffers(kSlots + 1);
+  std::vector<SsdBlockAllocator::ReadEntry> reads;
+  for (size_t i = 0; i < kSlots; ++i) {
+    reads.push_back({handles[i], buffers[i].data()});
+  }
+  reads.push_back({handles[30], buffers.back().data()});
+  backend.ResetReadStats();
+  std::vector<size_t> sizes;
+  alloc.BatchRead(reads, sizes);
+  EXPECT_EQ(backend.GetReadStats().page_reads, 4U);
+  ASSERT_EQ(sizes.size(), kSlots + 1);
+  for (size_t i = 0; i < kSlots; ++i) {
+    EXPECT_EQ(sizes[i], kValueSize);
+    EXPECT_EQ(std::string(buffers[i].data(), kValueSize), values[i]);
+  }
+  EXPECT_EQ(std::string(buffers.back().data(), kValueSize), values[30]);
+  alloc.BatchRead({}, sizes);
+  EXPECT_TRUE(sizes.empty());
+
+  std::vector<SsdBlockAllocator::UpdateEntry> updates;
+  for (size_t i = 0; i < kSlots; ++i) {
+    values[i].assign(kValueSize, static_cast<char>(i + 7));
+    updates.push_back({handles[i], values[i].data(), kValueSize});
+  }
+  backend.ResetReadStats();
+  alloc.BatchWrite(updates);
+  EXPECT_EQ(backend.GetReadStats().page_reads, 4U);
+  alloc.BatchRead(reads, sizes);
+  for (size_t i = 0; i < kSlots; ++i) {
+    EXPECT_EQ(std::string(buffers[i].data(), sizes[i]), values[i]);
+  }
 }
 
 // Regression for #273: single-key writes used to be a page-level

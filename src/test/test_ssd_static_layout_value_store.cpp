@@ -61,7 +61,11 @@ public:
   void submit() override {}
   void PollCompletion() override {}
   void BatchReadPages(const std::vector<IOEntry>& entries) override {
-    g_read_entries.fetch_add(entries.size(), std::memory_order_relaxed);
+    uint64_t pages = 0;
+    for (const auto& entry : entries) {
+      pages += entry.page_count;
+    }
+    g_read_entries.fetch_add(pages, std::memory_order_relaxed);
     IOBackend::BatchReadPages(entries);
   }
 
@@ -211,8 +215,13 @@ TEST_F(StaticLayoutValueTest, BatchReadUsesFewerPagesThanPlain) {
             {"base_offset_bytes", 0}}}}}}}};
   SsdValueStore plain(plain_config);
   std::vector<uint64_t> plain_handles;
-  for (int i = 0; i < 6; ++i) {
-    plain_handles.push_back(plain.AllocAndWrite(payload, 4));
+  // Put the six queried rows on distinct pages. Plain slab batch reads also
+  // deduplicate same-page rows, independently of a coaccess layout.
+  for (int i = 0; i <= 5 * 32; ++i) {
+    const uint64_t handle = plain.AllocAndWrite(payload, 4);
+    if (i % 32 == 0) {
+      plain_handles.push_back(handle);
+    }
   }
   plain.ResetStats();
   g_read_entries.store(0);
