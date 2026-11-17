@@ -2,10 +2,20 @@
 #include "ps/local_shm/local_shm_stage_report.h"
 #include "storage/index/dram/extendible_hash.h"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
 namespace {
+
+bool SparseCommitApplyProfileEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("RECSTORE_SPARSE_COMMIT_PROFILE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
 
 std::vector<uint64_t> CollectReaderKeys(const ParameterCompressReader* reader) {
   const int size = reader->item_size();
@@ -220,8 +230,8 @@ void SGD::UpdateFlat(
     CheckUpdateKeyTag(keys[0], it->second->Tag(), table);
   }
 
-  // Only ask for the sub-stage breakdown when the stage report is actually on;
-  // otherwise the per-update and per-insert clock reads are pure overhead.
+  // Collect the existing sub-stage clocks only for an enabled diagnostic.
+  const bool profile             = SparseCommitApplyProfileEnabled();
   const bool collect_stats       = recstore::IsLocalShmStageReportEnabled();
   const auto direct_update_start = std::chrono::steady_clock::now();
   BaseKV::UpdateFlatStats update_stats;
@@ -236,7 +246,35 @@ void SGD::UpdateFlat(
           embedding_dim,
           learning_rate_,
           tid,
-          collect_stats ? &update_stats : nullptr)) {
+          (collect_stats || profile) ? &update_stats : nullptr)) {
+    if (profile) {
+      const double total_ms =
+          recstore::LocalShmElapsedUs(direct_update_start) / 1000.0;
+      // One stdio call preserves the line across threads; total excludes logging.
+      std::fprintf(
+          stderr,
+          "component=sparse_commit event=sgd_apply_phase path=engine "
+          "table=%s tid=%u rows=%lld dim=%lld tag_ms=%.6f "
+          "batch_get_ms=%.6f index_lookup_ms=%.6f store_read_ms=%.6f "
+          "writeback_ms=%.6f missing_write_ms=%.6f missing_alloc_ms=%.6f "
+          "missing_index_ms=%.6f missing_track_ms=%.6f "
+          "missing_rows=%llu total_ms=%.6f\n",
+          table.c_str(),
+          tid,
+          static_cast<long long>(num_rows),
+          static_cast<long long>(embedding_dim),
+          update_stats.tag_ns / 1e6,
+          update_stats.batch_get_ns / 1e6,
+          update_stats.index_lookup_ns / 1e6,
+          update_stats.store_read_ns / 1e6,
+          update_stats.writeback_ns / 1e6,
+          update_stats.missing_write_ns / 1e6,
+          update_stats.missing_alloc_ns / 1e6,
+          update_stats.missing_index_ns / 1e6,
+          update_stats.missing_track_ns / 1e6,
+          static_cast<unsigned long long>(update_stats.missing_rows),
+          total_ms);
+    }
     recstore::ReportLocalShmStageMetric(
         "sgd_update_direct_us",
         recstore::LocalShmElapsedUs(direct_update_start));
@@ -289,6 +327,21 @@ void SGD::UpdateFlat(
       "sgd_update_apply_us", recstore::LocalShmElapsedUs(apply_start));
   recstore::ReportLocalShmStageMetric(
       "sgd_update_missing_rows", static_cast<double>(missing_rows));
+  if (profile) {
+    const double total_ms =
+        recstore::LocalShmElapsedUs(direct_update_start) / 1000.0;
+    std::fprintf(
+        stderr,
+        "component=sparse_commit event=sgd_apply_phase path=fallback "
+        "table=%s tid=%u rows=%lld dim=%lld stage_breakdown=unavailable "
+        "missing_rows=%lld total_ms=%.6f\n",
+        table.c_str(),
+        tid,
+        static_cast<long long>(num_rows),
+        static_cast<long long>(embedding_dim),
+        static_cast<long long>(missing_rows),
+        total_ms);
+  }
 }
 
 int AdaGrad::Init(const std::vector<std::string> table_name,
