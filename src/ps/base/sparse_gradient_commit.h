@@ -54,6 +54,32 @@ inline bool SparseCommitReserveEnabled() {
   return enabled;
 }
 
+// Only exact binary reciprocals are eligible; arbitrary divisors retain division.
+inline bool SparseCommitPow2ScaleEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("RECSTORE_SPARSE_COMMIT_POW2_SCALE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
+inline void ScaleSparseGradientSums(std::vector<float>& values,
+                                    uint32_t divisor,
+                                    bool exact_pow2) {
+  if (divisor == 1)
+    return;
+  if (exact_pow2 && divisor != 0 && (divisor & (divisor - 1)) == 0) {
+    // Valid power-of-two divisors are <= 2^16; the divisor and reciprocal
+    // are exact normal FP32 values. Keep this rounding separate from SGD.
+    const float scale = 1.0f / static_cast<float>(divisor);
+    for (auto& value : values)
+      value *= scale;
+  } else {
+    for (auto& value : values)
+      value /= divisor;
+  }
+}
+
 inline uint64_t SparseCommitProfileNowNs() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -392,8 +418,7 @@ public:
       }
     }
     if (h.divisor != 1)
-      for (auto& value : grads)
-        value /= h.divisor;
+      ScaleSparseGradientSums(grads, h.divisor, SparseCommitPow2ScaleEnabled());
     const auto aggregated = profile ? SparseCommitProfileNowNs() : 0;
     try {
       if (!keys.empty())

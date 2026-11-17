@@ -896,3 +896,145 @@ TEST(OwnerMergedPlan, AcceptsUnequalFeatureTotalsAndRejectsMalformedInputs) {
           0),
       std::invalid_argument);
 }
+
+#if defined(__SSE2__)
+#include <xmmintrin.h>
+#include <array>
+#include <iomanip>
+
+namespace {
+struct ScaleMxcsrGuard {
+  unsigned previous = _mm_getcsr();
+  ~ScaleMxcsrGuard() { _mm_setcsr(previous); }
+};
+
+// Force the actual SSE division instruction, independent of compiler algebra.
+void ScaleDivInstructionOracle(std::vector<float>& values, uint32_t divisor) {
+  if (divisor == 1)
+    return;
+  const __m128 denominator = _mm_set1_ps(static_cast<float>(divisor));
+  size_t at = 0;
+  for (; at + 4 <= values.size(); at += 4) {
+    __m128 input = _mm_loadu_ps(values.data() + at);
+    asm volatile("divps %1, %0" : "+x"(input) : "x"(denominator) : "memory");
+    _mm_storeu_ps(values.data() + at, input);
+  }
+  for (; at < values.size(); ++at) {
+    __m128 input = _mm_load_ss(values.data() + at);
+    asm volatile("divss %1, %0" : "+x"(input) : "x"(denominator) : "memory");
+    _mm_store_ss(values.data() + at, input);
+  }
+}
+
+#if defined(__GNUC__)
+__attribute__((noinline, noclone))
+#endif
+void ScaleCandidateForTest(std::vector<float>& values, uint32_t divisor, bool enabled) {
+  recstore::ScaleSparseGradientSums(values, divisor, enabled);
+}
+
+std::vector<float> ScaleBoundaryValues() {
+  std::vector<uint32_t> words = {
+      0x7f800001u, 0xffc12345u, 0x80000000u, 0, 0x80000000u, 1, 2, 3, 0x007ffffeu, 0x007fffffu,
+      0x00800000u, 0x00800001u, 0x00ffffffu, 0x01000000u,
+      0x7f7fffffu, 0xff7fffffu, 0x7f800000u, 0xff800000u,
+      0x7fc00000u, 0xffc00000u, 0x7fc12345u, 0xffc12345u,
+      0x7f800001u, 0xff800001u, 0x7fbfffffu, 0xffbfffffu};
+  // Every exponent, both signs, and low/high/tie-adjacent significand bits.
+  for (uint32_t exponent = 0; exponent < 255; ++exponent) {
+    for (uint32_t mantissa : {0u, 1u, 2u, 3u, 0x3fffffu, 0x400000u, 0x7ffffeu, 0x7fffffu}) {
+      for (uint32_t sign : {0u, 0x80000000u})
+        words.push_back(sign | (exponent << 23) | mantissa);
+    }
+  }
+  uint32_t random = 0x6d2b79f5u;
+  for (int i = 0; i < 4096; ++i) {
+    random = random * 1664525u + 1013904223u;
+    words.push_back(random);
+  }
+  std::vector<float> values(words.size());
+  std::memcpy(values.data(), words.data(), words.size() * sizeof(uint32_t));
+  return values;
+}
+} // namespace
+
+TEST(SparseGradientCommit, Pow2ScaleMatchesSseDivisionBitsAndStatus) {
+  ScaleMxcsrGuard guard;
+  const auto input = ScaleBoundaryValues();
+  // Mask traps but check all six sticky exception flags. Restore full MXCSR.
+  for (unsigned rounding : {0u, 0x2000u, 0x4000u, 0x6000u}) {
+    for (unsigned denormals : {0u, 0x0040u, 0x8000u, 0x8040u}) {
+      const unsigned control = 0x1f80u | rounding | denormals;
+      std::vector<uint32_t> divisors{1, 3, 5, 65535};
+      for (unsigned power = 1; power <= 16; ++power)
+        divisors.push_back(uint32_t{1} << power);
+      for (uint32_t divisor : divisors) {
+        SCOPED_TRACE(::testing::Message() << "mxcsr=" << std::hex << control
+                                         << " divisor=" << std::dec << divisor);
+        for (size_t length : {size_t{0}, size_t{1}, size_t{3}, input.size()}) {
+          auto expected = std::vector<float>(input.begin(), input.begin() + length);
+          auto actual = expected;
+          _mm_setcsr(control);
+          ScaleDivInstructionOracle(expected, divisor);
+          const auto expected_status = _mm_getcsr() & 0x3fu;
+          _mm_setcsr(control);
+          ScaleCandidateForTest(actual, divisor, true);
+          const auto actual_status = _mm_getcsr() & 0x3fu;
+          EXPECT_EQ(actual_status, expected_status);
+          ASSERT_EQ(actual.size(), expected.size());
+          for (size_t i = 0; i < actual.size(); ++i) {
+            uint32_t got, want;
+            std::memcpy(&got, &actual[i], 4);
+            std::memcpy(&want, &expected[i], 4);
+            ASSERT_EQ(got, want) << "index=" << i << " length=" << length;
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(SparseGradientCommit, Pow2ScaleProtocolPreservesFixedRankChunkReduction) {
+  ScaleMxcsrGuard guard;
+  _mm_setcsr(0x1f80u);
+  for (uint32_t world : {1u, 2u, 3u, 4u, 8u, 16u}) {
+    SparseGradientCommitCoordinator coordinator;
+    SparseGradientCommitHeader h;
+    h.session = 900 + world;
+    h.world = world;
+    h.divisor = world;
+    h.dim = 19; // Vector loop plus scalar tail.
+    h.rows = 1;
+    h.chunks = 2;
+    const uint64_t key = 77;
+    std::vector<float> expected(h.dim, 0.0f);
+    std::vector<std::string> packets;
+    for (h.rank = 0; h.rank < world; ++h.rank) {
+      for (h.chunk = 0; h.chunk < 2; ++h.chunk) {
+        std::vector<float> contribution(h.dim);
+        for (size_t i = 0; i < contribution.size(); ++i) {
+          const float finite[] = {1.0e20f, -1.0e20f, 3.0f, 0x1p-24f,
+                                  -0.0f, 0.0f, 0x1p-126f, 0x1p-149f};
+          contribution[i] = finite[(i + h.rank * 2 + h.chunk) % 8];
+          __m128 sum = _mm_load_ss(&expected[i]);
+          const __m128 value = _mm_load_ss(&contribution[i]);
+          asm volatile("addss %1, %0" : "+x"(sum) : "x"(value) : "memory");
+          _mm_store_ss(&expected[i], sum);
+        }
+        packets.push_back(PackSparseGradientCommit(h, &key, contribution.data()));
+      }
+    }
+    ScaleDivInstructionOracle(expected, world);
+    int calls = 0;
+    auto apply = [&](const auto& keys, const auto& values) {
+      ++calls;
+      EXPECT_EQ(keys, std::vector<uint64_t>{key});
+      ASSERT_EQ(values.size(), expected.size());
+      EXPECT_EQ(std::memcmp(values.data(), expected.data(), values.size() * sizeof(float)), 0);
+    };
+    for (auto it = packets.rbegin(); it != packets.rend(); ++it)
+      coordinator.Exchange("scale", *it, apply);
+    EXPECT_EQ(calls, 1);
+  }
+}
+#endif

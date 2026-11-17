@@ -21,6 +21,8 @@ GPU tickets construct integer IDs and stable segment plans on CUDA, then return 
 
 `RECSTORE_SPARSE_COMMIT_RESERVE` controls the server's gradient aggregation preallocation and defaults on. Set it to `0` in each PS process for its allocation ablation.
 
+`RECSTORE_SPARSE_COMMIT_POW2_SCALE=1` enables exact binary reciprocal scaling for power-of-two world divisors in each PS process. Rank/chunk addition order and the separate SGD pass stay unchanged; other divisors retain division. This defaults off. Validate numerical equality and full-loop throughput independently, since faster normalization alone does not establish an end-to-end gain.
+
 Set `RECSTORE_SGD_ROW_PREFETCH=1` in each PS process to prefetch upcoming direct DRAM rows during sparse SGD. The update loop looks eight rows ahead and hints up to 512 bytes per row, while preserving row order and floating-point operations. This option defaults off and skips missing rows; its benefit depends on the working set, so compare full-loop throughput with the same option disabled.
 
 ## Size the PS index independently of the model
