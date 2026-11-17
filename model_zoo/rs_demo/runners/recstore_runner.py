@@ -42,7 +42,7 @@ from python.pytorch.recstore.analysis.profiler import (
     ProfilerConfig,
     build_torchrec_profiler,
 )
-from ..runtime.timing import StepTimer
+from ..runtime.timing import FullLoopTimer, StepTimer
 from ..runtime.continuous_loop import ContinuousLoop, continuous_enabled, verify_continuous_protocol
 from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
@@ -809,6 +809,13 @@ class RecStoreRunner(BenchmarkRunner):
             if continuous_mode:
                 continuous = ContinuousLoop(torch, device, cfg.steps)
                 continuous.start()
+            full_loop = None
+            if os.environ.get("RECSTORE_FULL_LOOP_TIMING") == "1":
+                if continuous_mode:
+                    raise ValueError("Full-loop timing cannot combine with continuous mode")
+                full_loop = FullLoopTimer(torch, device, lambda: _barrier_for_step_alignment(
+                    dist=dist, device=device, local_rank=local_rank, use_dist=use_dist))
+                full_loop.start()
             for step in step_iter:
                 step_wall_start = time.perf_counter()
                 backpressure_ms = continuous.admit(step) if continuous is not None else 0.0
@@ -1067,6 +1074,15 @@ class RecStoreRunner(BenchmarkRunner):
                 else:
                     rows[-1]["host_step_enqueue_wall_ms"] = (time.perf_counter() - step_wall_start) * 1e3
 
+            if full_loop is not None:
+                # The final step has already waited for the authoritative PS ACK.
+                summary = full_loop.finish(rows, cfg.steps)
+                summary.update(rank=rank, backend="recstore", world_size=world_size,
+                               configured_warmup_steps=cfg.warmup_steps, run_id=cfg.run_id)
+                lifecycle["training_loop"] = summary
+                loop_path = Path(cfg.output_root) / "outputs" / cfg.run_id / f"training_loop_rank{rank}.json"
+                loop_path.parent.mkdir(parents=True, exist_ok=True)
+                loop_path.write_text(json.dumps(summary, indent=2) + "\n")
             if continuous is not None:
                 loop_summary = continuous.finish(rows, lambda: _barrier_for_step_alignment(
                     dist=dist, device=device, local_rank=local_rank, use_dist=use_dist))

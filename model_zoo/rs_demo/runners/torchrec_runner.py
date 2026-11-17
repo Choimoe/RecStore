@@ -27,7 +27,7 @@ from ..models.utils import (
     run_hybrid_backward,
 )
 from python.pytorch.recstore.benchmark.report import finalize_torchrec_row
-from ..runtime.timing import StepTimer
+from ..runtime.timing import FullLoopTimer, StepTimer
 from ..runtime.continuous_loop import ContinuousLoop, continuous_enabled, verify_continuous_protocol
 from ..runtime.worker_common import (
     barrier_for_step_alignment as _barrier_for_step_alignment,
@@ -454,6 +454,13 @@ def _run_single_or_dist_worker(
     rows: list[dict[str, Any]] = []
     is_trainer_rank = (not fair_remote_mode) or rank == 0
     continuous = ContinuousLoop(torch, device, cfg.steps) if continuous_mode else None
+    full_loop = None
+    if os.environ.get("RECSTORE_FULL_LOOP_TIMING") == "1":
+        if continuous_mode:
+            raise ValueError("Full-loop timing cannot combine with continuous mode")
+        full_loop = FullLoopTimer(torch, device, lambda: _barrier_for_step_alignment(
+            dist=dist, device=device, local_rank=local_rank, use_dist=use_dist))
+        full_loop.start()
     with profiler_context, continuous or nullcontext():
         for step in range(cfg.steps):
             step_start = time.perf_counter() if continuous is not None else None
@@ -622,6 +629,14 @@ def _run_single_or_dist_worker(
                 rows[-1]["step_wall_ms"] = (time.perf_counter() - step_start) * 1e3
             else:
                 rows[-1]["host_step_enqueue_wall_ms"] = (time.perf_counter() - step_start) * 1e3
+        if full_loop is not None:
+            summary = full_loop.finish(rows, cfg.steps)
+            summary.update(rank=rank, backend="torchrec", world_size=world_size,
+                           configured_warmup_steps=cfg.warmup_steps, run_id=cfg.run_id)
+            lifecycle["training_loop"] = summary
+            loop_path = Path(cfg.output_root) / "outputs" / cfg.run_id / f"training_loop_rank{rank}.json"
+            loop_path.parent.mkdir(parents=True, exist_ok=True)
+            loop_path.write_text(json.dumps(summary, indent=2) + "\n")
         if continuous is not None:
             loop_summary = continuous.finish(rows, lambda: _barrier_for_step_alignment(
                 dist=dist, device=device, local_rank=local_rank, use_dist=use_dist))

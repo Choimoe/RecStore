@@ -21,6 +21,53 @@ def stage_timer(row: dict[str, Any], key: str):
 _VALID_MODES = ("stage", "step", "none")
 
 
+class FullLoopTimer:
+    """Measure a successful training loop without changing its step protocol."""
+
+    def __init__(self, torch, device, barrier):
+        self._torch, self._device, self._barrier = torch, device, barrier
+        self._start = None
+        self._finished = False
+
+    def _synchronize(self):
+        self._barrier()
+        if self._device.type == "cuda":
+            self._torch.cuda.synchronize(self._device)
+
+    def start(self):
+        if self._start is not None:
+            raise RuntimeError("Full-loop timer started twice")
+        self._synchronize()
+        self._start = time.perf_counter()
+
+    def finish(self, rows, expected_steps):
+        """Finish after the caller has waited for its final training update."""
+        # Call only on the success path: errors must not add a collective that
+        # healthy peers will never enter. Validate before the final barrier.
+        if self._start is None or self._finished:
+            raise RuntimeError("Full-loop timer is not running")
+        if len(rows) != expected_steps or any(int(row["step"]) != step for step, row in enumerate(rows)):
+            raise RuntimeError("Full-loop timer requires every requested step")
+        samples = sum(int(row["batch_size"]) for row in rows)
+        drain_start = time.perf_counter()
+        self._synchronize()
+        stop = time.perf_counter()
+        self._finished = True
+        return {
+            "status": "complete", "timing_protocol": "full_training_loop_all_steps",
+            "elapsed_ms": (stop - self._start) * 1e3,
+            "final_drain_ms": (stop - drain_start) * 1e3,
+            "steps": expected_steps, "local_samples": samples,
+            "warmup_steps_excluded": 0,
+            "final_training_drain_complete": True,
+            "final_barrier_complete": True,
+            "final_device_drain_complete": True,
+            "includes": "initial batch consumption/fill, all steps and inter-step work, final training wait, WORLD barrier and device drain",
+            "excludes": "model/graph setup, DataLoader construction and initial iterator setup, state export, session close and object destruction",
+            "aggregation": "sum local_samples / max rank elapsed; no per-step rate averaging",
+        }
+
+
 class StepTimer:
     """Per-stage timing for one training step.
 

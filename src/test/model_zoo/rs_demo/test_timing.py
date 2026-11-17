@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from model_zoo.rs_demo.runtime.timing import StepTimer
+from model_zoo.rs_demo.runtime.timing import FullLoopTimer, StepTimer
 
 
 def _make_cuda_torch():
@@ -100,6 +100,40 @@ class TestStepTimerModes(unittest.TestCase):
             pass
         # stage mode on CUDA creates 2 events (start + end).
         self.assertEqual(torch_mock.cuda.Event.call_count, 2)
+
+
+class TestFullLoopTimer(unittest.TestCase):
+    def test_counts_tail_and_includes_commit_and_final_device_drain(self):
+        now = [0.0]
+        events = []
+        def advance(name, seconds):
+            events.append(name)
+            now[0] += seconds
+        torch_mock = _make_cuda_torch()
+        torch_mock.cuda.synchronize.side_effect = lambda device: advance("cuda", 3)
+        timer = FullLoopTimer(torch_mock, _make_cuda_device(), lambda: advance("barrier", 2))
+        with mock.patch("model_zoo.rs_demo.runtime.timing.time.perf_counter", side_effect=lambda: now[0]):
+            timer.start()  # The initial five seconds are setup, outside timing.
+            advance("initial_fill", 7)
+            advance("training", 11)
+            advance("ps_ack", 13)  # The runner waits inside its final step.
+            result = timer.finish([{"step": 0, "batch_size": 4}, {"step": 1, "batch_size": 1}], 2)
+        self.assertEqual(events, ["barrier", "cuda", "initial_fill", "training", "ps_ack", "barrier", "cuda"])
+        self.assertEqual(result["elapsed_ms"], 36000)
+        self.assertEqual(result["final_drain_ms"], 5000)
+        self.assertEqual(result["local_samples"], 5)
+        self.assertEqual(result["warmup_steps_excluded"], 0)
+
+    def test_incomplete_or_unordered_steps_never_add_final_collective(self):
+        for rows in ([], [{"step": 1, "batch_size": 1}]):
+            with self.subTest(rows=rows):
+                barrier = mock.Mock()
+                timer = FullLoopTimer(_make_cuda_torch(), _make_cuda_device(), barrier)
+                timer.start()
+                barrier.reset_mock()
+                with self.assertRaises(RuntimeError):
+                    timer.finish(rows, 1)
+                barrier.assert_not_called()
 
 
 if __name__ == "__main__":
