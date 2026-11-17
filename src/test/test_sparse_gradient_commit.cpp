@@ -114,17 +114,28 @@ TEST(SparseGradientCommit, ArrivalOrderAndRetriesPreserveAccumulationOrder) {
   SparseGradientCommitHeader h;
   h.session               = 12;
   h.world                 = 2;
-  h.dim                   = 1;
+  h.dim                   = 3;
+  h.divisor               = 2;
   h.rows                  = 1;
   h.chunks                = 2;
   const uint64_t keys[]   = {9, 9, 9, 4};
-  const float gradients[] = {1.0e20f, -1.0e20f, 3.0f, 5.0f};
+  const float gradients[][3] = {
+      {1.0e20f, 1.0f, -0.0f},
+      {-1.0e20f, 0x1p-24f, -0.0f},
+      {3.0f, -1.0f, 0.0f},
+      {5.0f, -0.0f, 0x1p-100f},
+  };
+  const std::array<float, 6> expected_grads = {
+      1.5f, 0.0f, 0.0f, 2.5f, 0.0f, 0x1p-101f};
   const int arrivals[][4] = {{3, 1, 0, 2}, {2, 0, 3, 1}};
   int calls               = 0;
   auto apply              = [&](const auto& actual_keys, const auto& grads) {
     ++calls;
     EXPECT_EQ(actual_keys, std::vector<uint64_t>({9, 4}));
-    EXPECT_EQ(grads, std::vector<float>({3, 5}));
+    ASSERT_EQ(grads.size(), expected_grads.size());
+    EXPECT_EQ(std::memcmp(grads.data(), expected_grads.data(),
+                          expected_grads.size() * sizeof(float)),
+              0);
   };
   for (h.step = 0; h.step < 2; ++h.step) {
     std::vector<std::string> packets;
@@ -132,7 +143,7 @@ TEST(SparseGradientCommit, ArrivalOrderAndRetriesPreserveAccumulationOrder) {
       h.rank  = index / 2;
       h.chunk = index % 2;
       packets.push_back(
-          PackSparseGradientCommit(h, keys + index, gradients + index));
+          PackSparseGradientCommit(h, keys + index, gradients[index]));
     }
     for (int received = 0; received < 4; ++received) {
       const auto& packet  = packets[arrivals[h.step][received]];

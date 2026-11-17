@@ -45,6 +45,15 @@ inline bool SparseCommitProfileEnabled() {
   return enabled;
 }
 
+// Set to 0 before process startup to measure the allocation-only ablation.
+inline bool SparseCommitReserveEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("RECSTORE_SPARSE_COMMIT_RESERVE");
+    return value == nullptr || std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
 inline uint64_t SparseCommitProfileNowNs() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -342,6 +351,23 @@ public:
     std::vector<uint64_t> keys;
     std::vector<float> grads;
     std::unordered_map<uint64_t, size_t> positions;
+    if (SparseCommitReserveEnabled()) {
+      const size_t max_rows =
+          std::min({keys.max_size(), positions.max_size(),
+                    grads.max_size() / h.dim});
+      size_t input_rows = 0;
+      for (const auto& rank : state.ranks) {
+        for (const auto& chunk : rank) {
+          const size_t rows = DecodeSparseGradientCommit(chunk).rows;
+          if (rows > max_rows - input_rows)
+            throw std::length_error("Sparse gradient aggregate exceeds capacity");
+          input_rows += rows;
+        }
+      }
+      keys.reserve(input_rows);
+      grads.reserve(input_rows * h.dim);
+      positions.reserve(input_rows);
+    }
     // Fixed rank/chunk order makes network arrival order irrelevant.
     for (const auto& rank : state.ranks) {
       for (const auto& chunk : rank) {
