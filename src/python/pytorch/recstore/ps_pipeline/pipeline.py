@@ -24,6 +24,14 @@ class _DeviceSplitRows(NamedTuple):
     row_count: int
 
 
+class _SegmentPlan(NamedTuple):
+    step: int
+    ids: torch.Tensor
+    permutation: torch.Tensor
+    offsets: torch.Tensor
+    sources: tuple | None = None
+
+
 @dataclass
 class _MetadataTransfer:
     step: int
@@ -81,6 +89,18 @@ class PSPipeline:
                     or max_batch_size < 1 or not self._keys):
                 raise ValueError("NCCL metadata requires a positive explicit max_batch_size")
             self._metadata_capacity = max_batch_size * len(self._keys)
+        self._segment_reduce = (os.environ.get("RECSTORE_PS_SEGMENT_REDUCE") == "1"
+                                and self.device.type == "cuda" and self.embedding_dim >= 2
+                                and not self.owner_merged_grad
+                                and callable(getattr(torch, "segment_reduce", None)))
+        self._gpu_ticket = (os.environ.get("RECSTORE_PS_GPU_TICKET") == "1"
+                            and self._segment_reduce)
+        self._gpu_ticket_thread = get_ident()
+        # Blocking initialization makes the immutable offsets ready on any stream.
+        self._gpu_ticket_offsets = (self._offsets.to(self.device, non_blocking=False)
+                                    if self._gpu_ticket else None)
+        self._segment_plans = {}
+        self._current_segment_plan = None
         self._device_merge = os.environ.get("RECSTORE_PS_DEVICE_MERGE") == "1"
         if self._device_merge and not (self.dependency_split and self.device.type == "cuda"):
             raise ValueError("Device row merge requires dependency-split CUDA PS")
@@ -398,19 +418,81 @@ class PSPipeline:
 
     def _build_cpu_ticket(self, step, sparse_features, sparse_batch):
         """Pure ticket construction; no read, collective, or preparation counters."""
-        del step
         start = time.perf_counter()
         raw = (self._raw_sparse_ids(sparse_features, sparse_batch)
-               + self._offsets[:, None]).reshape(-1)
-        ids, inverse = torch.unique(raw, return_inverse=True)
+               + self._offsets[:, None])
+        plan = None
+        if self._segment_reduce:
+            # Stable sample-major order matches deterministic CUDA index_add,
+            # including shared ID namespaces across features.
+            sample_ids = raw.t().contiguous().numpy().reshape(-1)
+            permutation = np.argsort(sample_ids, kind="stable")
+            sorted_ids = sample_ids[permutation]
+            first = np.empty(sorted_ids.size, dtype=np.bool_)
+            first[:1] = True
+            first[1:] = sorted_ids[1:] != sorted_ids[:-1]
+            starts = np.flatnonzero(first)
+            ids = torch.from_numpy(sorted_ids[starts])
+            inverse_sample = np.empty(sample_ids.size, dtype=np.int64)
+            inverse_sample[permutation] = np.cumsum(first, dtype=np.int64) - 1
+            inverse = torch.from_numpy(inverse_sample.reshape(-1, len(self._keys))
+                                       .T.copy().reshape(-1))
+            plan = _SegmentPlan(step, ids, torch.from_numpy(permutation),
+                                torch.from_numpy(np.append(starts, sample_ids.size)))
+        else:
+            ids, inverse = torch.unique(raw.reshape(-1), return_inverse=True)
         ticket = ids, inverse, raw.numel()
-        return ticket, (time.perf_counter() - start) * 1e3
+        return ticket, (time.perf_counter() - start) * 1e3, plan
 
-    def _adopt_cpu_ticket(self, step, ticket, row, build_ms):
+    def _build_gpu_ticket(self, step, sparse_features, sparse_batch):
+        """Plan integer metadata on the training stream and return ready CPU tensors."""
+        if get_ident() != self._gpu_ticket_thread:
+            raise RuntimeError("GPU tickets must be built on the pipeline's training thread")
+        start = time.perf_counter()
+        raw = self._raw_sparse_ids(sparse_features, sparse_batch)
+        pinned = raw.t().contiguous().pin_memory()
+        stream = torch.cuda.current_stream(self.device)
+        ready = torch.cuda.Event()
+        try:
+            sample_ids = (pinned.to(self.device, non_blocking=True)
+                          + self._gpu_ticket_offsets).reshape(-1)
+            sorted_ids, permutation = torch.sort(sample_ids, stable=True)
+            ids, sorted_inverse, counts = torch.unique_consecutive(
+                sorted_ids, return_inverse=True, return_counts=True)
+            inverse_sample = torch.empty_like(sorted_inverse)
+            inverse_sample.scatter_(0, permutation, sorted_inverse)
+            inverse = inverse_sample.reshape(-1, len(self._keys)).T.contiguous().reshape(-1)
+            offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+            outputs = []
+            for tensor in (ids, inverse, permutation, offsets):
+                host = torch.empty(tensor.shape, dtype=torch.int64, pin_memory=True)
+                host.copy_(tensor, non_blocking=True)
+                outputs.append(host)
+            ready.record(stream)
+            ready.synchronize()
+        except BaseException as error:
+            # Keep pinned inputs/outputs alive while draining partial copies.
+            try:
+                stream.synchronize()
+            except BaseException as cleanup:
+                if hasattr(error, "add_note"):
+                    error.add_note("GPU ticket stream drain also failed: " + repr(cleanup))
+            raise
+        host_ids, host_inverse, host_permutation, host_offsets = outputs
+        plan = _SegmentPlan(step, host_ids, host_permutation, host_offsets)
+        return ((host_ids, host_inverse, raw.numel()),
+                (time.perf_counter() - start) * 1e3, plan)
+
+    def _adopt_cpu_ticket(self, step, ticket, row, build_ms, plan=None):
         self._check_prepared_step(step)
         if self._metadata_nccl and ticket[2] > self._metadata_capacity:
             raise ValueError("NCCL metadata batch exceeds max_batch_size")
+        if plan is not None and (step in self._segment_plans or
+                len(self._segment_plans) + (self._current_segment_plan is not None) >= 2):
+            raise RuntimeError("PS pipeline retains only current and next segment plans")
         self._queue_prepared_read(step, ticket[0])
+        if plan is not None:
+            self._segment_plans[step] = plan
         self._prepared += 1
         row["lookup_ids_build_ms"] = build_ms
         return ticket
@@ -418,8 +500,10 @@ class PSPipeline:
     def on_batch_prepared(self, step, sparse_features, sparse_batch, row):
         self._check_prepared_step(step)
         start = time.perf_counter()
-        ticket, build_ms = self._build_cpu_ticket(step, sparse_features, sparse_batch)
-        result = self._adopt_cpu_ticket(step, ticket, row, build_ms)
+        build_ticket = self._build_gpu_ticket if self._gpu_ticket else self._build_cpu_ticket
+        ticket, build_ms, plan = build_ticket(step, sparse_features, sparse_batch)
+        result = self._adopt_cpu_ticket(step, ticket, row, build_ms, plan)
+        row["ps_pipeline_gpu_ticket"] = int(self._gpu_ticket)
         row["lookup_ids_build_ms"] = (time.perf_counter() - start) * 1e3
         return result
 
@@ -477,6 +561,10 @@ class PSPipeline:
         del sparse_features
         if self._read is None or step != self._current_step + 1:
             raise RuntimeError("PS pipeline consumed an unprepared or unordered batch")
+        plan = self._segment_plans.get(step)
+        if self._current_segment_plan is not None or (plan is not None and
+                (plan.step != step or plan.ids is not ticket[0])):
+            raise RuntimeError("PS pipeline segment plan does not match the consumed batch")
         start = time.perf_counter()
         result = self._read.result()
         if self._metadata_nccl:
@@ -514,6 +602,15 @@ class PSPipeline:
             inverse = inverse.pin_memory()
         self._current_inverse_cpu = inverse
         self._current_inverse = inverse.to(self.device, non_blocking=True)
+        if plan is not None:
+            sources = (plan.permutation, plan.offsets)
+            if self.device.type == "cuda":
+                sources = tuple(source.pin_memory() for source in sources)
+            self._current_segment_plan = plan._replace(
+                permutation=sources[0].to(self.device, non_blocking=True),
+                offsets=sources[1].to(self.device, non_blocking=True), sources=sources)
+            del self._segment_plans[step]
+        row["ps_pipeline_segment_reduce"] = 0
         self._stage_rows(step, ticket, values, row_count, row)
         self._current_step = step
         self._current_ticket = ticket
@@ -566,7 +663,10 @@ class PSPipeline:
                 and grads.dtype == torch.float32)
 
     def _release_step(self, step):
-        del step
+        if self._current_segment_plan is not None:
+            if self._current_segment_plan.step != step:
+                raise RuntimeError("PS pipeline released the wrong segment plan")
+            self._current_segment_plan = None
 
     def _track_commit(self, handle):
         # Native acceptance precedes Python scheduling, which can still fail.
@@ -691,12 +791,15 @@ class PSPipeline:
                         error = exc
                 self._metadata_group = None
             self._metadata.clear()
+            self._segment_plans.clear()
+            self._current_segment_plan = None
             self._current_metrics = None
             self._split_clean = self._consumed_read = None
             self._closed = True
             self._read = self._commit = self._current_rows = self._current_ticket = None
             self._pending_read_ids = None
             self._current_inverse_cpu = self._current_inverse = None
+            self._gpu_ticket_offsets = None
         if error is not None:
             raise error
 
@@ -724,6 +827,15 @@ class PSPipelineSGD:
                 or grad.size(0) * features != raw_count or grad.dtype != torch.float32
                 or grad.device != self.pipeline._current_inverse.device):
             raise ValueError("PS pipeline pooled gradient does not match the prepared batch")
+        plan = self.pipeline._current_segment_plan
+        if plan is not None and (plan.step != self.pipeline._current_step or plan.ids is not ids):
+            raise RuntimeError("PS pipeline segment plan does not match the gradient batch")
+        if (self.pipeline._segment_reduce and plan is not None
+                and grad.device.type == "cuda" and grad.size(2) >= 2):
+            ordered = grad.reshape(-1, grad.size(2)).index_select(0, plan.permutation)
+            self._grads = torch.segment_reduce(ordered, "sum", offsets=plan.offsets, unsafe=True)
+            self.pipeline._current_metrics["ps_pipeline_segment_reduce"] = 1
+            return
         rows = self.pipeline._current_inverse
         self._grads = torch.zeros((ids.numel(), grad.size(2)),
                                   dtype=grad.dtype, device=grad.device)
