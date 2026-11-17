@@ -21,6 +21,8 @@ GPU tickets construct integer IDs and stable segment plans on CUDA, then return 
 
 `RECSTORE_SPARSE_COMMIT_RESERVE` controls the server's gradient aggregation preallocation and defaults on. Set it to `0` in each PS process for its allocation ablation.
 
+Set `RECSTORE_SGD_ROW_PREFETCH=1` in each PS process to prefetch upcoming direct DRAM rows during sparse SGD. The update loop looks eight rows ahead and hints up to 512 bytes per row, while preserving row order and floating-point operations. This option defaults off and skips missing rows; its benefit depends on the working set, so compare full-loop throughput with the same option disabled.
+
 ## Size the PS index independently of the model
 
 `cache_ps.base_kv_config.capacity` sizes the index. Choose it from the complete key population, including optimizer namespaces and expected growth, and verify the most populated shard. Keep model cardinalities, initialized rows, and the value allocator unchanged when testing index capacity. A cap on each feature's cardinality is different from the sum of all feature cardinalities.

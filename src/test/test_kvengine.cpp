@@ -734,6 +734,145 @@ TEST(KVEngineFlatReadTest, DramRowsSupportDirectFixedSlices) {
   std::filesystem::remove_all(value_path);
 }
 
+TEST(KVEngineFlatUpdateTest, PrefetchPreservesSequentialBits) {
+  constexpr uint8_t kTag = 7;
+  constexpr float kLearningRate = 0.1f;
+  const uint32_t patterns[] = {0x00000000, 0x80000000, 0x3f800000, 0xbf800000,
+                               0x4b800000, 0xcb800000, 0x33800000, 0x80800000};
+  const std::vector<uint64_t> order = {
+      1, 2, 3, 4, 5, 1, 2, 6, 7, 8, 9, 10, 11, 12, 13, 13, 14,
+      15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30};
+  const auto raw_key = [](uint64_t key) { return (uint64_t{1} << 30) + key; };
+  const auto tagged_key = [&](uint64_t key) {
+    return (static_cast<uint64_t>(kTag) << 56) | raw_key(key);
+  };
+  std::string snapshot_hex;
+  constexpr char kHex[] = "0123456789abcdef";
+  struct BackendGuard {
+    base::PMMmapRegisterCenter::Backend previous =
+        base::PMMmapRegisterCenter::GetConfig().backend;
+    ~BackendGuard() {
+      base::PMMmapRegisterCenter::GetConfig().backend = previous;
+    }
+  } backend_guard;
+  base::PMMmapRegisterCenter::GetConfig().backend =
+      base::PMMmapRegisterCenter::Backend::kAnonymousDram;
+
+  for (const int64_t dim : {32, 128, 129}) {
+    SCOPED_TRACE(::testing::Message() << "dim=" << dim);
+    const std::string path = "/dev/shm/test_sgd_prefetch_" +
+        std::to_string(getpid()) + "_" + std::to_string(dim);
+    struct PathGuard {
+      std::filesystem::path path;
+      ~PathGuard() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+      }
+    } path_guard{path};
+    std::filesystem::create_directories(path);
+    BaseKVConfig config;
+    config.num_threads_ = 1;
+    config.json_config_ = {
+        {"engine_type", "KVEngineComposite"}, {"capacity", 128},
+        {"index", {{"type", "DRAM_PET_HASH"}}},
+        {"value", {{"type", "DRAM_VALUE_STORE"}, {"path", path},
+                   {"default_value_size_hint", dim * sizeof(float)},
+                   {"dram_allocator", {{"type", "CONCURRENT_SLAB_MEMORY_POOL"},
+                                       {"capacity_bytes", 64ULL << 20}}}}}};
+    const auto resolved = base::ResolveEngine(config);
+    std::unique_ptr<BaseKV> engine(
+        base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
+            resolved.engine, resolved.cfg));
+    ASSERT_NE(engine, nullptr);
+    std::unordered_map<uint64_t, std::vector<float>> expected;
+    for (uint64_t key = 1; key <= 12; ++key) {
+      auto& value = expected[key];
+      value.resize(static_cast<size_t>(dim));
+      for (int64_t c = 0; c < dim; ++c) {
+        const uint32_t bits = patterns[(key + c) % 8];
+        std::memcpy(&value[static_cast<size_t>(c)], &bits, sizeof(bits));
+      }
+      engine->Put(tagged_key(key),
+                  std::string_view(reinterpret_cast<const char*>(value.data()),
+                                   value.size() * sizeof(float)), 0);
+    }
+    const std::vector<float> sentinel(static_cast<size_t>(dim), 3.25f);
+    const std::string sentinel_bytes(reinterpret_cast<const char*>(sentinel.data()),
+                                     sentinel.size() * sizeof(float));
+    engine->Put(raw_key(1), sentinel_bytes, 0);
+
+    size_t step = 0;
+    for (const size_t count : {17, 17, 0, 1, 7, 8, 9, 33, 33}) {
+      SCOPED_TRACE(::testing::Message() << "step=" << step << " rows=" << count);
+      std::vector<uint64_t> keys(count), tagged(count);
+      std::vector<bool> missing(count);
+      uint64_t expected_missing = 0;
+      for (size_t r = 0; r < count; ++r) {
+        keys[r] = raw_key(order[r]);
+        tagged[r] = tagged_key(order[r]);
+        missing[r] = expected.count(order[r]) == 0;
+        expected_missing += missing[r];
+      }
+      std::vector<float> grads(count == 0 ? 1 : count * dim);
+      for (size_t i = 0; i < grads.size(); ++i) {
+        const uint32_t bits = patterns[(i + step * 3) % 8];
+        std::memcpy(&grads[i], &bits, sizeof(bits));
+      }
+      if (count > 0) {
+        std::vector<BaseKV::DirectFixedRow> direct;
+        ASSERT_TRUE(engine->BatchGetDirectFixedRows(
+            base::ConstArray<uint64_t>(tagged), count, dim, 0, &direct));
+        ASSERT_EQ(direct.size(), count);
+        for (size_t r = 0; r < count; ++r) {
+          EXPECT_EQ(direct[r].missing, missing[r]);
+          EXPECT_EQ(direct[r].size, dim * sizeof(float));
+        }
+      }
+      // Preserve the pre-existing direct path: missingness is snapshotted for
+      // the entire batch, so repeated initially-missing keys overwrite in order.
+      for (size_t r = 0; r < count; ++r) {
+        auto& row = expected[order[r]];
+        row.resize(static_cast<size_t>(dim));
+        float* value = row.data();
+        const float* grad = grads.data() + r * dim;
+        if (missing[r]) {
+#pragma omp simd
+          for (int64_t c = 0; c < dim; ++c)
+            value[c] = -kLearningRate * grad[c];
+        } else {
+#pragma omp simd
+          for (int64_t c = 0; c < dim; ++c)
+            value[c] -= kLearningRate * grad[c];
+        }
+      }
+      BaseKV::UpdateFlatStats stats;
+      ASSERT_TRUE(engine->ApplySgdUpdateFlat(base::ConstArray<uint64_t>(keys),
+          grads.data(), count, dim, kLearningRate, kTag, 0, &stats));
+      EXPECT_EQ(stats.missing_rows, expected_missing);
+      for (uint64_t key = 1; key <= 30; ++key) {
+        const auto found = expected.find(key);
+        if (found == expected.end())
+          continue;
+        std::string actual;
+        engine->Get(tagged_key(key), actual, 0);
+        ASSERT_EQ(actual.size(), static_cast<size_t>(dim) * sizeof(float));
+        EXPECT_EQ(std::memcmp(actual.data(), found->second.data(), actual.size()), 0)
+            << "key=" << key;
+        for (const unsigned char byte : actual) {
+          snapshot_hex.push_back(kHex[byte >> 4]);
+          snapshot_hex.push_back(kHex[byte & 15]);
+        }
+      }
+      std::string actual_sentinel;
+      engine->Get(raw_key(1), actual_sentinel, 0);
+      EXPECT_EQ(actual_sentinel, sentinel_bytes);
+      ++step;
+    }
+  }
+  // XML captures the complete bytes for separate old/default/off/on processes.
+  ::testing::Test::RecordProperty("state_bytes_hex", snapshot_hex);
+}
+
 TEST_P(KVEngineCartesianTest, ApplySgdUpdateFlatUpdatesAndInitializesRows) {
   if (value_type_ != "DRAM_VALUE_STORE") {
     GTEST_SKIP() << "Direct flat SGD update requires DRAM_VALUE_STORE";

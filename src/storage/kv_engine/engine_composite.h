@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -713,8 +714,21 @@ public:
     }
 
     const auto loop_start = clock::now();
+    static const bool prefetch_rows = [] {
+      const char* value = std::getenv("RECSTORE_SGD_ROW_PREFETCH");
+      return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
     std::vector<float> missing_row(static_cast<size_t>(embedding_dim));
     for (int64_t r = 0; r < num_rows; ++r) {
+      if (prefetch_rows && num_rows - r > 8) {
+        const auto& next = rows[static_cast<size_t>(r + 8)];
+        if (!next.missing && next.data != nullptr) {
+          for (size_t offset = 0; offset < std::min(row_bytes, size_t{512});
+               offset += 64) {
+            __builtin_prefetch(next.data + offset, 1, 3);
+          }
+        }
+      }
       const auto& row   = rows[static_cast<size_t>(r)];
       const float* grad = grads + r * embedding_dim;
       if (row.missing) {
