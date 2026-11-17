@@ -5,6 +5,9 @@ import os
 import secrets
 from typing import NamedTuple
 import time
+from collections import deque
+from dataclasses import dataclass
+from threading import get_ident
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -21,11 +24,25 @@ class _DeviceSplitRows(NamedTuple):
     row_count: int
 
 
+@dataclass
+class _MetadataTransfer:
+    step: int
+    count: int
+    start: float
+    host_send: torch.Tensor
+    device_send: torch.Tensor
+    device_recv: torch.Tensor
+    host_recv: torch.Tensor
+    work: object = None
+    ready: object = None
+    future: object = None
+
+
 class PSPipeline:
     """Prepare local IDs, then read the next batch after global SGD commits.
 
     One CPU worker owns commit waits and reads. Dependency splitting uses a
-    separate Gloo worker to identify rows safe to read before the current
+    separate metadata worker to identify rows safe to read before the current
     commit. GPU embedding values belong only to the consumed batch.
     """
 
@@ -35,7 +52,8 @@ class PSPipeline:
 
     def __init__(self, embedding_module, kv_client, *, table_offsets,
                  master_table_name, embedding_dim, device, lr=0.01,
-                 validation_state=False, dependency_split=False, total_steps=None):
+                 validation_state=False, dependency_split=False, total_steps=None,
+                 max_batch_size=None):
         self.embedding_module = embedding_module
         self.kv_client = kv_client
         self.master_table_name = master_table_name
@@ -47,6 +65,22 @@ class PSPipeline:
         self._world = dist.get_world_size() if dist.is_initialized() else 1
         self._rank = dist.get_rank() if dist.is_initialized() else 0
         self.dependency_split = bool(dependency_split)
+        self._metadata_nccl = os.environ.get("RECSTORE_PS_METADATA_NCCL") == "1"
+        self._metadata_capacity = 0
+        self._metadata_transfers = deque()
+        self._metadata_submit_thread = get_ident()
+        if self._metadata_nccl:
+            if (not self.dependency_split or self.device.type != "cuda"
+                    or self.owner_merged_grad or not dist.is_initialized()
+                    or dist.get_backend() != "nccl"):
+                raise ValueError("NCCL metadata requires the base dependency-split CUDA/NCCL pipeline")
+            if any(os.environ.get(name) == "1" for name in
+                   ("RECSTORE_DENSE_REDUCE_OVERLAP", "RECSTORE_PS_PREPARE_DURING_DENSE")):
+                raise ValueError("NCCL metadata cannot interleave with asynchronous dense preparation")
+            if (not isinstance(max_batch_size, int) or isinstance(max_batch_size, bool)
+                    or max_batch_size < 1 or not self._keys):
+                raise ValueError("NCCL metadata requires a positive explicit max_batch_size")
+            self._metadata_capacity = max_batch_size * len(self._keys)
         self._device_merge = os.environ.get("RECSTORE_PS_DEVICE_MERGE") == "1"
         if self._device_merge and not (self.dependency_split and self.device.type == "cuda"):
             raise ValueError("Device row merge requires dependency-split CUDA PS")
@@ -85,7 +119,11 @@ class PSPipeline:
         try:
             if self.dependency_split:
                 start = time.perf_counter()
-                self._metadata_group = dist.new_group(backend="gloo", timeout=timedelta(seconds=60))
+                self._metadata_group = dist.new_group(
+                    backend="nccl" if self._metadata_nccl else "gloo",
+                    timeout=timedelta(seconds=60))
+                if self._metadata_nccl:
+                    self._check_metadata_capacity(max_batch_size)
                 self.metadata_group_init_ms = (time.perf_counter() - start) * 1e3
                 self._metadata_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ps-ids")
             self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ps-pipeline")
@@ -123,6 +161,123 @@ class PSPipeline:
         if self.device.type == "cuda" and not values.is_pinned():
             values = values.pin_memory()
         return values, waited, (time.perf_counter() - start) * 1e3
+
+    def _check_metadata_capacity(self, max_batch_size):
+        # A fixed-size startup handshake rejects different collective shapes.
+        expected = [max_batch_size, len(self._keys), self._total_steps]
+        local = torch.tensor(expected, dtype=torch.int64, device=self.device)
+        peers = [torch.empty_like(local) for _ in range(self._world)]
+        try:
+            work = dist.all_gather(peers, local, group=self._metadata_group, async_op=True)
+            work.wait()  # Main-stream dependency before any subsequent WORLD work.
+            configs = torch.stack(peers).cpu().tolist()
+        except BaseException as error:
+            try:
+                torch.cuda.synchronize(self.device)
+            except BaseException as cleanup:
+                if hasattr(error, "add_note"):
+                    error.add_note("Metadata startup drain also failed: " + repr(cleanup))
+            raise
+        if any(peer != expected for peer in configs):
+            raise ValueError("NCCL metadata capacity/features/step-count mismatch")
+
+    def _reap_metadata_transfers(self, *, require_slot=False):
+        while self._metadata_transfers:
+            oldest = self._metadata_transfers[0]
+            if (oldest.future is None or (not oldest.future.done()
+                    and (not require_slot or len(self._metadata_transfers) < 2))):
+                break
+            oldest.future.result()
+            self._metadata_transfers.popleft()
+
+    def _submit_nccl_dirty_ids(self, step, ids):
+        if get_ident() != self._metadata_submit_thread:
+            raise RuntimeError("NCCL metadata must be submitted on the pipeline's training thread")
+        if self._submission_error is not None:
+            raise self._submission_error
+        try:
+            self._reap_metadata_transfers(require_slot=True)
+            if len(self._metadata_transfers) >= 2:
+                raise RuntimeError("NCCL metadata retains only current and next transfers")
+            if ids.numel() > self._metadata_capacity:
+                raise ValueError("NCCL metadata IDs exceed the configured batch capacity")
+            start = time.perf_counter()
+            width = self._metadata_capacity + 4
+            host_send = torch.zeros(width, dtype=torch.int64, pin_memory=True)
+            host_send[:4].copy_(torch.tensor(
+                [step, ids.numel(), self._total_steps, self._session], dtype=torch.int64))
+            host_send[4:4 + ids.numel()].copy_(ids)
+            transfer = _MetadataTransfer(
+                step, ids.numel(), start, host_send,
+                torch.empty(width, dtype=torch.int64, device=self.device),
+                torch.empty((self._world, width), dtype=torch.int64, device=self.device),
+                torch.empty((self._world, width), dtype=torch.int64, pin_memory=True))
+            # Retain ownership before the first asynchronous operation. This
+            # also covers a later Python executor submission failure.
+            self._metadata_transfers.append(transfer)
+            transfer.device_send.copy_(transfer.host_send, non_blocking=True)
+            transfer.work = dist.all_gather(
+                list(transfer.device_recv.unbind()), transfer.device_send,
+                group=self._metadata_group, async_op=True)
+            # Wait on the calling training stream, not an unrelated side stream:
+            # PyTorch requires this dependency before switching NCCL groups.
+            transfer.work.wait()
+            transfer.host_recv.copy_(transfer.device_recv, non_blocking=True)
+            ready = torch.cuda.Event()
+            ready.record(torch.cuda.current_stream(self.device))
+            transfer.ready = ready
+            transfer.future = self._metadata_worker.submit(self._finish_nccl_dirty_ids, transfer)
+            return transfer.future
+        except BaseException as error:
+            self._submission_error = error
+            raise
+
+    def _finish_nccl_dirty_ids(self, transfer):
+        # No NCCL call or GPU tensor read occurs on this CPU worker.
+        transfer.ready.synchronize()
+        headers = transfer.host_recv[:, :4].tolist()
+        if any(h[0] != transfer.step or h[2] != self._total_steps
+               or h[3] != self._session for h in headers):
+            raise RuntimeError("NCCL dependency metadata step/session mismatch")
+        counts = [h[1] for h in headers]
+        if any(count < 0 or count > self._metadata_capacity for count in counts):
+            raise RuntimeError("Invalid NCCL dependency metadata length")
+        dirty = torch.from_numpy(np.unique(np.concatenate([
+            transfer.host_recv[rank, 4:4 + count].numpy()
+            for rank, count in enumerate(counts)])))
+        peer_bytes = (self._metadata_capacity + 4) * 8 * (self._world - 1)
+        return dirty, {
+            "ps_pipeline_metadata_step": transfer.step,
+            "ps_pipeline_metadata_ms": (time.perf_counter() - transfer.start) * 1e3,
+            "ps_pipeline_metadata_sent_bytes": peer_bytes,
+            "ps_pipeline_metadata_received_bytes": peer_bytes,
+            "ps_pipeline_local_dirty_rows": transfer.count,
+            "ps_pipeline_global_dirty_rows": dirty.numel(),
+        }
+
+    def _drain_metadata_transfers(self):
+        error = None
+        for transfer in self._metadata_transfers:
+            try:
+                if transfer.ready is not None:
+                    transfer.ready.synchronize()
+                else:
+                    # A launch/staging failure can precede event publication.
+                    try:
+                        if transfer.work is not None:
+                            transfer.work.wait()
+                    finally:
+                        torch.cuda.synchronize(self.device)
+                if transfer.future is not None and not transfer.future.cancelled():
+                    transfer.future.result()
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+                elif hasattr(error, "add_note"):
+                    error.add_note("Metadata drain also failed: " + repr(exc))
+        self._metadata_transfers.clear()
+        if error is not None:
+            raise error
 
     def _exchange_dirty_ids(self, step, ids):
         start = time.perf_counter()
@@ -253,6 +408,8 @@ class PSPipeline:
 
     def _adopt_cpu_ticket(self, step, ticket, row, build_ms):
         self._check_prepared_step(step)
+        if self._metadata_nccl and ticket[2] > self._metadata_capacity:
+            raise ValueError("NCCL metadata batch exceeds max_batch_size")
         self._queue_prepared_read(step, ticket[0])
         self._prepared += 1
         row["lookup_ids_build_ms"] = build_ms
@@ -269,7 +426,9 @@ class PSPipeline:
     def _queue_prepared_read(self, step, ids):
         if self.dependency_split:
             if step + 1 < self._total_steps:
-                self._metadata[step] = self._metadata_worker.submit(self._exchange_dirty_ids, step, ids)
+                self._metadata[step] = (self._submit_nccl_dirty_ids(step, ids)
+                                        if self._metadata_nccl else
+                                        self._metadata_worker.submit(self._exchange_dirty_ids, step, ids))
             if step == 0:
                 self._read = self._worker.submit(self._pull, ids, None)
             else:
@@ -320,6 +479,9 @@ class PSPipeline:
             raise RuntimeError("PS pipeline consumed an unprepared or unordered batch")
         start = time.perf_counter()
         result = self._read.result()
+        if self._metadata_nccl:
+            self._reap_metadata_transfers()
+        row["ps_pipeline_metadata_nccl"] = int(self._metadata_nccl)
         if self.dependency_split:
             self._consumed_read = self._read
         values, commit_wait, pull_ms = result[:3]
@@ -514,6 +676,13 @@ class PSPipeline:
             self._worker.shutdown(wait=True, cancel_futures=True)
             if self._metadata_worker is not None:
                 self._metadata_worker.shutdown(wait=True, cancel_futures=True)
+            try:
+                self._drain_metadata_transfers()
+            except BaseException as exc:
+                if error is None and flush:
+                    error = exc
+                elif error is not None and hasattr(error, "add_note"):
+                    error.add_note("Metadata cleanup also failed: " + repr(exc))
             if self._metadata_group is not None:
                 try:
                     dist.destroy_process_group(self._metadata_group)

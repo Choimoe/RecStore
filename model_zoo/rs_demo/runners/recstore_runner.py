@@ -359,6 +359,7 @@ class RecStoreRunner(BenchmarkRunner):
                 embedding_dim=cfg.embedding_dim, device=device,
                 validation_state=cfg.validation_state,
                 dependency_split=cfg.ps_pipeline_dependency_split, total_steps=cfg.steps,
+                max_batch_size=cfg.batch_size,
                 **(owner_options or {}),
             )
             return None, read_path, PSPipelineSGD(embedding_module, read_path), False
