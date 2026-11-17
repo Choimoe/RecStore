@@ -385,42 +385,93 @@ TEST_F(LocalShmPSClientTest, ReleaseSlotDoesNotUseGlobalFreeDoorbell) {
   EXPECT_EQ(control->free_doorbell.load(std::memory_order_acquire), 0u);
 }
 
-TEST_F(LocalShmPSClientTest, PutGetAndUpdateFlatRoundTrip) {
-  const auto config = MakeLocalShmConfig(
-      MakeUniqueRegionName("recstore_local_shm_ps_client_rw"));
+TEST_F(LocalShmPSClientTest, MultiStepChunkedUpdatesAndPrefetchMatchReference) {
+  auto config = MakeLocalShmConfig(
+      MakeUniqueRegionName("recstore_local_shm_ps_client_training"));
+  constexpr int kRows = 41, kDim = 16;
+  // A batch spans more chunks than there are slots, including a partial tail.
+  config["local_shm"]["slot_buffer_bytes"] = 256;
+  config["cache_ps"]["base_kv_config"]["value"]["default_value_size_hint"] =
+      kDim * sizeof(float);
+  config["cache_ps"]["base_kv_config"]["value"]["dram_allocator"]
+        ["capacity_bytes"] = 1024 * kDim * sizeof(float);
   LocalShmParameterServer server;
   server.Init(config);
-
   std::thread server_thread([&]() { server.Run(); });
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-  LocalShmPSClient client(config["local_shm"]);
-  ASSERT_EQ(client.InitEmbeddingTable("table_b", {128, 4}), 0);
+  // Fatal assertions return from this lambda so the server is still joined.
+  auto exercise = [&]() {
+    LocalShmPSClient client(config["local_shm"]);
+    ASSERT_EQ(client.InitEmbeddingTable("training", {kRows, kDim}), 0);
+    std::vector<uint64_t> keys(kRows);
+    std::iota(keys.begin(), keys.end(), 0);
+    std::vector<float> expected(kRows * kDim);
+    for (int row = 0; row < kRows; ++row)
+      for (int col = 0; col < kDim; ++col)
+        expected[row * kDim + col] = (row * 3 - col * 2) / 8.0f;
+    base::RecTensor initial(expected.data(), {kRows, kDim});
+    ASSERT_EQ(client.PutParameter(keys, initial), 0);
 
-  std::vector<uint64_t> keys    = {1, 5};
-  std::vector<float> value_flat = {
-      1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
-  base::RecTensor values(value_flat.data(), {2, 4});
-  base::ConstArray<uint64_t> key_array(keys);
-  ASSERT_EQ(client.PutParameter(key_array, values), 0);
+    for (int step = 0; step < 4; ++step) {
+      SCOPED_TRACE(step);
+      std::vector<uint64_t> changed;
+      std::vector<float> grads;
+      for (int row = kRows - 1; row >= 0; --row) {
+        if ((row + step) % 3 == 0)
+          continue;
+        changed.push_back(row);
+        for (int col = 0; col < kDim; ++col) {
+          const float grad = ((row + col * 3 + step * 5) % 17 - 8) / 4.0f;
+          grads.push_back(grad);
+          expected[row * kDim + col] -= 0.01f * grad;
+        }
+      }
+      base::RecTensor gradients(grads.data(), {int64_t(changed.size()), kDim});
+      ASSERT_EQ(client.UpdateParameter("training", changed, gradients), 0);
 
-  std::vector<float> readback(8, 0.0f);
-  base::RecTensor read_t(readback.data(), {2, 4});
-  ASSERT_EQ(client.GetParameter(key_array, read_t), 0);
-  EXPECT_EQ(readback[0], 1.0f);
-  EXPECT_EQ(readback[1], 2.0f);
-  EXPECT_EQ(readback[4], 5.0f);
-  EXPECT_EQ(readback[7], 8.0f);
+      // Read every row in a different order, plus repeated hot IDs. Unchanged
+      // rows must survive the update, and all three read APIs must agree.
+      std::vector<uint64_t> query;
+      for (int row = kRows - 1; row >= 0; --row) {
+        query.push_back(row);
+        if (row % 5 == 0)
+          query.push_back(3);
+      }
+      std::vector<float> oracle;
+      for (const auto key : query)
+        oracle.insert(oracle.end(), expected.begin() + key * kDim,
+                      expected.begin() + (key + 1) * kDim);
+      std::vector<float> actual(oracle.size(), -999.0f);
+      // Flat calls carry one slot; the tensor API handles large batches.
+      ASSERT_EQ(client.GetParameterFlat(
+                    base::ConstArray<uint64_t>(query.data(), 3), actual.data(), 3, kDim), 0);
+      for (int i = 0; i < 3 * kDim; ++i)
+        EXPECT_NEAR(actual[i], oracle[i], 1e-6) << "flat element=" << i;
+      base::RecTensor ordinary(actual.data(), {int64_t(query.size()), kDim});
+      std::fill(actual.begin(), actual.end(), -999.0f);
+      ASSERT_EQ(client.GetParameter(query, ordinary), 0);
+      for (size_t i = 0; i < oracle.size(); ++i)
+        EXPECT_NEAR(actual[i], oracle[i], 1e-6) << "ordinary element=" << i;
 
-  std::vector<float> grads = {1.0f, 1.0f, 1.0f, 1.0f, 2.0f, 2.0f, 2.0f, 2.0f};
-  ASSERT_EQ(
-      client.UpdateParameterFlat("table_b", key_array, grads.data(), 2, 4), 0);
-  ASSERT_EQ(client.GetParameter(key_array, read_t), 0);
-  EXPECT_FLOAT_EQ(readback[0], 0.99f);
-  EXPECT_FLOAT_EQ(readback[1], 1.99f);
-  EXPECT_FLOAT_EQ(readback[4], 4.98f);
-  EXPECT_FLOAT_EQ(readback[7], 7.98f);
-
+      const auto handle = client.PrefetchParameter(query);
+      client.WaitForPrefetch(handle);
+      base::RecTensor prefetched({0, kDim}, base::DataType::FLOAT32);
+      ASSERT_TRUE(client.GetPrefetchResult(handle, prefetched));
+      ASSERT_EQ(prefetched.shape(0), query.size());
+      ASSERT_EQ(prefetched.shape(1), kDim);
+      for (size_t i = 0; i < oracle.size(); ++i)
+        EXPECT_NEAR(prefetched.data_as<float>()[i], oracle[i], 1e-6)
+            << "prefetched element=" << i;
+      EXPECT_FALSE(client.GetPrefetchResult(handle, prefetched));
+    }
+  };
+  try {
+    exercise();
+  } catch (...) {
+    server.Stop();
+    server_thread.join();
+    throw;
+  }
   server.Stop();
   server_thread.join();
 }

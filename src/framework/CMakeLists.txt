@@ -35,6 +35,25 @@ if(USE_FAKE_KVCLIENT)
 endif()
 
 if(TARGET recstore_torch_ops)
+    execute_process(
+        COMMAND ${Python_EXECUTABLE} -c "import torchrec"
+        RESULT_VARIABLE RECSTORE_NATIVE_TEST_TORCHREC_RESULT
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if(RECSTORE_NATIVE_TEST_TORCHREC_RESULT EQUAL 0)
+        add_test(
+            NAME test_recstore_ebc_native_training_py
+            COMMAND ${Python_EXECUTABLE} -m unittest
+                    model_zoo.torchrec_dlrm.tests.test_recstore_ebc
+            WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        )
+        set_tests_properties(test_recstore_ebc_native_training_py PROPERTIES
+            ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/src/python/pytorch;RECSTORE_TEST_OPS_LIBRARY=$<TARGET_FILE:recstore_torch_ops>"
+            LABELS "python;sparse;integration;torch_ops;torchrec"
+            TIMEOUT 120
+        )
+    endif()
+
     add_test(
         NAME pytorch_client_test
         COMMAND ${Python_EXECUTABLE} ${PROJECT_SOURCE_DIR}/src/test/framework/pytorch/test_client.py

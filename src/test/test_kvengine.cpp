@@ -305,27 +305,12 @@ protected:
         << "selector derived mismatch for (" << index_type_ << ","
         << value_type_ << "," << allocator_type_ << ")";
 
-    try {
-      kv_engine_.reset(base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(
-          engine_name_, r.cfg));
-    } catch (const std::exception& e) {
-      if (RunAllEnabled()) {
-        FAIL() << "Create engine failed for allocator=" << allocator_type_
-               << " : " << e.what();
-      } else {
-        GTEST_SKIP() << "Create engine failed for allocator=" << allocator_type_
-                     << " : " << e.what();
-      }
-    }
-    if (!kv_engine_) {
-      if (RunAllEnabled()) {
-        FAIL() << "Engine '" << engine_name_ << "' or allocator '"
-               << allocator_type_ << "' not registered/linked.";
-      } else {
-        GTEST_SKIP() << "Engine '" << engine_name_ << "' or allocator '"
-                     << allocator_type_ << "' not registered/linked.";
-      }
-    }
+    // Unsupported environments are handled above. A registered engine failing
+    // to construct is a regression, not a reason to turn the test green.
+    ASSERT_NO_THROW(kv_engine_.reset(
+        base::Factory<BaseKV, const BaseKVConfig&>::NewInstance(engine_name_, r.cfg)));
+    ASSERT_NE(kv_engine_, nullptr) << "Engine/allocator not registered: "
+                                  << engine_name_ << "/" << allocator_type_;
   }
 
   void TearDown() override {
@@ -486,20 +471,13 @@ TEST_P(KVEngineCartesianTest, BatchGet) {
   std::vector<base::ConstArray<float>> batch_values;
   kv_engine_->BatchGet(keys_array, &batch_values, 0);
 
-  EXPECT_EQ(batch_values.size(), num_keys);
-
-  for (int i = 0; i < num_keys; i++) {
-    if (batch_values[i].Size() > 0) {
-      std::string retrieved_value((char*)batch_values[i].Data(),
-                                  batch_values[i].Size() * sizeof(float));
-      size_t null_pos = retrieved_value.find('\0');
-      if (null_pos != std::string::npos) {
-        retrieved_value = retrieved_value.substr(0, null_pos);
-      }
-
-      std::string expected_original = "batch_value_" + std::to_string(i);
-      EXPECT_EQ(retrieved_value, expected_original) << "Failed for key " << i;
-    }
+  ASSERT_EQ(batch_values.size(), num_keys);
+  for (int i = 0; i < num_keys; ++i) {
+    ASSERT_EQ(batch_values[i].Size() * sizeof(float), expected_values[i].size())
+        << "key=" << keys[i];
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(batch_values[i].Data()),
+                          expected_values[i].size()),
+              expected_values[i]) << "key=" << keys[i];
   }
 }
 
@@ -517,24 +495,29 @@ TEST_P(KVEngineCartesianTest, BatchGetNonExistentKeys) {
 }
 
 TEST_P(KVEngineCartesianTest, BatchGetMixedKeys) {
-  kv_engine_->Put(1, CreateFixedLengthValue("value_1"), 0);
-  kv_engine_->Put(3, CreateFixedLengthValue("value_3"), 0);
-  kv_engine_->Put(5, CreateFixedLengthValue("value_5"), 0);
+  const std::unordered_map<uint64_t, std::string> expected = {
+      {1, CreateFixedLengthValue("value_1")},
+      {3, CreateFixedLengthValue("value_3")},
+      {5, CreateFixedLengthValue("value_5")}};
+  for (const auto& entry : expected)
+    kv_engine_->Put(entry.first, entry.second, 0);
 
-  std::vector<uint64_t> keys = {1, 2, 3, 4, 5, 6};
-  base::ConstArray<uint64_t> keys_array(keys.data(), keys.size());
-
+  // Hot IDs repeat and arrive in request order, interleaved with unseen IDs.
+  const std::vector<uint64_t> keys = {5, 2, 1, 5, 4, 3, 6, 1};
   std::vector<base::ConstArray<float>> batch_values;
-  kv_engine_->BatchGet(keys_array, &batch_values, 0);
-
-  EXPECT_EQ(batch_values.size(), 6);
-
-  EXPECT_GT(batch_values[0].Size(), 0); // key 1 exists
-  EXPECT_EQ(batch_values[1].Size(), 0); // key 2 doesn't exist
-  EXPECT_GT(batch_values[2].Size(), 0); // key 3 exists
-  EXPECT_EQ(batch_values[3].Size(), 0); // key 4 doesn't exist
-  EXPECT_GT(batch_values[4].Size(), 0); // key 5 exists
-  EXPECT_EQ(batch_values[5].Size(), 0); // key 6 doesn't exist
+  kv_engine_->BatchGet(base::ConstArray<uint64_t>(keys), &batch_values, 0);
+  ASSERT_EQ(batch_values.size(), keys.size());
+  for (size_t i = 0; i < keys.size(); ++i) {
+    const auto it = expected.find(keys[i]);
+    if (it == expected.end()) {
+      EXPECT_EQ(batch_values[i].Size(), 0) << "request row=" << i;
+    } else {
+      ASSERT_EQ(batch_values[i].Size() * sizeof(float), it->second.size());
+      EXPECT_EQ(std::string(reinterpret_cast<const char*>(batch_values[i].Data()),
+                            it->second.size()), it->second)
+          << "request row=" << i << " key=" << keys[i];
+    }
+  }
 }
 
 TEST_P(KVEngineCartesianTest, BatchGetFlatCopiesRowsAndZerosMissing) {
@@ -575,6 +558,55 @@ TEST_P(KVEngineCartesianTest, BatchGetFlatCopiesRowsAndZerosMissing) {
   EXPECT_FLOAT_EQ(out[10], 30.0f);
   EXPECT_FLOAT_EQ(out[11], 40.0f);
   EXPECT_EQ(stats.missing_rows, 1);
+}
+
+TEST_P(KVEngineCartesianTest, BatchOverwriteAndFlatReadMatchReferenceAcrossSteps) {
+  constexpr int kDim = 32;
+  std::unordered_map<uint64_t, std::vector<float>> reference;
+  const std::vector<std::vector<uint64_t>> updates = {
+      {7, 2, 19, 31}, {19, 5, 7}, {2, 31, 5, 43}, {7, 43}};
+  for (size_t step = 0; step < updates.size(); ++step) {
+    SCOPED_TRACE(step);
+    std::vector<std::vector<float>> rows;
+    for (const auto key : updates[step]) {
+      std::vector<float> row(kDim);
+      for (int col = 0; col < kDim; ++col)
+        row[col] = (static_cast<int>(key) * 3 - col * 7 + int(step) * 11) / 8.0f;
+      reference[key] = row;
+      rows.push_back(std::move(row));
+    }
+    std::vector<base::ConstArray<float>> slices;
+    for (const auto& row : rows)
+      slices.emplace_back(row);
+    kv_engine_->BatchPut(base::ConstArray<uint64_t>(updates[step]), &slices, 0);
+
+    // Read a different request size each step, preserving request order.
+    // Also read untouched rows, so collateral writes cannot pass unnoticed.
+    std::vector<uint64_t> query = {43, 19, 7, 5, 31, 2, 7, 99};
+    query.insert(query.end(), step, 19);
+    std::vector<float> flat(query.size() * kDim, -999.0f);
+    BaseKV::BatchGetFlatStats stats;
+    ASSERT_TRUE(kv_engine_->BatchGetFlat(base::ConstArray<uint64_t>(query),
+                                         flat.data(), query.size(), kDim, 0, &stats));
+    std::vector<base::ConstArray<float>> batch;
+    kv_engine_->BatchGet(base::ConstArray<uint64_t>(query), &batch, 0);
+    ASSERT_EQ(batch.size(), query.size());
+    size_t missing = 0;
+    for (size_t i = 0; i < query.size(); ++i) {
+      SCOPED_TRACE(query[i]);
+      const auto it = reference.find(query[i]);
+      const bool found = it != reference.end();
+      missing += !found;
+      ASSERT_EQ(batch[i].Size(), found ? kDim : 0);
+      for (int col = 0; col < kDim; ++col) {
+        const float expected = found ? it->second[col] : 0.0f;
+        EXPECT_FLOAT_EQ(flat[i * kDim + col], expected) << "column=" << col;
+        if (found)
+          EXPECT_FLOAT_EQ(batch[i][col], expected) << "column=" << col;
+      }
+    }
+    EXPECT_EQ(stats.missing_rows, missing);
+  }
 }
 
 TEST_P(KVEngineCartesianTest, BatchGetFlatRejectsMismatchedDim) {
