@@ -1796,3 +1796,88 @@ int main(int argc, char** argv) {
   folly::Init init(&argc, &argv);
   return RUN_ALL_TESTS();
 }
+
+TEST(PetPSIntegrationTest, SparseCommitDirectGatherMatchesLegacyState) {
+  auto& client = SingleShardClient();
+  const std::string table = "sparse_direct_gather";
+  const std::vector<uint64_t> keys{761, 762};
+  std::vector<float> initial(8, 1.0f);
+  const std::vector<float> source{1, 2, 3, 4, 9, 8, 7, 6, -1, -2, -3, -4};
+  base::RecTensor initial_rows(initial.data(), {2, 4});
+  ASSERT_EQ(client.InitEmbeddingTable(table, 1024, 4), 0);
+  std::vector<float> legacy;
+  for (bool direct : {false, true}) {
+    ASSERT_EQ(client.PutParameter(keys, initial_rows), 0);
+    recstore::SparseGradientCommitHeader h;
+    h.session = direct ? 7941 : 7940;
+    h.world = 2;
+    h.divisor = 2;
+    h.dim = 4;
+    h.chunks = 2;
+    h.rows = 1;
+    // Reverse chunk arrival; row 1 of source is deliberately unused.
+    for (uint32_t chunk : {1u, 0u}) {
+      h.chunk = chunk;
+      const size_t source_row = chunk == 0 ? 2 : 0;
+      int64_t committed;
+      if (direct) {
+        const int rpc = client.SubmitSparseGradientCommitGather(
+            table, h, base::ConstArray<uint64_t>(&keys[chunk], 1),
+            source.data(), 3, &source_row);
+        committed = client.WaitSparseGradientCommit(rpc);
+      } else {
+        committed = client.ExchangeSparseGradientCommit(table,
+            recstore::PackSparseGradientCommit(h, &keys[chunk],
+                                               source.data() + source_row * 4));
+      }
+      ASSERT_EQ(committed, -1);
+    }
+    h.rank = 1;
+    h.rows = 0;
+    h.chunk = 0;
+    h.chunks = 1;
+    if (direct) {
+      const int rpc = client.SubmitSparseGradientCommitGather(
+          table, h, {}, nullptr, 0, nullptr);
+      ASSERT_EQ(client.WaitSparseGradientCommit(rpc), 0);
+    } else {
+      ASSERT_EQ(client.ExchangeSparseGradientCommit(table,
+          recstore::PackSparseGradientCommit(h)), 0);
+    }
+    base::RecTensor actual({2, 4}, base::DataType::FLOAT32);
+    ASSERT_EQ(client.GetParameter(keys, actual), 0);
+    if (!direct)
+      legacy.assign(actual.data_as<float>(), actual.data_as<float>() + 8);
+    else
+      EXPECT_EQ(std::memcmp(actual.data_as<float>(), legacy.data(), 8 * 4), 0);
+    h.kind = 2;
+    for (uint32_t rank : {0u, 1u}) {
+      h.rank = rank;
+      EXPECT_EQ(client.ExchangeSparseGradientCommit(table,
+          recstore::PackSparseGradientCommit(h)), 0);
+    }
+  }
+}
+
+TEST(PetPSIntegrationTest, SparseCommitDirectGatherRejectsBeforePostAndReusesSlot) {
+  auto& client = SingleShardClient();
+  recstore::SparseGradientCommitHeader h;
+  h.session = 7942;
+  h.dim = 4;
+  h.rows = 1;
+  const std::string table = "sparse_direct_reject";
+  ASSERT_EQ(client.InitEmbeddingTable(table, 1024, 4), 0);
+  const uint64_t key = 771;
+  const float source[] = {0, 0, 0, 0};
+  const size_t bad = 1, good = 0;
+  EXPECT_THROW(client.SubmitSparseGradientCommitGather(
+      table, h, base::ConstArray<uint64_t>(&key, 1), source, 1, &bad),
+      std::invalid_argument);
+  const int rpc = client.SubmitSparseGradientCommitGather(
+      table, h, base::ConstArray<uint64_t>(&key, 1), source, 1, &good);
+  EXPECT_EQ(client.WaitSparseGradientCommit(rpc), 0);
+  h.kind = 2;
+  h.rows = 0;
+  EXPECT_EQ(client.ExchangeSparseGradientCommit(table,
+      recstore::PackSparseGradientCommit(h)), 0);
+}

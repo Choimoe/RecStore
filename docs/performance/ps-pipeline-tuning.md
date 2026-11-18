@@ -29,6 +29,10 @@ Set `RECSTORE_SGD_ROW_PREFETCH=1` in each PS process to prefetch upcoming direct
 
 `RECSTORE_DRAM_SIZE_PREFETCH=8` or `16` prefetches legacy concurrent-slab allocation-size headers during direct row lookup. The default is `0`; other allocators retain their existing lookup path. This changes metadata access, not payload size or SGD arithmetic. Compare it independently from row-data prefetch, including warm and tail batches.
 
+`RECSTORE_SPARSE_COMMIT_DIRECT_PACK=1` in each trainer packs nonempty V1 sparse-gradient chunks directly into registered RC request slots. The slot's prior tracked work is drained before writing it; uncertain submissions retire their lane and propagate failure without retrying the update. Empty/control requests and V4 retain their existing paths. This defaults off and preserves the wire format.
+
+For diagnostics only, set `RECSTORE_SPARSE_COMMIT_PROFILE=1` in trainers and PS processes. Client `rdma_adapter_wall` records distinguish lock wait, packing, submission and response wait. Direct submission includes gather and prior CQ drain; legacy packet phases are not comparable in isolation. Client wall times and same-process lock overlap are not wire latency. Disable profiling for throughput comparisons.
+
 ## Explicit allocation sizes
 
 `CONCURRENT_SLAB_EXACT` accepts only the payload widths in `size_classes`, measured in bytes. Classes must be positive multiples of eight that fit at least 64 slots in a 1 MiB chunk; an unsupported allocation fails instead of rounding its width. For 128 FP32 values, set `cache_ps.base_kv_config.value.dram_allocator` to:

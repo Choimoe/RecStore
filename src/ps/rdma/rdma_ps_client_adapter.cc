@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
+#include <cstdio>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -64,6 +68,132 @@ bool TryParseIntEnv(const char* env_name, int* parsed_value) {
 } // namespace detail
 
 namespace {
+
+bool SparseCommitDirectPackEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("RECSTORE_SPARSE_COMMIT_DIRECT_PACK");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
+// Diagnostic only: all durations are client wall time, never wire latency.
+struct AdapterWallProfile {
+  enum Phase { kPrepare, kIoWait, kDrain, kBuild, kZero, kGather,
+               kSubmit, kWait, kRelease, kFinish, kPhaseCount };
+  inline static thread_local AdapterWallProfile* active = nullptr;
+  bool enabled = false;
+  const char* op;
+  const void* adapter;
+  uint64_t rows, session = 0, id = 0, packets = 0, packet_bytes = 0;
+  uint64_t direct_packets = 0, legacy_packets = 0;
+  int64_t step = -1, result = std::numeric_limits<int64_t>::min();
+  int kind = -1, rank = -1, version = 0, pid = 0;
+  long tid = 0;
+  int exceptions = 0;
+  int64_t begin = 0, last = 0, lock_begin = 0, locked = 0;
+  int64_t unlock_lower = 0, unlocked_upper = 0;
+  int64_t elapsed[kPhaseCount]{};
+  Phase phase = kPrepare;
+  AdapterWallProfile* previous = nullptr;
+
+  static int64_t Now() noexcept {
+    const int saved_errno = errno;
+    const auto value = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    errno = saved_errno;
+    return value;
+  }
+  AdapterWallProfile(const char* name, const void* owner, uint64_t count,
+                     const SparseGradientCommitHeader* header = nullptr) noexcept
+      : op(name), adapter(owner), rows(count) {
+    static const bool on = [] {
+      const char* value = std::getenv("RECSTORE_SPARSE_COMMIT_PROFILE");
+      return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    enabled = on;
+    if (!enabled) return;
+    const int saved_errno = errno;
+    static std::atomic<uint64_t> sequence{0};
+    id = sequence.fetch_add(1, std::memory_order_relaxed);
+    pid = getpid();
+    tid = syscall(SYS_gettid);
+    errno = saved_errno;
+    if (header != nullptr) {
+      session = header->session; step = header->step; kind = header->kind;
+      rank = header->rank; version = header->version;
+    }
+    exceptions = std::uncaught_exceptions();
+    previous = active;
+    active = this;
+    begin = last = Now();
+  }
+  void Set(Phase next) noexcept {
+    if (!enabled) return;
+    const auto now = Now();
+    elapsed[phase] += now - last;
+    last = now;
+    phase = next;
+  }
+  void LockAttempt() noexcept { Set(kIoWait); if (enabled) lock_begin = last; }
+  void LockAcquired() noexcept { Set(kDrain); if (enabled) locked = last; }
+  void LockReleased() noexcept { Set(kFinish); if (enabled) unlocked_upper = last; }
+  int64_t Return(int64_t value) noexcept { result = value; return value; }
+  ~AdapterWallProfile() noexcept {
+    if (!enabled) return;
+    Set(kFinish);
+    active = previous;
+    const int saved_errno = errno;
+    // Emitted after io_guard is destroyed; logging is outside measured hold.
+    std::fprintf(stderr,
+        "component=rdma_adapter_wall op=%s adapter=%p pid=%d tid=%ld id=%llu "
+        "session=%llu step=%lld rank=%d kind=%d version=%d rows=%llu "
+        "begin_ns=%lld end_ns=%lld lock_begin_ns=%lld locked_ns=%lld "
+        "unlock_lower_ns=%lld unlock_upper_ns=%lld prepare_ns=%lld io_wait_ns=%lld drain_ns=%lld "
+        "build_chunks_ns=%lld packet_zero_ns=%lld packet_gather_ns=%lld "
+        "submit_inclusive_ns=%lld wait_inclusive_ns=%lld release_ns=%lld "
+        "finish_ns=%lld packets=%llu packet_bytes=%llu direct_packets=%llu legacy_packets=%llu "
+        "packet_phase_scope=legacy submit_scope=includes_direct_gather_and_drain result=%lld exception=%d\n",
+        op, adapter, pid, tid, static_cast<unsigned long long>(id),
+        static_cast<unsigned long long>(session), static_cast<long long>(step),
+        rank, kind, version, static_cast<unsigned long long>(rows),
+        static_cast<long long>(begin), static_cast<long long>(last),
+        static_cast<long long>(lock_begin), static_cast<long long>(locked),
+        static_cast<long long>(unlock_lower), static_cast<long long>(unlocked_upper),
+        static_cast<long long>(elapsed[kPrepare]), static_cast<long long>(elapsed[kIoWait]),
+        static_cast<long long>(elapsed[kDrain]), static_cast<long long>(elapsed[kBuild]),
+        static_cast<long long>(elapsed[kZero]), static_cast<long long>(elapsed[kGather]),
+        static_cast<long long>(elapsed[kSubmit]), static_cast<long long>(elapsed[kWait]),
+        static_cast<long long>(elapsed[kRelease]), static_cast<long long>(elapsed[kFinish]),
+        static_cast<unsigned long long>(packets), static_cast<unsigned long long>(packet_bytes),
+        static_cast<unsigned long long>(direct_packets), static_cast<unsigned long long>(legacy_packets),
+        static_cast<long long>(result), std::uncaught_exceptions() > exceptions);
+    errno = saved_errno;
+  }
+};
+
+struct AdapterWallPhase {
+  AdapterWallProfile* profile = AdapterWallProfile::active;
+  AdapterWallProfile::Phase previous = AdapterWallProfile::kPrepare;
+  explicit AdapterWallPhase(AdapterWallProfile::Phase next) noexcept {
+    if (profile != nullptr) { previous = profile->phase; profile->Set(next); }
+  }
+  ~AdapterWallPhase() noexcept { if (profile != nullptr) profile->Set(previous); }
+};
+
+// Bracket the existing guard's unlock without changing its lifetime.
+struct AdapterWallUnlock {
+  AdapterWallProfile& profile;
+  bool before;
+  ~AdapterWallUnlock() noexcept {
+    if (before) {
+      if (profile.enabled) profile.unlock_lower = AdapterWallProfile::Now();
+    } else {
+      profile.LockReleased();
+    }
+  }
+};
+
 
 bool AdapterProfileEnabled() {
   const char* value = std::getenv("RECSTORE_RDMA_ADAPTER_PROFILE");
@@ -201,6 +331,7 @@ ResolveEmbeddedRdmaClientIdentity(int num_shards, int configured_num_clients) {
 
 std::vector<RDMAPSClientAdapter::ShardChunk> RDMAPSClientAdapter::BuildChunks(
     base::ConstArray<uint64_t> keys, std::size_t max_keys_per_rpc) const {
+  AdapterWallPhase profile_phase(AdapterWallProfile::kBuild);
   return shard_routing::BuildChunks(
       keys,
       deployment_.num_shards,
@@ -462,14 +593,20 @@ int RDMAPSClientAdapter::SubmitGetParameter(
 
 int RDMAPSClientAdapter::GetParameter(const base::ConstArray<uint64_t>& keys,
                                       base::RecTensor& values) {
+  AdapterWallProfile profile("get", this, keys.Size());
   EnsureThreadInitialized();
+  profile.LockAttempt();
+  AdapterWallUnlock unlock_stamp{profile, false};
   std::lock_guard<std::mutex> io_guard(io_mu_);
+  AdapterWallUnlock before_unlock_stamp{profile, true};
+  profile.LockAcquired();
   executor_->DrainBatchSlots();
+  profile.Set(AdapterWallProfile::kPrepare);
   if (!IsFloatEmbeddingValues(values, static_cast<int64_t>(keys.Size()))) {
-    return -1;
+    return profile.Return(-1);
   }
   if (keys.Size() == 0) {
-    return 0;
+    return profile.Return(0);
   }
   const int64_t embedding_dim = values.shape(1);
   const int value_size =
@@ -479,6 +616,8 @@ int RDMAPSClientAdapter::GetParameter(const base::ConstArray<uint64_t>& keys,
   // as the batch destination instead of round-tripping through a scratch
   // buffer. `values` has no room for the trailing status word, so read the
   // batch verdict from WaitBatch.
+  // isAsync=false already waits inside the executor; this is inclusive.
+  profile.Set(AdapterWallProfile::kSubmit);
   const int rpc_id = SubmitGetParameter(
       keys,
       values.data_as<float>(),
@@ -486,9 +625,11 @@ int RDMAPSClientAdapter::GetParameter(const base::ConstArray<uint64_t>& keys,
       /*async_req_id=*/0,
       embedding_dim,
       /*write_status_word=*/false);
+  profile.Set(AdapterWallProfile::kWait);
   const bool ok = executor_->WaitBatch(rpc_id);
+  profile.Set(AdapterWallProfile::kRelease);
   RevokeRPCResource(rpc_id);
-  return ok ? 0 : -1;
+  return profile.Return(ok ? 0 : -1);
 }
 
 int RDMAPSClientAdapter::PutParameter(const base::ConstArray<uint64_t>& keys,
@@ -511,11 +652,17 @@ int64_t RDMAPSClientAdapter::SparseGradientCommit(
     SparseGradientCommitHeader h,
     const base::ConstArray<uint64_t>& keys,
     const base::RecTensor& grads) {
+  AdapterWallProfile profile("commit", this, keys.Size(), &h);
   EnsureClientInitialized();
   EnsureThreadInitialized();
   EnsureTableReady(table, h.dim);
+  profile.LockAttempt();
+  AdapterWallUnlock unlock_stamp{profile, false};
   std::lock_guard<std::mutex> io_guard(io_mu_);
+  AdapterWallUnlock before_unlock_stamp{profile, true};
+  profile.LockAcquired();
   executor_->DrainBatchSlots();
+  profile.Set(AdapterWallProfile::kPrepare);
   if (h.kind == 0 && (grads.dim() != 2 || grads.shape(1) != h.dim ||
                       !IsFloatEmbeddingValues(grads, keys.Size()))) {
     throw std::invalid_argument("Invalid RDMA sparse gradients");
@@ -543,11 +690,16 @@ int64_t RDMAPSClientAdapter::SparseGradientCommit(
     // the remaining owners from receiving the same sticky-failure notification.
     std::exception_ptr first_error;
     int64_t committed = std::numeric_limits<int64_t>::max();
+    profile.Set(AdapterWallProfile::kGather);
     const auto packet = PackSparseGradientCommit(h);
+    profile.Set(AdapterWallProfile::kPrepare);
     for (auto& client : shard_clients_) {
       try {
+        profile.Set(AdapterWallProfile::kSubmit);
         const auto rpc = client->SubmitSparseGradientCommit(table, packet);
+        profile.Set(AdapterWallProfile::kWait);
         committed = std::min(committed, client->WaitSparseGradientCommit(rpc));
+        profile.Set(AdapterWallProfile::kPrepare);
       } catch (...) {
         if (!first_error)
           first_error = std::current_exception();
@@ -555,7 +707,7 @@ int64_t RDMAPSClientAdapter::SparseGradientCommit(
     }
     if (first_error)
       std::rethrow_exception(first_error);
-    return committed;
+    return profile.Return(committed);
   }
   const size_t raw_limit =
       shard_clients_.front()->SparseGradientCommitPayloadLimit();
@@ -581,6 +733,7 @@ int64_t RDMAPSClientAdapter::SparseGradientCommit(
   std::vector<int64_t> committed(shards.size(), -1);
   std::deque<std::pair<size_t, int>> pending;
   auto drain_one = [&] {
+    AdapterWallPhase wait_phase(AdapterWallProfile::kWait);
     const auto [client, rpc] = pending.front();
     pending.pop_front();
     committed[client] =
@@ -598,20 +751,54 @@ int64_t RDMAPSClientAdapter::SparseGradientCommit(
         h.chunk           = round;
         h.chunks          = shards[client].size();
         h.rows            = chunk.keys.size();
-        std::string packet(sizeof(h) + h.rows * row_bytes, '\0');
-        std::memcpy(packet.data(), &h, sizeof(h));
-        if (h.rows) {
-          std::memcpy(packet.data() + sizeof(h), chunk.keys.data(), h.rows * 8);
-          char* dst = packet.data() + sizeof(h) + h.rows * 8;
-          for (size_t row = 0; row < h.rows; ++row) {
-            std::memcpy(dst + row * h.dim * 4,
-                        grads.data_as<float>() + chunk.positions[row] * h.dim,
-                        h.dim * 4);
+        if (h.version == 1 && h.kind == 0 && h.rows != 0 &&
+            SparseCommitDirectPackEnabled()) {
+          // Allocate the handle slot before publishing any WR. Submit owns an
+          // uncertain post on error, and never falls back to resubmission.
+          // This phase includes slot preparation, prior CQ drain and gathering.
+          profile.Set(AdapterWallProfile::kSubmit);
+          pending.emplace_back(client, -1);
+          if (profile.enabled) {
+            ++profile.packets;
+            ++profile.direct_packets;
+            profile.packet_bytes += sizeof(h) + h.rows * row_bytes;
           }
+          try {
+            pending.back().second =
+                shard_clients_[client]->SubmitSparseGradientCommitGather(
+                    table, h,
+                    base::ConstArray<uint64_t>(chunk.keys.data(), chunk.keys.size()),
+                    grads.data_as<float>(), keys.Size(), chunk.positions.data());
+          } catch (...) {
+            pending.pop_back();
+            throw;
+          }
+        } else {
+          // Only the legacy path has separately measurable packet construction.
+          profile.Set(AdapterWallProfile::kZero);
+          std::string packet(sizeof(h) + h.rows * row_bytes, '\0');
+          if (profile.enabled) {
+            ++profile.packets;
+            ++profile.legacy_packets;
+            profile.packet_bytes += packet.size();
+          }
+          profile.Set(AdapterWallProfile::kGather);
+          std::memcpy(packet.data(), &h, sizeof(h));
+          if (h.rows) {
+            std::memcpy(packet.data() + sizeof(h), chunk.keys.data(), h.rows * 8);
+            char* dst = packet.data() + sizeof(h) + h.rows * 8;
+            for (size_t row = 0; row < h.rows; ++row) {
+              std::memcpy(dst + row * h.dim * 4,
+                          grads.data_as<float>() + chunk.positions[row] * h.dim,
+                          h.dim * 4);
+            }
+          }
+          profile.Set(AdapterWallProfile::kSubmit);
+          pending.emplace_back(
+              client,
+              shard_clients_[client]->SubmitSparseGradientCommit(table, packet));
         }
-        pending.emplace_back(
-            client,
-            shard_clients_[client]->SubmitSparseGradientCommit(table, packet));
+        profile.Set(AdapterWallProfile::kPrepare);
         if (pending.size() >= MaxInFlightGetRpcs())
           drain_one();
       }
@@ -627,7 +814,7 @@ int64_t RDMAPSClientAdapter::SparseGradientCommit(
     }
     throw;
   }
-  return *std::min_element(committed.begin(), committed.end());
+  return profile.Return(*std::min_element(committed.begin(), committed.end()));
 }
 
 int RDMAPSClientAdapter::UpdateParameter(

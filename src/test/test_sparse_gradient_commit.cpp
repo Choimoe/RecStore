@@ -1222,3 +1222,90 @@ TEST(SparseGradientCommit, SortedPairApplyFailureIsSticky) {
       recstore::PackSparseGradientCommit(query), fail), std::runtime_error);
   EXPECT_EQ(calls, 1);
 }
+
+#include "ps/rdma/shard_routing.h"
+#include "ps/rdma/rdma_protocol.h"
+
+TEST(SparseGradientCommit, DirectGatherMatchesLegacyPacketBytes) {
+  for (uint32_t dim : {1u, 2u, 128u, 129u}) {
+    for (const std::string method : {"simple_mod", "city_hash"}) {
+      for (uint64_t tag : {uint64_t{0}, uint64_t{1} << 56}) {
+        const size_t count = 4101;
+        std::vector<uint64_t> keys(count);
+        std::vector<float> grads(count * dim);
+        for (size_t row = 0; row < count; ++row)
+          keys[row] = tag | ((row * 17) % 3037); // Repeated tagged keys.
+        const uint32_t patterns[] = {0u, 0x80000000u, 1u, 0x007fffffu,
+            0x3f800000u, 0xbf800000u, 0x7f800000u, 0xff800000u,
+            0x7fc12345u, 0x7f800001u};
+        for (size_t i = 0; i < grads.size(); ++i)
+          std::memcpy(&grads[i], &patterns[i % 10], sizeof(float));
+        for (size_t slot_bytes : {size_t{1} << 20, size_t{2} << 20}) {
+          const size_t budget = petps::PutPayloadBudget(slot_bytes);
+          recstore::SparseGradientCommitHeader h;
+          h.session = 9047;
+          h.world = 2;
+          h.divisor = 2;
+          h.dim = dim;
+          const size_t max_rows = (budget - sizeof(h)) / (8 + 4 * dim);
+          auto chunks = recstore::shard_routing::BuildChunks(
+              base::ConstArray<uint64_t>(keys.data(), keys.size()), 2, method,
+              {{0, 1}, {1, 0}}, max_rows); // Endpoint order differs from shard.
+          for (const auto& chunk : chunks) {
+            h.rows = chunk.keys.size();
+            std::vector<float> gathered(h.rows * dim);
+            for (size_t row = 0; row < h.rows; ++row)
+              std::memcpy(gathered.data() + row * dim,
+                          grads.data() + chunk.positions[row] * dim, dim * 4);
+            const auto expected = recstore::PackSparseGradientCommit(
+                h, chunk.keys.data(), gathered.data());
+            std::string actual(expected.size() + 16, '\x5a');
+            ASSERT_EQ(recstore::PackSparseGradientCommitGather(
+                h, base::ConstArray<uint64_t>(chunk.keys.data(), chunk.keys.size()),
+                grads.data(), keys.size(), chunk.positions.data(),
+                actual.data(), expected.size()), expected.size());
+            EXPECT_EQ(actual.substr(0, expected.size()), expected);
+            EXPECT_EQ(actual.substr(expected.size()), std::string(16, '\x5a'));
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(SparseGradientCommit, DirectGatherEmptyAndInvalidLeaveBoundsIntact) {
+  recstore::SparseGradientCommitHeader h;
+  h.session = 9048;
+  h.dim = 3;
+  std::string output(sizeof(h) + 16, '\x5a');
+  ASSERT_EQ(recstore::PackSparseGradientCommitGather(
+      h, {}, nullptr, 0, nullptr, output.data(), sizeof(h)), sizeof(h));
+  EXPECT_EQ(output.substr(0, sizeof(h)), recstore::PackSparseGradientCommit(h));
+  EXPECT_EQ(output.substr(sizeof(h)), std::string(16, '\x5a'));
+
+  const uint64_t keys[] = {11, 11};
+  const float grads[] = {1, 2, 3, 4, 5, 6};
+  const size_t valid[] = {1, 0}, bad[] = {0, 2};
+  h.rows = 2;
+  const size_t bytes = sizeof(h) + 2 * (8 + 3 * 4);
+  auto reject = [&](auto header, const size_t* positions,
+                    size_t count, size_t capacity) {
+    std::string target(bytes, '\x5a');
+    EXPECT_THROW(recstore::PackSparseGradientCommitGather(
+        header, base::ConstArray<uint64_t>(keys, 2), grads, count, positions,
+        target.data(), capacity), std::invalid_argument);
+    EXPECT_EQ(target, std::string(bytes, '\x5a'));
+  };
+  reject(h, bad, 2, bytes); // Invalid later row must not partially fill slot.
+  reject(h, valid, 2, bytes - 1);
+  reject(h, valid, std::numeric_limits<size_t>::max(), bytes);
+  auto invalid = h;
+  invalid.rows = 1;
+  reject(invalid, valid, 2, bytes);
+  invalid = h;
+  invalid.version = 4;
+  reject(invalid, valid, 2, bytes);
+  invalid = h;
+  invalid.kind = 1;
+  reject(invalid, valid, 2, bytes);
+}

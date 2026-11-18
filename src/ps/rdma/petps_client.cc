@@ -1486,6 +1486,52 @@ int PetPSClient::SubmitSparseGradientCommit(const std::string& table,
   }
 }
 
+int PetPSClient::SubmitSparseGradientCommitGather(
+    const std::string& table,
+    recstore::SparseGradientCommitHeader header,
+    const base::ConstArray<uint64_t>& chunk_keys,
+    const float* grads,
+    std::size_t num_rows,
+    const std::size_t* row_indices) {
+  std::lock_guard<std::mutex> guard(mu_);
+  EnsureThreadInitializedLocked();
+  const auto slot_handle = AcquireIdleSlot();
+  auto& slot = SlotAt(slot_handle.qp_index, slot_handle.slot_in_qp);
+  bool reuse_safe = false;
+  bool post_attempted = false;
+  try {
+    transport_->PrepareRequestSlot(slot.view, slot.next_seq);
+    reuse_safe = true;
+    const auto bytes = recstore::PackSparseGradientCommitGather(
+        header, chunk_keys, grads, num_rows, row_indices, slot.view.payload,
+        PutPayloadBudget(config_.request_slot_bytes));
+    RequestDescriptor descriptor;
+    FillUpdateFlatDescriptor(
+        &descriptor, slot.next_seq++, 0, bytes, 0, table, slot.view);
+    descriptor.op = static_cast<uint16_t>(RcOp::kSparseGradientCommit);
+    descriptor.response_bytes = sizeof(int64_t);
+    // SubmitRpcLocked can throw after a WR was posted, including while
+    // allocating its pending handle. Such a slot cannot be reused or retried.
+    post_attempted = true;
+    return SubmitRpcLocked(&slot, descriptor, slot.view.payload, bytes,
+                            nullptr, 0, sizeof(int64_t));
+  } catch (...) {
+    if (!reuse_safe || post_attempted) {
+      try {
+        MarkLaneDirty(slot.view.qp_index, "commit_gather_uncertain", nullptr,
+                      /*waited_ms=*/-1, /*rebuildable=*/false);
+      } catch (...) {
+        // Logging an allocation failure must not lose the original error or
+        // make the slot reusable while a posted WR can still reference it.
+        qps_[slot.view.qp_index].dirty.store(true, std::memory_order_relaxed);
+      }
+    } else {
+      slot.busy = false; // No post was attempted and the old write was drained.
+    }
+    throw;
+  }
+}
+
 int64_t PetPSClient::WaitSparseGradientCommit(int rpc) {
   try {
     size_t bytes       = 0;

@@ -162,6 +162,39 @@ inline std::string PackSparseGradientCommit(SparseGradientCommitHeader h,
   return result;
 }
 
+// Writes V1 submit bytes only; the caller retains the normal metadata checks.
+// Check the entire gather before modifying a destination that may be an RC slot.
+inline size_t PackSparseGradientCommitGather(
+    SparseGradientCommitHeader h,
+    const base::ConstArray<uint64_t>& chunk_keys,
+    const float* grads,
+    size_t num_rows,
+    const size_t* row_indices,
+    void* payload,
+    size_t capacity) {
+  if (h.version != 1 || h.kind != 0 || h.dim == 0 || h.dim > 65536 ||
+      h.rows != chunk_keys.Size() || payload == nullptr ||
+      (h.rows && (chunk_keys.Data() == nullptr || grads == nullptr ||
+                  row_indices == nullptr)))
+    throw std::invalid_argument("Invalid sparse commit gather layout");
+  const uint64_t bytes = sizeof(h) + uint64_t(h.rows) * (8 + uint64_t(h.dim) * 4);
+  if (bytes > capacity || num_rows > std::numeric_limits<size_t>::max() / h.dim / sizeof(float))
+    throw std::invalid_argument("Sparse commit gather exceeds capacity");
+  for (size_t row = 0; row < h.rows; ++row)
+    if (row_indices[row] >= num_rows)
+      throw std::invalid_argument("Sparse commit gather row is out of range");
+  auto* dst = static_cast<char*>(payload);
+  std::memcpy(dst, &h, sizeof(h));
+  if (h.rows) {
+    std::memcpy(dst + sizeof(h), chunk_keys.Data(), size_t(h.rows) * 8);
+    dst += sizeof(h) + size_t(h.rows) * 8;
+    for (size_t row = 0; row < h.rows; ++row)
+      std::memcpy(dst + row * h.dim * 4,
+                  grads + row_indices[row] * h.dim, size_t(h.dim) * 4);
+  }
+  return static_cast<size_t>(bytes);
+}
+
 class SparseGradientCommitClient {
 public:
   virtual ~SparseGradientCommitClient() = default;

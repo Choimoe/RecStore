@@ -34,6 +34,13 @@ public:
   size_t SparseGradientCommitPayloadLimit() const override;
   int SubmitSparseGradientCommit(const std::string& table,
                                  const std::string& payload);
+  int SubmitSparseGradientCommitGather(
+      const std::string& table,
+      recstore::SparseGradientCommitHeader header,
+      const base::ConstArray<uint64_t>& chunk_keys,
+      const float* grads,
+      std::size_t num_rows,
+      const std::size_t* row_indices);
   int64_t WaitSparseGradientCommit(int rpc_id);
 
   int GetParameter(const base::ConstArray<uint64_t>& keys,

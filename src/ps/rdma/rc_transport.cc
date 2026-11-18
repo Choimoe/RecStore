@@ -574,15 +574,13 @@ RcClientQpView RcShardClientTransport::OpenSlot(int qp_index, int slot_in_qp) {
   };
 }
 
-void RcShardClientTransport::SubmitRequest(
-    const RcClientQpView& view,
-    const RequestDescriptor& descriptor,
-    const void* payload,
-    std::size_t payload_bytes) {
+void RcShardClientTransport::PrepareRequestSlot(
+    const RcClientQpView& view, std::uint64_t seq) {
   const bool profile_enabled   = FLAGS_rdma_rc_profile_interval_ms > 0;
-  const std::uint64_t start_ns = profile_enabled ? NowNs() : 0;
   ValidateSlotInQp(config_, view.slot_in_qp);
   Lane& lane = LaneAt(view.qp_index);
+  if (lane.submit_completion_pending[static_cast<std::size_t>(view.slot_in_qp)] == 0)
+    return;
   const std::uint64_t remote_request_offset =
       ServerRequestOffset(config_, config_.client_id, view.slot_in_qp);
   auto& counters = TransportProfile();
@@ -597,13 +595,27 @@ void RcShardClientTransport::SubmitRequest(
           config_.client_id,
           view.qp_index,
           view.slot_in_qp,
-          descriptor.seq - 1,
+          seq - 1,
           remote_request_offset + RequestCommitOffset(config_),
           server_node_id_,
           "previous_submit_commit"),
       profile_enabled,
       &counters.drain_pending_submit_count,
       &counters.drain_pending_submit_ns);
+}
+
+void RcShardClientTransport::SubmitRequest(
+    const RcClientQpView& view,
+    const RequestDescriptor& descriptor,
+    const void* payload,
+    std::size_t payload_bytes) {
+  const bool profile_enabled   = FLAGS_rdma_rc_profile_interval_ms > 0;
+  const std::uint64_t start_ns = profile_enabled ? NowNs() : 0;
+  ValidateSlotInQp(config_, view.slot_in_qp);
+  Lane& lane = LaneAt(view.qp_index);
+  const std::uint64_t remote_request_offset =
+      ServerRequestOffset(config_, config_.client_id, view.slot_in_qp);
+  PrepareRequestSlot(view, descriptor.seq);
 
   auto* request_slot     = static_cast<char*>(view.request_slot);
   auto* local_descriptor = reinterpret_cast<RequestDescriptor*>(request_slot);

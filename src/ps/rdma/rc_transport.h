@@ -84,6 +84,9 @@ public:
 
   RcClientQpView OpenQp(int qp_index);
   RcClientQpView OpenSlot(int qp_index, int slot_in_qp);
+  // Requires the client submit mutex and an acquired slot. Complete the
+  // previous local write before a caller fills this slot's registered payload.
+  void PrepareRequestSlot(const RcClientQpView& view, std::uint64_t seq);
   void SubmitRequest(const RcClientQpView& view,
                      const RequestDescriptor& descriptor,
                      const void* payload,
