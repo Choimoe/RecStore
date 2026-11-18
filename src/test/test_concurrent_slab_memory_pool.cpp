@@ -1,3 +1,5 @@
+#include <cstring>
+#include <limits>
 #include <algorithm>
 
 #include "memory/allocators/concurrent_slab_memory_pool.h"
@@ -439,4 +441,105 @@ TEST_F(ConcurrentSlabMemoryPoolTest, SizedFactorySupportsRowsBeyondDefaultCap) {
   EXPECT_TRUE(pool->Free(wide));
   delete pool;
   base::file_util::Delete(path_ + "_wide", false);
+}
+
+
+TEST(ConcurrentSlabExactTest, ValidatesClassesAndExactRequests) {
+  const auto path = TempPoolPath("exact_validation");
+  for (const std::vector<int>& invalid : std::vector<std::vector<int>>{
+           {}, {0}, {-8}, {4}, {12}, {16384}, {std::numeric_limits<int>::max()}}) {
+    EXPECT_THROW((base::ConcurrentSlabExact(path, 8LL << 20, "DRAM", invalid)),
+                 std::invalid_argument);
+  }
+  using SizedFactory = base::Factory<base::MallocApi, const std::string&, int64,
+                                     const std::string&, const std::vector<int>&>;
+  using PlainFactory = base::Factory<base::MallocApi, const std::string&, int64,
+                                     const std::string&>;
+  EXPECT_EQ(PlainFactory::creators().count("CONCURRENT_SLAB_EXACT"), 0u);
+  const std::vector<int> sizes{8, 80, 272, 512, 520, 1032, 16376, 512};
+  std::unique_ptr<base::MallocApi> pool(SizedFactory::NewInstance(
+      "CONCURRENT_SLAB_EXACT", path, 8LL << 20, "DRAM", sizes));
+  ASSERT_NE(pool, nullptr);
+  std::vector<char*> ptrs;
+  for (int bytes : sizes) {
+    char* p = pool->New(bytes);
+    ASSERT_TRUE(OwnsAllocation(*pool, p, bytes));
+    const int64 offset = pool->GetMallocOffset(p);
+    EXPECT_EQ(offset % 8, 0);
+    EXPECT_EQ(pool->GetMallocData(offset), p);
+    EXPECT_EQ(pool->GetMallocSize(p), bytes);
+    EXPECT_EQ(pool->GetMallocSize(offset), bytes);
+    std::memset(p, 0x5a, bytes);
+    EXPECT_EQ(static_cast<unsigned char>(p[bytes - 1]), 0x5a);
+    ptrs.push_back(p);
+  }
+  for (int unsupported : {0, -1, 4, 12, 504, 513, 16384})
+    EXPECT_THROW(pool->New(unsupported), std::invalid_argument);
+  EXPECT_EQ(pool->total_malloc(), ptrs.size());
+  std::vector<char*> enumerated;
+  pool->GetMallocsAppend(&enumerated);
+  EXPECT_EQ(std::set<char*>(enumerated.begin(), enumerated.end()),
+            std::set<char*>(ptrs.begin(), ptrs.end()));
+  for (char* p : ptrs)
+    EXPECT_TRUE(pool->Free(p));
+  EXPECT_EQ(pool->total_malloc(), 0u);
+  pool.reset();
+  base::file_util::Delete(path, false);
+}
+
+TEST(ConcurrentSlabExactTest, RetirementAndReinitializationPreserveOwnership) {
+  const auto path = TempPoolPath("exact_retire");
+  base::ConcurrentSlabExact pool(path, 2LL << 20, "DRAM", {8, 512});
+  char* p = pool.New(512);
+  std::memset(p, 0x31, 512);
+  {
+    base::ThreadSafeDelayedRecycle recycler(&pool, 2000000000LL);
+    recycler.Recycle(p);
+    EXPECT_EQ(recycler.GetPendingNum(), 1);
+    EXPECT_EQ(pool.total_malloc(), 1u);
+    EXPECT_EQ(pool.GetMallocSize(p), 512);
+    EXPECT_EQ(p[511], '1');
+  }
+  EXPECT_EQ(pool.total_malloc(), 0u);
+  pool.Initialize();
+  char* small = pool.New(8);
+  EXPECT_EQ(pool.GetMallocSize(small), 8);
+  EXPECT_EQ(pool.GetMallocOffset(small) % 8, 0);
+  EXPECT_TRUE(pool.Free(small));
+}
+
+TEST(ConcurrentSlabExactTest, WorkerCacheSurvivesReinitAndSameAddressRebuild) {
+  using Pool = base::ConcurrentSlabExact;
+  for (bool reconstruct : {false, true}) {
+    const std::string path = TempPoolPath(reconstruct ? "exact_rebuild" : "exact_reset");
+    std::optional<Pool> pool(std::in_place, path, 2LL << 20, "DRAM",
+                             std::vector<int>{8, 512});
+    Pool* original = &*pool;
+    std::promise<void> cached, resume;
+    auto resumed = resume.get_future();
+    char* result = nullptr;
+    std::thread worker([&] {
+      pool->New(512);
+      cached.set_value();
+      resumed.wait();
+      result = pool->New(512);
+    });
+    cached.get_future().wait();
+    if (reconstruct) {
+      pool.reset();
+      pool.emplace(path, 2LL << 20, "DRAM", std::vector<int>{8, 512});
+      EXPECT_EQ(&*pool, original);
+    } else {
+      pool->Initialize();
+    }
+    char* small = pool->New(8);
+    resume.set_value();
+    worker.join();
+    ASSERT_TRUE(OwnsAllocation(*pool, result, 512));
+    EXPECT_GE(pool->GetMallocOffset(result), 1LL << 20);
+    EXPECT_EQ(pool->GetMallocSize(result), 512);
+    EXPECT_EQ(pool->total_malloc(), 2u);
+    EXPECT_TRUE(pool->Free(small));
+    EXPECT_TRUE(pool->Free(result));
+  }
 }

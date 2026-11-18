@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdlib>
+#include <exception>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -51,6 +53,10 @@ public:
       }
     }
 
+    if (allocator_type == "CONCURRENT_SLAB_EXACT" && size_classes.empty()) {
+      throw std::invalid_argument("CONCURRENT_SLAB_EXACT requires size_classes");
+    }
+
     using MF = base::
         Factory<base::MallocApi, const std::string&, int64, const std::string&>;
     using MFS =
@@ -90,6 +96,9 @@ public:
   }
 
   uint64_t Alloc(size_t size) override {
+    if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+      throw std::invalid_argument("DramValueStore allocation exceeds int size");
+    }
     char* data = allocator_->New(static_cast<int>(size));
     if (data == nullptr) {
       return kValueHandleNone;
@@ -111,6 +120,27 @@ public:
       Write(handle, data, size);
     }
     return handle;
+  }
+
+  using ValueStore::BatchAllocAndWrite;
+  std::vector<uint64_t> BatchAllocAndWrite(
+      const std::vector<WriteSpec>& specs) override {
+    std::vector<uint64_t> handles;
+    handles.reserve(specs.size());
+    try {
+      for (const auto& spec : specs)
+        handles.push_back(AllocAndWrite(spec.data, spec.size));
+    } catch (...) {
+      const auto error = std::current_exception();
+      for (uint64_t handle : handles) {
+        if (handle == kValueHandleNone)
+          continue;
+        // Attempt every rollback and retain the original allocation failure.
+        try { Free(handle); } catch (...) {}
+      }
+      std::rethrow_exception(error);
+    }
+    return handles;
   }
 
   size_t Read(uint64_t handle, void* out_buf, size_t buf_size) override {

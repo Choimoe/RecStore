@@ -2,7 +2,7 @@
 
 The base `PSPipeline` keeps embeddings authoritative in the PS and waits for the global SGD commit before consuming dependent rows. GPU embedding values belong to the current batch. The controls below apply to the eager two-rank dependency-split path.
 
-## Trainer controls
+## Runtime controls
 
 Set these variables explicitly in every trainer process, including remote workers:
 
@@ -28,6 +28,20 @@ GPU tickets construct integer IDs and stable segment plans on CUDA, then return 
 Set `RECSTORE_SGD_ROW_PREFETCH=1` in each PS process to prefetch upcoming direct DRAM rows during sparse SGD. The update loop looks eight rows ahead and hints up to 512 bytes per row, while preserving row order and floating-point operations. This option defaults off and skips missing rows; its benefit depends on the working set, so compare full-loop throughput with the same option disabled.
 
 `RECSTORE_DRAM_SIZE_PREFETCH=8` or `16` prefetches legacy concurrent-slab allocation-size headers during direct row lookup. The default is `0`; other allocators retain their existing lookup path. This changes metadata access, not payload size or SGD arithmetic. Compare it independently from row-data prefetch, including warm and tail batches.
+
+## Explicit allocation sizes
+
+`CONCURRENT_SLAB_EXACT` accepts only the payload widths in `size_classes`, measured in bytes. Classes must be positive multiples of eight that fit at least 64 slots in a 1 MiB chunk; an unsupported allocation fails instead of rounding its width. For 128 FP32 values, set `cache_ps.base_kv_config.value.dram_allocator` to:
+
+```json
+{
+  "type": "CONCURRENT_SLAB_EXACT",
+  "capacity_bytes": 4294967296,
+  "size_classes": [512]
+}
+```
+
+This is an opt-in allocator; the existing allocator remains the default. Cheaper size lookup alone does not guarantee faster updates: measure payload writeback and tail batches too. The legacy size-header prefetch switch does not apply to EXACT.
 
 ## Size the PS index independently of the model
 

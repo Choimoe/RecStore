@@ -4,6 +4,7 @@
 #include <deque>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -572,6 +573,51 @@ private:
   std::atomic<int64> total_malloc_{0};
   DISALLOW_COPY_AND_ASSIGN(ConcurrentSlabMemoryPool);
 };
+
+
+// Exact payload widths: no per-allocation size prefix and no rounding.
+class ConcurrentSlabExact : public ConcurrentSlabMemoryPool<true> {
+public:
+  ConcurrentSlabExact(const std::string& filename,
+                      int64 memory_size,
+                      const std::string& /*medium*/,
+                      const std::vector<int>& size_classes)
+      : ConcurrentSlabMemoryPool<true>(
+            filename, memory_size, ValidateClasses(size_classes)),
+        size_classes_(size_classes.begin(), size_classes.end()) {}
+
+  char* New(int memory_size) override {
+    if (size_classes_.count(memory_size) == 0) {
+      throw std::invalid_argument("CONCURRENT_SLAB_EXACT unsupported payload size");
+    }
+    return ConcurrentSlabMemoryPool<true>::New(memory_size);
+  }
+
+private:
+  static const std::vector<int>& ValidateClasses(const std::vector<int>& sizes) {
+    // Match SlabChunk::ChunkHeader::HeaderSize for the minimum 64 entries:
+    // two int fields followed by BitMap (including its own header).
+    const size_t header = 2 * sizeof(int) + base::BitMap::MemorySize(64);
+    const size_t max_payload = ((1ULL << 20) - header) / 64;
+    if (sizes.empty())
+      throw std::invalid_argument("CONCURRENT_SLAB_EXACT requires size_classes");
+    for (int size : sizes) {
+      if (size <= 0 || size % 8 != 0 || static_cast<size_t>(size) > max_payload)
+        throw std::invalid_argument("CONCURRENT_SLAB_EXACT invalid payload size class");
+    }
+    return sizes;
+  }
+
+  const std::set<int> size_classes_;
+};
+
+FACTORY_REGISTER(MallocApi,
+                 CONCURRENT_SLAB_EXACT,
+                 ConcurrentSlabExact,
+                 const std::string&,
+                 int64,
+                 const std::string&,
+                 const std::vector<int>&);
 
 class ConcurrentSlabMemoryPoolMalloc : public ConcurrentSlabMemoryPool<false> {
 public:

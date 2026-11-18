@@ -1,3 +1,4 @@
+#include <limits>
 // ======== 笛卡尔积参数化测试 ========
 
 #include <tuple>
@@ -2509,4 +2510,205 @@ TEST(DramSizePrefetchTest, PreservesOrderedValidationAndPartialOutputs) {
       store.Free(long_handle);
     }
   }
+}
+
+
+class ExactSlabKVTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    previous_ = base::PMMmapRegisterCenter::GetConfig().backend;
+    base::PMMmapRegisterCenter::GetConfig().backend =
+        base::PMMmapRegisterCenter::Backend::kAnonymousDram;
+    path_ = "/dev/shm/test_exact_slab_" + std::to_string(getpid()) + "_" +
+            ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    std::filesystem::create_directories(path_);
+  }
+  void TearDown() override {
+    base::PMMmapRegisterCenter::GetConfig().backend = previous_;
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+  BaseKVConfig Config(bool exact, int dim, const std::string& suffix) const {
+    BaseKVConfig config;
+    config.num_threads_ = 1;
+    config.json_config_ = {
+        {"engine_type", "KVEngineComposite"}, {"capacity", 128},
+        {"index", {{"type", "DRAM_PET_HASH"}}},
+        {"value", {{"type", "DRAM_VALUE_STORE"}, {"path", path_ + "/" + suffix},
+                   {"default_value_size_hint", dim * sizeof(float)},
+                   {"dram_allocator", {
+                       {"type", exact ? "CONCURRENT_SLAB_EXACT" : "CONCURRENT_SLAB_MEMORY_POOL"},
+                       {"capacity_bytes", 16ULL << 20},
+                       {"size_classes", exact ? std::vector<int>{8, 512, 520}
+                                              : std::vector<int>{16, 520, 528}}}}}}};
+    return config;
+  }
+  std::unique_ptr<BaseKV> Engine(const BaseKVConfig& config) const {
+    const auto resolved = base::ResolveEngine(config);
+    return std::unique_ptr<BaseKV>(base::Factory<BaseKV, const BaseKVConfig&>::
+        NewInstance(resolved.engine, resolved.cfg));
+  }
+  base::PMMmapRegisterCenter::Backend previous_;
+  std::string path_;
+};
+
+TEST_F(ExactSlabKVTest, InvalidConfigAndNarrowingFailBeforeAllocation) {
+  for (bool remove : {false, true}) {
+    auto config = Config(true, 128, remove ? "missing" : "empty");
+    auto& allocator = config.json_config_["value"]["dram_allocator"];
+    if (remove)
+      allocator.erase("size_classes");
+    else
+      allocator["size_classes"] = std::vector<int>{};
+    EXPECT_THROW((DramValueStore(config)), std::invalid_argument);
+  }
+  for (bool exact : {false, true}) {
+    DramValueStore store(Config(exact, 128, exact ? "new" : "old"));
+    EXPECT_THROW(store.Alloc(static_cast<size_t>(std::numeric_limits<int>::max()) + 1),
+                 std::invalid_argument);
+    EXPECT_THROW(store.Alloc((size_t{1} << 32) + 512), std::invalid_argument);
+    const uint64_t h = store.Alloc(512);
+    EXPECT_NE(h, kValueHandleNone);
+    EXPECT_EQ(store.SlotCapacity(h), 512u);
+    store.Free(h);
+  }
+}
+
+TEST_F(ExactSlabKVTest, ReplacementLengthsReadFlatMissingAndCheckpoint) {
+  auto engine = Engine(Config(true, 128, "engine"));
+  const std::vector<uint64_t> key{7}, mixed{7, 99, 7};
+  std::vector<BaseKV::DirectFixedRow> rows;
+  for (size_t bytes : {size_t{8}, size_t{512}, size_t{520}, size_t{8}, size_t{512}}) {
+    const std::string value(bytes, static_cast<char>(bytes / 8));
+    engine->Put(7, value, 0);
+    std::string actual;
+    engine->Get(7, actual, 0);
+    EXPECT_EQ(actual, value);
+    if (bytes < 512) {
+      EXPECT_FALSE(engine->BatchGetDirectFixedRows(
+          base::ConstArray<uint64_t>(key), 1, 128, 0, &rows));
+    } else {
+      BaseKV::BatchGetFlatStats stats;
+      ASSERT_TRUE(engine->BatchGetDirectFixedRows(
+          base::ConstArray<uint64_t>(mixed), mixed.size(), 128, 0, &rows, &stats));
+      EXPECT_EQ(stats.missing_rows, 1u);
+      ASSERT_EQ(rows.size(), 3u);
+      EXPECT_TRUE(rows[1].missing);
+      EXPECT_EQ(std::memcmp(rows[0].data, value.data(), 512), 0);
+      EXPECT_EQ(rows[0].data, rows[2].data);
+      std::vector<float> flat(mixed.size() * 128, -1.0f);
+      ASSERT_TRUE(engine->BatchGetFlat(base::ConstArray<uint64_t>(mixed),
+                                      flat.data(), mixed.size(), 128, 0));
+      EXPECT_EQ(std::memcmp(flat.data(), value.data(), 512), 0);
+      const std::vector<float> zeros(128, 0.0f);
+      EXPECT_EQ(std::memcmp(flat.data() + 128, zeros.data(), 512), 0);
+    }
+  }
+  std::string before, after;
+  engine->Get(7, before, 0);
+  EXPECT_THROW(engine->Put(7, std::string(516, 'x'), 0), std::invalid_argument);
+  engine->Get(7, after, 0);
+  EXPECT_EQ(after, before);
+  const auto checkpoint = path_ + "/state.bin";
+  ASSERT_TRUE(engine->SaveCheckpoint(checkpoint, "exact-layout-test"));
+  auto restored = Engine(Config(false, 128, "legacy_restore"));
+  ASSERT_TRUE(restored->LoadCheckpoint(checkpoint, "exact-layout-test"));
+  restored->Get(7, after, 0);
+  EXPECT_EQ(after, before);
+  EXPECT_EQ(engine->BatchDelete(base::ConstArray<uint64_t>(key), 0), 1u);
+  engine->Get(7, after, 0);
+  EXPECT_TRUE(after.empty());
+  engine->Put(7, before, 0);
+  engine->Get(7, after, 0);
+  EXPECT_EQ(after, before);
+}
+
+TEST_F(ExactSlabKVTest, SgdAllBytesMatchLegacyAtMultipleDimensions) {
+  constexpr uint8_t tag = 3;
+  const std::vector<uint64_t> keys{9, 2, 7, 7, 1, 5, 3, 8, 6, 4, 77, 77};
+  for (int dim : {2, 128, 130}) {
+    SCOPED_TRACE(::testing::Message() << "dim=" << dim);
+    auto old = Engine(Config(false, dim, "old_" + std::to_string(dim)));
+    auto exact = Engine(Config(true, dim, "exact_" + std::to_string(dim)));
+    auto tagged = [](uint64_t key) { return (uint64_t{3} << 56) | (uint64_t{1} << 30) | key; };
+    std::vector<uint64_t> raw(keys), get_keys(keys);
+    for (size_t i = 0; i < keys.size(); ++i) {
+      raw[i] = (uint64_t{1} << 30) | keys[i];
+      get_keys[i] = tagged(keys[i]);
+    }
+    for (uint64_t key = 1; key <= 9; ++key) {
+      std::vector<float> value(dim);
+      for (int j = 0; j < dim; ++j)
+        value[j] = static_cast<float>(key * 17 + j) / 128.0f;
+      const std::string_view bytes(reinterpret_cast<const char*>(value.data()), value.size() * sizeof(float));
+      old->Put(tagged(key), bytes, 0);
+      exact->Put(tagged(key), bytes, 0);
+    }
+    std::vector<float> grads(keys.size() * dim);
+    for (size_t i = 0; i < grads.size(); ++i)
+      grads[i] = static_cast<float>(static_cast<int>(i % 31) - 15) / 64.0f;
+    for (int step = 0; step < 3; ++step) {
+      BaseKV::UpdateFlatStats old_stats, exact_stats;
+      ASSERT_TRUE(old->ApplySgdUpdateFlat(base::ConstArray<uint64_t>(raw),
+          grads.data(), keys.size(), dim, 0.03125f, tag, 0, &old_stats));
+      ASSERT_TRUE(exact->ApplySgdUpdateFlat(base::ConstArray<uint64_t>(raw),
+          grads.data(), keys.size(), dim, 0.03125f, tag, 0, &exact_stats));
+      EXPECT_EQ(exact_stats.missing_rows, old_stats.missing_rows);
+      std::vector<float> flat(keys.size() * dim);
+      ASSERT_TRUE(exact->BatchGetFlat(base::ConstArray<uint64_t>(get_keys),
+          flat.data(), keys.size(), dim, 0));
+      for (size_t i = 0; i < get_keys.size(); ++i) {
+        std::string expected, actual;
+        old->Get(get_keys[i], expected, 0);
+        exact->Get(get_keys[i], actual, 0);
+        ASSERT_EQ(actual.size(), dim * sizeof(float));
+        EXPECT_EQ(actual, expected);
+        EXPECT_EQ(std::memcmp(flat.data() + i * dim, actual.data(), actual.size()), 0);
+      }
+    }
+  }
+}
+
+TEST_F(ExactSlabKVTest, KeyedBatchFailureReleasesPrefixAndPreservesPublishedValues) {
+  DramValueStore store(Config(true, 128, "rollback_store"));
+  ValueStore* polymorphic = &store;
+  const std::string original(512, 'o'), replacement(512, 'r'), invalid(516, 'x');
+  const uint64_t existing = store.AllocAndWrite(original.data(), original.size());
+  const uint64_t before = store.TotalAllocCount();
+  const std::vector<uint64_t> keys{7, 8};
+  const std::vector<ValueStore::WriteSpec> specs{
+      {replacement.data(), replacement.size()}, {invalid.data(), invalid.size()}};
+  for (int retry = 0; retry < 8; ++retry) {
+    try {
+      (void)polymorphic->BatchAllocAndWrite(keys, specs);
+      FAIL() << "unsupported exact width must throw";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_STREQ(error.what(), "CONCURRENT_SLAB_EXACT unsupported payload size");
+    }
+    EXPECT_EQ(store.TotalAllocCount(), before);
+    std::string actual;
+    store.ReadValue(existing, actual);
+    EXPECT_EQ(actual, original);
+  }
+  store.Free(existing);
+  EXPECT_EQ(store.TotalAllocCount(), 0u);
+
+  auto engine = Engine(Config(true, 128, "rollback_engine"));
+  engine->Put(7, original, 0);
+  const std::vector<float> good(128, 1.0f), bad(129, 2.0f);
+  std::vector<base::ConstArray<float>> rows{
+      base::ConstArray<float>(good.data(), good.size()),
+      base::ConstArray<float>(bad.data(), bad.size())};
+  EXPECT_THROW(engine->BatchPut(base::ConstArray<uint64_t>(keys), &rows, 0),
+               std::invalid_argument);
+  std::string actual;
+  engine->Get(7, actual, 0);
+  EXPECT_EQ(actual, original);
+  engine->Get(8, actual, 0);
+  EXPECT_TRUE(actual.empty());
+  rows[1] = base::ConstArray<float>(good.data(), good.size());
+  EXPECT_NO_THROW(engine->BatchPut(base::ConstArray<uint64_t>(keys), &rows, 0));
+  engine->Get(8, actual, 0);
+  ASSERT_EQ(actual.size(), good.size() * sizeof(float));
+  EXPECT_EQ(std::memcmp(actual.data(), good.data(), actual.size()), 0);
 }
