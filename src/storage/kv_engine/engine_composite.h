@@ -7,6 +7,10 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
+#if defined(__x86_64__) && defined(__GNUC__)
+#include <immintrin.h>
+#endif
 #include <deque>
 #include <exception>
 #include <filesystem>
@@ -44,6 +48,22 @@ class KVEngineComposite : public BaseKV {
     uint64_t generation;
     std::vector<OnlineSnapshot> hot;
   };
+
+#if defined(__x86_64__) && defined(__GNUC__)
+  __attribute__((target("avx2,no-fma"), noinline))
+  static void ApplySgdRowAvx2(float* value, const float* grad,
+                            int64_t dim, float learning_rate) {
+    const __m256 rate = _mm256_set1_ps(learning_rate);
+    int64_t column = 0;
+    for (; column <= dim - 8; column += 8) {
+      const __m256 scaled = _mm256_mul_ps(_mm256_loadu_ps(grad + column), rate);
+      _mm256_storeu_ps(value + column,
+                      _mm256_sub_ps(_mm256_loadu_ps(value + column), scaled));
+    }
+    for (; column < dim; ++column)
+      value[column] -= learning_rate * grad[column];
+  }
+#endif
 
 public:
   KVEngineComposite(std::unique_ptr<Index> index,
@@ -718,6 +738,18 @@ public:
       const char* value = std::getenv("RECSTORE_SGD_ROW_PREFETCH");
       return value != nullptr && std::strcmp(value, "1") == 0;
     }();
+#if defined(__x86_64__) && defined(__GNUC__)
+    static const bool avx2_enabled = [] {
+      const char* value = std::getenv("RECSTORE_SGD_AVX2");
+      return value != nullptr && std::strcmp(value, "1") == 0 &&
+             __builtin_cpu_supports("avx2");
+    }();
+    uint32_t rate_bits;
+    std::memcpy(&rate_bits, &learning_rate, sizeof(rate_bits));
+    const bool avx2_rows = avx2_enabled && embedding_dim >= 8 &&
+        (rate_bits & 0x7f800000U) != 0x7f800000U &&
+        (_mm_getcsr() & 0x1f80U) == 0x1f80U;
+#endif
     std::vector<float> missing_row(static_cast<size_t>(embedding_dim));
     for (int64_t r = 0; r < num_rows; ++r) {
       if (prefetch_rows && num_rows - r > 8) {
@@ -757,6 +789,19 @@ public:
       }
 
       float* value = reinterpret_cast<float*>(const_cast<char*>(row.data));
+#if defined(__x86_64__) && defined(__GNUC__)
+      if (avx2_rows) {
+        const uintptr_t value_address = reinterpret_cast<uintptr_t>(value);
+        const uintptr_t grad_address = reinterpret_cast<uintptr_t>(grad);
+        const uintptr_t distance = value_address >= grad_address
+            ? value_address - grad_address : grad_address - value_address;
+        // Keep the existing loop for overlap: widening can change its dependencies.
+        if (distance >= row_bytes) {
+          ApplySgdRowAvx2(value, grad, embedding_dim, learning_rate);
+          continue;
+        }
+      }
+#endif
 #pragma omp simd
       for (int64_t c = 0; c < embedding_dim; ++c)
         value[c] -= learning_rate * grad[c];
