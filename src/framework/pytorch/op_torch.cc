@@ -23,6 +23,7 @@
 namespace recstore {
 namespace framework {
 void RegisterBagpipeMetadataOps(torch::Library& m);
+void RegisterGPUTicketOps(torch::Library& m);
 
 TORCH_LIBRARY(recstore_ops, m) {
   RegisterBaseOps(m);
@@ -31,6 +32,7 @@ TORCH_LIBRARY(recstore_ops, m) {
   RegisterGpuCacheOps(m);
   RegisterSparseGradientCommitOps(m);
   RegisterBagpipeMetadataOps(m);
+  RegisterGPUTicketOps(m);
   RegisterProfileOps(m);
 }
 

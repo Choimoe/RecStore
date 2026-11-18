@@ -29,7 +29,7 @@ add_library(recstore_torch_ops SHARED
 # CUDA-runtime host helpers live in a .cu so the family .cc files stay free of
 # CUDA includes and __has_include guards. CPU-only builds use a stub instead.
 if(ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
-    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime.cu ../gpu/host_memory.cu)
+    target_sources(recstore_torch_ops PRIVATE op_cuda_runtime.cu op_gpu_ticket.cu ../gpu/host_memory.cu)
     target_compile_options(recstore_torch_ops PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     # The top-level set(CUDA_SEPARABLE_COMPILATION ON) is cleared by the

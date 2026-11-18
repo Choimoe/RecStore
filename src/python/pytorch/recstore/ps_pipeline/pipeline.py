@@ -30,6 +30,7 @@ class _SegmentPlan(NamedTuple):
     permutation: torch.Tensor
     offsets: torch.Tensor
     sources: tuple | None = None
+    inverse: torch.Tensor | None = None
 
 
 @dataclass
@@ -44,6 +45,24 @@ class _MetadataTransfer:
     work: object = None
     ready: object = None
     future: object = None
+
+
+def _fixed_gpu_ticket_metadata(sorted_ids, permutation):
+    """Keep integer outputs at input capacity; only count/keys cross to CPU."""
+    count = sorted_ids.numel()
+    packed = sorted_ids.new_zeros(count + 1)
+    offsets = sorted_ids.new_full((count + 1,), count)
+    inverse = torch.empty_like(permutation)
+    if count:
+        flags = sorted_ids.new_ones(count)
+        flags[1:] = sorted_ids[1:] != sorted_ids[:-1]
+        groups = flags.cumsum(0) - 1
+        inverse.scatter_(0, permutation, groups)
+        packed[1:].scatter_reduce_(0, groups, sorted_ids, reduce="amin", include_self=False)
+        positions = torch.arange(count, dtype=torch.int64, device=sorted_ids.device)
+        offsets[:-1].scatter_reduce_(0, groups, positions, reduce="amin", include_self=True)
+        packed[:1] = groups[-1:] + 1
+    return packed, inverse, offsets
 
 
 class PSPipeline:
@@ -95,6 +114,12 @@ class PSPipeline:
                                 and callable(getattr(torch, "segment_reduce", None)))
         self._gpu_ticket = (os.environ.get("RECSTORE_PS_GPU_TICKET") == "1"
                             and self._segment_reduce)
+        self._gpu_ticket_fixed = (os.environ.get("RECSTORE_PS_GPU_TICKET_FIXED") == "1"
+                                  and self._gpu_ticket
+                                  and callable(getattr(torch.Tensor, "scatter_reduce_", None)))
+        self._gpu_ticket_cub_op = (getattr(torch.ops.recstore_ops, "gpu_ticket_fixed", None)
+                                   if self._gpu_ticket_fixed and
+                                   os.environ.get("RECSTORE_PS_GPU_TICKET_CUB") == "1" else None)
         self._gpu_ticket_thread = get_ident()
         # Blocking initialization makes the immutable offsets ready on any stream.
         self._gpu_ticket_offsets = (self._offsets.to(self.device, non_blocking=False)
@@ -445,29 +470,40 @@ class PSPipeline:
         return ticket, (time.perf_counter() - start) * 1e3, plan
 
     def _build_gpu_ticket(self, step, sparse_features, sparse_batch):
-        """Plan integer metadata on the training stream and return ready CPU tensors."""
+        """Plan integer metadata on the training stream with ready CPU keys."""
         if get_ident() != self._gpu_ticket_thread:
             raise RuntimeError("GPU tickets must be built on the pipeline's training thread")
         start = time.perf_counter()
         raw = self._raw_sparse_ids(sparse_features, sparse_batch)
+        use_fixed = self._gpu_ticket_fixed and raw.numel() <= 2**31 - 1
         pinned = raw.t().contiguous().pin_memory()
         stream = torch.cuda.current_stream(self.device)
         ready = torch.cuda.Event()
         try:
             sample_ids = (pinned.to(self.device, non_blocking=True)
                           + self._gpu_ticket_offsets).reshape(-1)
-            sorted_ids, permutation = torch.sort(sample_ids, stable=True)
-            ids, sorted_inverse, counts = torch.unique_consecutive(
-                sorted_ids, return_inverse=True, return_counts=True)
-            inverse_sample = torch.empty_like(sorted_inverse)
-            inverse_sample.scatter_(0, permutation, sorted_inverse)
-            inverse = inverse_sample.reshape(-1, len(self._keys)).T.contiguous().reshape(-1)
-            offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+            if use_fixed and self._gpu_ticket_cub_op is not None:
+                packed, inverse_sample, permutation, offsets = self._gpu_ticket_cub_op(sample_ids)
+            else:
+                sorted_ids, permutation = torch.sort(sample_ids, stable=True)
+                if use_fixed:
+                    packed, inverse_sample, offsets = _fixed_gpu_ticket_metadata(sorted_ids, permutation)
             outputs = []
-            for tensor in (ids, inverse, permutation, offsets):
-                host = torch.empty(tensor.shape, dtype=torch.int64, pin_memory=True)
-                host.copy_(tensor, non_blocking=True)
+            if use_fixed:
+                host = torch.empty(packed.shape, dtype=torch.int64, pin_memory=True)
+                host.copy_(packed, non_blocking=True)
                 outputs.append(host)
+            else:
+                ids, sorted_inverse, counts = torch.unique_consecutive(
+                    sorted_ids, return_inverse=True, return_counts=True)
+                inverse_sample = torch.empty_like(sorted_inverse)
+                inverse_sample.scatter_(0, permutation, sorted_inverse)
+                inverse = inverse_sample.reshape(-1, len(self._keys)).T.contiguous().reshape(-1)
+                offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+                for tensor in (ids, inverse, permutation, offsets):
+                    host = torch.empty(tensor.shape, dtype=torch.int64, pin_memory=True)
+                    host.copy_(tensor, non_blocking=True)
+                    outputs.append(host)
             ready.record(stream)
             ready.synchronize()
         except BaseException as error:
@@ -478,6 +514,14 @@ class PSPipeline:
                 if hasattr(error, "add_note"):
                     error.add_note("GPU ticket stream drain also failed: " + repr(cleanup))
             raise
+        if use_fixed:
+            unique_count = int(outputs[0][0])
+            if not 0 <= unique_count <= raw.numel():
+                raise RuntimeError("GPU ticket returned an invalid unique count")
+            host_ids = outputs[0][1:unique_count + 1]
+            plan = _SegmentPlan(step, host_ids, permutation, offsets[:unique_count + 1],
+                                inverse=inverse_sample)
+            return ((host_ids, None, raw.numel()), (time.perf_counter() - start) * 1e3, plan)
         host_ids, host_inverse, host_permutation, host_offsets = outputs
         plan = _SegmentPlan(step, host_ids, host_permutation, host_offsets)
         return ((host_ids, host_inverse, raw.numel()),
@@ -504,6 +548,9 @@ class PSPipeline:
         ticket, build_ms, plan = build_ticket(step, sparse_features, sparse_batch)
         result = self._adopt_cpu_ticket(step, ticket, row, build_ms, plan)
         row["ps_pipeline_gpu_ticket"] = int(self._gpu_ticket)
+        row["ps_pipeline_gpu_ticket_fixed"] = int(plan is not None and plan.inverse is not None)
+        row["ps_pipeline_gpu_ticket_cub"] = int(self._gpu_ticket_cub_op is not None
+                                               and row["ps_pipeline_gpu_ticket_fixed"])
         row["lookup_ids_build_ms"] = (time.perf_counter() - start) * 1e3
         return result
 
@@ -565,6 +612,9 @@ class PSPipeline:
         if self._current_segment_plan is not None or (plan is not None and
                 (plan.step != step or plan.ids is not ticket[0])):
             raise RuntimeError("PS pipeline segment plan does not match the consumed batch")
+        device_plan = plan is not None and plan.inverse is not None
+        if (ticket[1] is None) != device_plan:
+            raise RuntimeError("PS pipeline device ticket requires its matching inverse plan")
         start = time.perf_counter()
         result = self._read.result()
         if self._metadata_nccl:
@@ -595,21 +645,30 @@ class PSPipeline:
         row["ps_pipeline_read_bytes"] = read_bytes
         row["ps_pipeline_cache_bytes"] = 0
         # Use sample-major indices for both lookup output and pooled gradients.
-        # Retain pinned source storage until the next committed batch is read.
-        batch = ticket[2] // len(self._keys)
-        inverse = ticket[1].reshape(len(self._keys), batch).t().reshape(-1)
-        if self.device.type == "cuda":
-            inverse = inverse.pin_memory()
-        self._current_inverse_cpu = inverse
-        self._current_inverse = inverse.to(self.device, non_blocking=True)
-        if plan is not None:
-            sources = (plan.permutation, plan.offsets)
-            if self.device.type == "cuda":
-                sources = tuple(source.pin_memory() for source in sources)
-            self._current_segment_plan = plan._replace(
-                permutation=sources[0].to(self.device, non_blocking=True),
-                offsets=sources[1].to(self.device, non_blocking=True), sources=sources)
+        if device_plan:
+            stream = torch.cuda.current_stream(self.device)
+            for tensor in (plan.inverse, plan.permutation, plan.offsets):
+                tensor.record_stream(stream)
+            self._current_inverse_cpu = None
+            self._current_inverse = plan.inverse
+            self._current_segment_plan = plan
             del self._segment_plans[step]
+        else:
+            # Retain pinned sources until the next committed batch is read.
+            batch = ticket[2] // len(self._keys)
+            inverse = ticket[1].reshape(len(self._keys), batch).t().reshape(-1)
+            if self.device.type == "cuda":
+                inverse = inverse.pin_memory()
+            self._current_inverse_cpu = inverse
+            self._current_inverse = inverse.to(self.device, non_blocking=True)
+            if plan is not None:
+                sources = (plan.permutation, plan.offsets)
+                if self.device.type == "cuda":
+                    sources = tuple(source.pin_memory() for source in sources)
+                self._current_segment_plan = plan._replace(
+                    permutation=sources[0].to(self.device, non_blocking=True),
+                    offsets=sources[1].to(self.device, non_blocking=True), sources=sources)
+                del self._segment_plans[step]
         row["ps_pipeline_segment_reduce"] = 0
         self._stage_rows(step, ticket, values, row_count, row)
         self._current_step = step
@@ -666,6 +725,8 @@ class PSPipeline:
         if self._current_segment_plan is not None:
             if self._current_segment_plan.step != step:
                 raise RuntimeError("PS pipeline released the wrong segment plan")
+            if self._current_segment_plan.inverse is not None:
+                self._current_inverse_cpu = self._current_inverse = None
             self._current_segment_plan = None
 
     def _track_commit(self, handle):

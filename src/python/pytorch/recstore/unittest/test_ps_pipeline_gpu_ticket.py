@@ -14,7 +14,8 @@ from .test_ps_pipeline import _PS
 
 _ENV = {'RECSTORE_PS_METADATA_NCCL':'0', 'RECSTORE_PS_DEVICE_MERGE':'0',
             'RECSTORE_DENSE_REDUCE_OVERLAP':'0', 'RECSTORE_PS_PREPARE_DURING_DENSE':'0',
-            'RECSTORE_PS_SEGMENT_REDUCE':'1', 'RECSTORE_PS_GPU_TICKET':'1'}
+            'RECSTORE_PS_SEGMENT_REDUCE':'1', 'RECSTORE_PS_GPU_TICKET':'1',
+            'RECSTORE_PS_GPU_TICKET_FIXED':'0', 'RECSTORE_PS_GPU_TICKET_CUB':'0'}
 
 
 def _pipeline(device='cpu', offsets=None, dimension=7, owner=False):
@@ -24,7 +25,7 @@ def _pipeline(device='cpu', offsets=None, dimension=7, owner=False):
 
 
 @contextmanager
-def _cpu_cuda_mock():
+def _cpu_cuda_mock(expected_copies=4):
     """Exercise integer tensor logic and dispatch; this does not emulate CUDA ordering."""
     tensor, empty, to, copy = torch.tensor, torch.empty, torch.Tensor.to, torch.Tensor.copy_
     state = {'copies':0, 'records':0, 'waits':0, 'drains':0}
@@ -35,7 +36,7 @@ def _cpu_cuda_mock():
     class Event:
         def record(self, value):
             assert value is stream
-            assert state['copies'] == 4, 'completion fence must follow all four D2H copies'
+            assert state['copies'] == expected_copies, 'completion fence must follow all D2H copies'
             state['records'] += 1
         def synchronize(self):
             assert state['records']
@@ -254,6 +255,341 @@ class TestGPUTicketCUDA(unittest.TestCase):
             finally:
                 p.shutdown(flush=False)
 
+
+
+
+
+class TestFixedGPUTicketCPU(unittest.TestCase):
+    def test_fixed_flag_requires_existing_gpu_ticket_eligibility(self):
+        for device,owner,segment,gpu in [('cpu',False,'1','1'),('cuda',True,'1','1'),
+                                         ('cuda',False,'0','1'),('cuda',False,'1','0')]:
+            with self.subTest(device=device,owner=owner,segment=segment,gpu=gpu), \
+                 mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':'1',
+                     'RECSTORE_PS_SEGMENT_REDUCE':segment,'RECSTORE_PS_GPU_TICKET':gpu}), _cpu_cuda_mock():
+                p=_pipeline(device,owner=owner)
+                try:self.assertFalse(p._gpu_ticket_fixed)
+                finally:p.shutdown(flush=False)
+
+    def test_packed_metadata_and_explicit_private_inverse(self):
+        batches=[torch.empty((0,1),dtype=torch.int64),torch.zeros((65,1),dtype=torch.int64),
+                 torch.tensor([[-2**63],[2**63-1],[0],[-2**63]],dtype=torch.int64),
+                 torch.arange(42).reshape(7,6)[:,::2]%7]
+        for batch in batches:
+            offsets={str(i):0 for i in range(batch.shape[1])}
+            with self.subTest(shape=tuple(batch.shape)), \
+                 mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':'1'}), \
+                 _cpu_cuda_mock(expected_copies=1) as state:
+                p=_pipeline('cuda',offsets=offsets)
+                try:
+                    old,_,old_plan=p._build_cpu_ticket(9,None,batch)
+                    ticket,_,plan=p._build_gpu_ticket(9,None,batch)
+                    self.assertIsNone(ticket[1])
+                    self.assertTrue(torch.equal(ticket[0],old[0]))
+                    expected=old[1].reshape(len(offsets),batch.shape[0]).t().reshape(-1)
+                    self.assertTrue(torch.equal(plan.inverse,expected))
+                    self.assertTrue(torch.equal(plan.permutation,old_plan.permutation))
+                    self.assertTrue(torch.equal(plan.offsets,old_plan.offsets))
+                    self.assertEqual((state['copies'],state['records'],state['waits']),(1,1,1))
+                    self.assertEqual(p.prepared_steps,0)
+                finally:p.shutdown(flush=False)
+
+    def test_partial_packed_copy_failure_drains_and_never_adopts(self):
+        with mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':'1'}), \
+             _cpu_cuda_mock(expected_copies=1) as state:
+            p=_pipeline('cuda');original=RuntimeError('packed D2H failed');copy=torch.Tensor.copy_
+            def fail(dst,src,*args,**kwargs):
+                copy(dst,src,*args,**kwargs)
+                raise original
+            try:
+                with mock.patch.object(torch.Tensor,'copy_',fail), \
+                     mock.patch.object(p,'_adopt_cpu_ticket') as adopt, \
+                     mock.patch.object(p,'_queue_prepared_read') as queue:
+                    with self.assertRaises(RuntimeError) as caught:
+                        p.on_batch_prepared(0,None,torch.ones((3,3),dtype=torch.int64),{})
+                self.assertIs(caught.exception,original);adopt.assert_not_called();queue.assert_not_called()
+                self.assertEqual(state['drains'],1);self.assertEqual(p.prepared_steps,0)
+                self.assertFalse(p._segment_plans)
+            finally:p.shutdown(flush=False)
+
+
+@unittest.skipUnless(os.environ.get('RECSTORE_TEST_CUDA')=='1' and torch.cuda.is_available(),
+                     'requires explicit GPU window and RECSTORE_TEST_CUDA=1')
+class TestFixedGPUTicketCUDA(unittest.TestCase):
+    use_cub = False
+
+    def make_pipeline(self):
+        ps=_PS();ps.rows=torch.ones((16,7));submit=ps.sparse_gradient_commit_async
+        ps.sparse_gradient_commit_async=lambda name,ids,grads,**kw:submit(name,ids,grads.cpu(),**kw)
+        with mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':'1',
+                'RECSTORE_PS_GPU_TICKET_CUB':str(int(self.use_cub))}):
+            p=PSPipeline(None,ps,table_offsets={'a':0,'b':1,'c':0},
+                         master_table_name='table',embedding_dim=7,device='cuda:0')
+        return p,ps
+
+    def test_actual_current_next_bound_release_tail_and_early_submit(self):
+        import weakref
+        for early in (False,True):
+            p,ps=self.make_pipeline();opt=PSPipelineSGD(SimpleNamespace(reset_trace=lambda:None),p)
+            batches=[torch.arange(n*6).reshape(n,6)[:,::2]%7 for n in (257,5,1,0)]
+            rows=[{} for _ in batches];ticket=p.on_batch_prepared(0,None,batches[0],rows[0])
+            previous=torch.get_deterministic_debug_mode()
+            try:
+                for step,batch in enumerate(batches):
+                    self.assertIsNone(ticket[1]);p.before_lookup(step,None,ticket,rows[step])
+                    refs=[weakref.ref(x) for x in (p._current_inverse,
+                        p._current_segment_plan.permutation,p._current_segment_plan.offsets)]
+                    next_ticket=None
+                    if step+1<len(batches):
+                        next_ticket=p.on_batch_prepared(step+1,None,batches[step+1],rows[step+1])
+                        self.assertEqual(len(p._segment_plans),1)
+                        self.assertIsNotNone(p._current_segment_plan)
+                        with mock.patch.object(p,'_build_gpu_ticket',side_effect=AssertionError('third plan built')) as build:
+                            with self.assertRaises(RuntimeError):p.on_batch_prepared(step+2,None,batch,{})
+                        build.assert_not_called()
+                    grad=(torch.arange(batch.shape[0]*3*7,dtype=torch.float32).reshape(-1,3,7)%17).cuda()/31
+                    expected=torch.zeros((ticket[0].numel(),7),device='cuda')
+                    torch.set_deterministic_debug_mode(2)
+                    expected.index_add_(0,p._current_inverse,grad.reshape(-1,7))
+                    torch.set_deterministic_debug_mode(previous)
+                    opt.record_pooled_grad(grad)
+                    self.assertTrue(torch.equal(expected.view(torch.int32),opt._grads.view(torch.int32)))
+                    if early:
+                        # The real early hook owns recording, so repeat from its clean state.
+                        opt._grads=None;opt.submit_pooled_grad(grad)
+                    opt.step()
+                    self.assertIsNone(p._current_segment_plan);self.assertIsNone(p._current_inverse)
+                    self.assertIsNone(p._current_inverse_cpu)
+                    self.assertTrue(all(ref() is None for ref in refs))
+                    self.assertEqual(rows[step]['ps_pipeline_gpu_ticket_fixed'],1)
+                    self.assertEqual(rows[step]['ps_pipeline_gpu_ticket_cub'],int(self.use_cub))
+                    ticket=next_ticket
+                p.finish_training();self.assertEqual((p.prepared_steps,p._submitted),(4,4))
+            finally:
+                torch.set_deterministic_debug_mode(previous);p.shutdown(flush=False)
+            self.assertFalse(p._segment_plans);self.assertFalse(ps.pending)
+
+    def test_queue_failure_after_real_read_submission_does_not_retain_plan(self):
+        import gc,weakref
+        p,ps=self.make_pipeline();original=RuntimeError('queue failed');refs=[]
+        build=p._build_gpu_ticket;queue=p._queue_prepared_read
+        def observe(*args):
+            result=build(*args);refs.append(weakref.ref(result[2].inverse));return result
+        def fail(*args):queue(*args);raise original
+        try:
+            with mock.patch.object(p,'_build_gpu_ticket',observe),mock.patch.object(p,'_queue_prepared_read',fail):
+                with self.assertRaises(RuntimeError) as caught:
+                    p.on_batch_prepared(0,None,torch.ones((3,3),dtype=torch.int64),{})
+            self.assertIs(caught.exception,original)
+            self.assertEqual(p.prepared_steps,0);self.assertFalse(p._segment_plans)
+            p.shutdown(flush=False);original.__traceback__=None;gc.collect()
+            self.assertTrue(all(ref() is None for ref in refs));self.assertTrue(p._closed)
+        finally:p.shutdown(flush=False)
+
+    def test_missing_private_plan_is_rejected_before_read_consumption(self):
+        p,_=self.make_pipeline()
+        try:
+            ticket=p.on_batch_prepared(0,None,torch.ones((3,3),dtype=torch.int64),{})
+            p._segment_plans.clear()
+            with mock.patch.object(p._read,'result',side_effect=AssertionError('read consumed')) as read:
+                with self.assertRaisesRegex(RuntimeError,'matching inverse plan'):
+                    p.before_lookup(0,None,ticket,{})
+            read.assert_not_called()
+        finally:p.shutdown(flush=False)
+
+    def test_stage_failure_cross_stream_shutdown_preserves_queued_reads(self):
+        import gc,weakref
+        p,_=self.make_pipeline();producer=torch.cuda.Stream();consumer=torch.cuda.Stream()
+        original=RuntimeError('stage failed');stage=p._stage_rows;copies=[];refs=[];done=torch.cuda.Event()
+        with torch.cuda.stream(producer):
+            ticket=p.on_batch_prepared(0,None,torch.tensor([[1,2,1],[3,1,3]]),{})
+        expected=p._segment_plans[0].inverse.cpu().clone()
+        def fail(*args):
+            stage(*args)
+            refs.append(weakref.ref(p._current_inverse))
+            torch.cuda._sleep(20000000)
+            copies.append(p._current_inverse.clone());done.record(consumer)
+            raise original
+        try:
+            with torch.cuda.stream(consumer),mock.patch.object(p,'_stage_rows',fail):
+                with self.assertRaises(RuntimeError) as caught:p.before_lookup(0,None,ticket,{})
+            self.assertIs(caught.exception,original);self.assertFalse(done.query())
+            p.shutdown(flush=False);original.__traceback__=None
+            self.assertIsNone(p._current_inverse);self.assertIsNone(p._current_segment_plan)
+            self.assertTrue(all(ref() is None for ref in refs))
+            self.assertFalse(done.query(), 'consumer must still be pending during allocation churn')
+            with torch.cuda.stream(producer):
+                churn=[torch.full((6,),-11,dtype=torch.int64,device='cuda') for _ in range(32)]
+            done.synchronize();producer.synchronize();self.assertTrue(torch.equal(copies[0].cpu(),expected))
+            del churn
+        finally:p.shutdown(flush=False)
+
+    def test_accepted_submit_failure_abort_drains_and_releases_inverse(self):
+        import weakref
+        p,ps=self.make_pipeline();original=RuntimeError('wait scheduling failed')
+        try:
+            ticket=p.on_batch_prepared(0,None,torch.ones((3,3),dtype=torch.int64),{})
+            p.before_lookup(0,None,ticket,{})
+            ref=weakref.ref(p._current_inverse)
+            opt=PSPipelineSGD(SimpleNamespace(reset_trace=lambda:None),p)
+            opt.record_pooled_grad(torch.ones((3,3,7),device='cuda'))
+            with mock.patch.object(p._worker,'submit',side_effect=original):
+                with self.assertRaises(RuntimeError) as caught:opt.step()
+            self.assertIs(caught.exception,original);self.assertEqual(p._accepted_step,0)
+            self.assertIsNotNone(ref())
+            with self.assertRaises(RuntimeError) as caught:p.shutdown()
+            self.assertIs(caught.exception,original)
+            self.assertTrue(ps.closed[-1]['abort']);self.assertFalse(ps.pending)
+            self.assertIsNone(p._current_inverse);self.assertIsNone(ref())
+            p.shutdown(flush=False);self.assertEqual(len(ps.closed),1)
+        finally:p.shutdown(flush=False)
+
+
+class TestCUBGPUTicketCPU(unittest.TestCase):
+    @staticmethod
+    def fake_native(ids):
+        # Exercise dispatch/ownership with existing Torch primitives on CPU.
+        sorted_ids, permutation = torch.sort(ids, stable=True)
+        unique, inverse_sorted, counts = torch.unique_consecutive(
+            sorted_ids, return_inverse=True, return_counts=True)
+        inverse = torch.empty_like(inverse_sorted)
+        inverse.scatter_(0, permutation, inverse_sorted)
+        packed = ids.new_zeros(ids.numel() + 1)
+        packed[0] = unique.numel()
+        packed[1:unique.numel()+1] = unique
+        offsets = ids.new_full((ids.numel()+1,), ids.numel())
+        offsets[:unique.numel()+1] = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+        return packed, inverse, permutation, offsets
+
+    def test_cub_gate_requires_fixed_and_available_operator(self):
+        for device,fixed,flag,available,enabled in (
+                ('cpu','1','1',True,False), ('cuda','0','1',True,False),
+                ('cuda','1','0',True,False), ('cuda','1','1',False,False),
+                ('cuda','1','1',True,True)):
+            op = mock.Mock(side_effect=AssertionError('constructor launched native work')) if available else None
+            with self.subTest(device=device,fixed=fixed,flag=flag,available=available), \
+                 mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':fixed,
+                     'RECSTORE_PS_GPU_TICKET_CUB':flag}), \
+                 mock.patch.object(torch.ops.recstore_ops,'gpu_ticket_fixed',op,create=True), _cpu_cuda_mock():
+                p=_pipeline(device)
+                try:self.assertEqual(p._gpu_ticket_cub_op is not None,enabled)
+                finally:p.shutdown(flush=False)
+
+    def test_cub_dispatch_and_missing_operator_report_actual_path(self):
+        for available in (False,True):
+            op=mock.Mock(side_effect=self.fake_native) if available else None
+            with self.subTest(available=available), \
+                 mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':'1',
+                     'RECSTORE_PS_GPU_TICKET_CUB':'1'}), \
+                 mock.patch.object(torch.ops.recstore_ops,'gpu_ticket_fixed',op,create=True), \
+                 _cpu_cuda_mock(expected_copies=1) as state:
+                p=_pipeline('cuda');batch=torch.tensor([[1,2,1],[1,0,2]])
+                try:
+                    expected,_,expected_plan=p._build_cpu_ticket(0,None,batch)
+                    row={}
+                    with mock.patch.object(p,'_queue_prepared_read'):
+                        ticket=p.on_batch_prepared(0,None,batch,row)
+                    plan=p._segment_plans[0]
+                    self.assertTrue(torch.equal(ticket[0],expected[0]));self.assertIsNone(ticket[1])
+                    self.assertTrue(torch.equal(plan.permutation,expected_plan.permutation))
+                    self.assertTrue(torch.equal(plan.offsets,expected_plan.offsets))
+                    self.assertTrue(torch.equal(plan.inverse,expected[1].reshape(3,-1).t().reshape(-1)))
+                    self.assertEqual((row['ps_pipeline_gpu_ticket_fixed'],row['ps_pipeline_gpu_ticket_cub']),
+                                     (1,int(available)))
+                    self.assertEqual((state['copies'],state['waits']),(1,1))
+                    if available:op.assert_called_once()
+                finally:p.shutdown(flush=False)
+
+    def test_native_failure_is_drained_without_fallback_or_adoption(self):
+        original=RuntimeError('native integer plan failed')
+        op=mock.Mock(side_effect=original)
+        with mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':'1',
+                'RECSTORE_PS_GPU_TICKET_CUB':'1'}), \
+             mock.patch.object(torch.ops.recstore_ops,'gpu_ticket_fixed',op,create=True), _cpu_cuda_mock() as state:
+            p=_pipeline('cuda')
+            try:
+                with mock.patch.object(torch,'sort',side_effect=AssertionError('native failure retried')), \
+                     mock.patch.object(p,'_adopt_cpu_ticket') as adopt:
+                    with self.assertRaises(RuntimeError) as caught:
+                        p.on_batch_prepared(0,None,torch.ones((2,3),dtype=torch.int64),{})
+                self.assertIs(caught.exception,original);op.assert_called_once();adopt.assert_not_called()
+                self.assertEqual(state['drains'],1);self.assertEqual(p.prepared_steps,0)
+            finally:p.shutdown(flush=False)
+
+    def test_oversized_dispatch_keeps_existing_nonfixed_path(self):
+        class OversizedRaw:
+            def numel(self):return 2**31
+            def t(self):return torch.ones((2,3),dtype=torch.int64)
+        op=mock.Mock(side_effect=AssertionError('oversized native plan launched'))
+        with mock.patch.dict(os.environ,{**_ENV,'RECSTORE_PS_GPU_TICKET_FIXED':'1',
+                'RECSTORE_PS_GPU_TICKET_CUB':'1'}), \
+             mock.patch.object(torch.ops.recstore_ops,'gpu_ticket_fixed',op,create=True), _cpu_cuda_mock() as state:
+            p=_pipeline('cuda')
+            try:
+                row={}
+                with mock.patch.object(p,'_raw_sparse_ids',return_value=OversizedRaw()), \
+                     mock.patch.object(p,'_queue_prepared_read'):
+                    ticket=p.on_batch_prepared(0,None,None,row)
+                self.assertIsNotNone(ticket[1]);op.assert_not_called()
+                self.assertEqual((row['ps_pipeline_gpu_ticket_fixed'],row['ps_pipeline_gpu_ticket_cub']),(0,0))
+                self.assertEqual(state['copies'],4)
+            finally:p.shutdown(flush=False)
+
+
+class TestCUBGPUTicketCUDA(TestFixedGPUTicketCUDA):
+    """Repeat the real pipeline current/next and failure suite with native plans."""
+    use_cub = True
+
+    def setUp(self):
+        if not callable(getattr(torch.ops.recstore_ops,'gpu_ticket_fixed',None)):
+            self.skipTest('requires recstore_ops built with the CUDA integer operator')
+
+    def make_pipeline(self):
+        p,ps=super().make_pipeline()
+        self.assertIsNotNone(p._gpu_ticket_cub_op)
+        return p,ps
+
+    def test_native_integer_outputs_and_allocation_bound(self):
+        op=torch.ops.recstore_ops.gpu_ticket_fixed
+        for values in ([],[3]*257,[2**63-1,-2**63,4,4,0,-1],list(range(31,-1,-1))*3):
+            source=torch.tensor(values,dtype=torch.int64,device='cuda')
+            packed,inverse,permutation,offsets=op(source)
+            order=sorted(range(len(values)),key=lambda i:values[i])
+            unique=[];starts=[];expected_inverse=[0]*len(values)
+            for position,index in enumerate(order):
+                if not position or values[index]!=values[order[position-1]]:
+                    unique.append(values[index]);starts.append(position)
+                expected_inverse[index]=len(unique)-1
+            self.assertEqual(packed.cpu().tolist(),[len(unique)]+unique+[0]*(len(values)-len(unique)))
+            self.assertEqual(inverse.cpu().tolist(),expected_inverse)
+            self.assertEqual(permutation.cpu().tolist(),order)
+            self.assertEqual(offsets.cpu().tolist(),starts+[len(values)]*(len(values)+1-len(unique)))
+        large=torch.zeros(1,dtype=torch.int64,device='cuda').expand(2**31)
+        torch.cuda.reset_peak_memory_stats();before=torch.cuda.memory_allocated()
+        with self.assertRaisesRegex(RuntimeError,'CUB scan limit'):op(large)
+        self.assertEqual(torch.cuda.max_memory_allocated(),before)
+        for invalid in (torch.ones(2,dtype=torch.int64),torch.ones(2,device='cuda'),
+                        torch.ones((2,2),dtype=torch.int64,device='cuda')):
+            with self.assertRaises(RuntimeError):op(invalid)
+
+    def test_real_native_enqueue_failure_drains_before_propagating(self):
+        p,_=self.make_pipeline();native=p._gpu_ticket_cub_op;done=torch.cuda.Event()
+        original=RuntimeError('failure after native CUDA enqueue')
+        def fail(ids):
+            torch.cuda._sleep(20000000)
+            native(ids)
+            done.record(torch.cuda.current_stream(ids.device))
+            self.assertFalse(done.query(), 'native work must still be pending at the injected failure')
+            raise original
+        try:
+            with mock.patch.object(p,'_gpu_ticket_cub_op',side_effect=fail) as call, \
+                 mock.patch.object(torch,'sort',side_effect=AssertionError('native failure retried')), \
+                 mock.patch.object(p,'_adopt_cpu_ticket') as adopt:
+                with self.assertRaises(RuntimeError) as caught:
+                    p.on_batch_prepared(0,None,torch.ones((3,3),dtype=torch.int64),{})
+            self.assertIs(caught.exception,original);call.assert_called_once();adopt.assert_not_called()
+            self.assertTrue(done.query());self.assertEqual(p.prepared_steps,0)
+            self.assertFalse(p._segment_plans)
+        finally:p.shutdown(flush=False)
 
 
 if __name__ == '__main__':

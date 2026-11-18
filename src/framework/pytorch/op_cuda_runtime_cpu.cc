@@ -1,4 +1,5 @@
 #include "framework/pytorch/op_cuda_runtime.h"
+#include <torch/library.h>
 
 // CPU-only fallback for builds without a CUDA toolkit: the stream
 // synchronization is a no-op and page-locking always reports failure so the
@@ -6,6 +7,9 @@
 
 namespace recstore {
 namespace framework {
+
+// Leave the optional integer CUDA operator absent in CPU-only builds.
+void RegisterGPUTicketOps(torch::Library&) {}
 
 std::function<void()>
 RecordCudaCompletionForTensor(const torch::Tensor& tensor) {
