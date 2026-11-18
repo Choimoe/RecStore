@@ -27,6 +27,8 @@ GPU tickets construct integer IDs and stable segment plans on CUDA, then return 
 
 Set `RECSTORE_SGD_ROW_PREFETCH=1` in each PS process to prefetch upcoming direct DRAM rows during sparse SGD. The update loop looks eight rows ahead and hints up to 512 bytes per row, while preserving row order and floating-point operations. This option defaults off and skips missing rows; its benefit depends on the working set, so compare full-loop throughput with the same option disabled.
 
+`RECSTORE_DRAM_SIZE_PREFETCH=8` or `16` prefetches legacy concurrent-slab allocation-size headers during direct row lookup. The default is `0`; other allocators retain their existing lookup path. This changes metadata access, not payload size or SGD arithmetic. Compare it independently from row-data prefetch, including warm and tail batches.
+
 ## Size the PS index independently of the model
 
 `cache_ps.base_kv_config.capacity` sizes the index. Choose it from the complete key population, including optimizer namespaces and expected growth, and verify the most populated shard. Keep model cardinalities, initialized rows, and the value allocator unchanged when testing index capacity. A cap on each feature's cardinality is different from the sum of all feature cardinalities.

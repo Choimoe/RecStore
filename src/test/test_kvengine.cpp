@@ -24,6 +24,7 @@
 
 #include "storage/kv_engine/engine_factory.h"
 #include "storage/kv_engine/engine_selector.h"
+#include "storage/value_store/dram_value_store.h"
 #include "storage/nvm/pet_kv/pet_hash.h"
 #include "test_io_uring_helper.h"
 
@@ -2422,4 +2423,90 @@ TEST(KVEngineFlatReadTest, DramRowsMissingPositionsEmptyBatchColdAndWarm) {
   test.SetUp();
   ASSERT_NE(test.engine_, nullptr);
   test.EmptyBatchSucceedsBeforeAndAfterLookup();
+}
+
+TEST(DramSizePrefetchTest, PreservesOrderedValidationAndPartialOutputs) {
+  struct EnvironmentGuard {
+    const char* name;
+    bool existed;
+    std::string value;
+    explicit EnvironmentGuard(const char* key) : name(key), existed(std::getenv(key) != nullptr),
+        value(existed ? std::getenv(key) : "") {}
+    ~EnvironmentGuard() {
+      if (existed) setenv(name, value.c_str(), 1);
+      else unsetenv(name);
+    }
+  } prefetch_env("RECSTORE_DRAM_SIZE_PREFETCH");
+  struct BackendGuard {
+    base::PMMmapRegisterCenter::Backend previous = base::PMMmapRegisterCenter::GetConfig().backend;
+    ~BackendGuard() { base::PMMmapRegisterCenter::GetConfig().backend = previous; }
+  } backend_guard;
+  base::PMMmapRegisterCenter::GetConfig().backend = base::PMMmapRegisterCenter::Backend::kAnonymousDram;
+  for (const char* distance : {"0", "8", "16"}) {
+    for (int variant = 0; variant < 3; ++variant) {
+      SCOPED_TRACE(::testing::Message() << "distance=" << distance
+                                       << " allocator=" << variant);
+      setenv("RECSTORE_DRAM_SIZE_PREFETCH", distance, 1);
+      const std::string path = "/dev/shm/test_size_prefetch_" + std::to_string(getpid()) + "_" +
+                               distance + "_" + std::to_string(variant);
+      struct PathGuard {
+        std::filesystem::path path;
+        ~PathGuard() { std::error_code error; std::filesystem::remove_all(path, error); }
+      } path_guard{path};
+      std::filesystem::create_directories(path);
+      BaseKVConfig config;
+      config.json_config_ = {{"value", {{"path", path}, {"dram_allocator", {
+          {"type", variant == 2 ? "PERSIST_LOOP_SLAB" : "CONCURRENT_SLAB_MEMORY_POOL"},
+          {"capacity_bytes", 64ULL << 20}}}}}};
+      if (variant == 1)
+        config.json_config_["value"]["dram_allocator"]["size_classes"] = {136, 520, 1032};
+      DramValueStore store(config);
+      const std::string short_value(128, 's'), exact_value(512, 'e'), long_value(516, 'l');
+      const auto short_handle = store.AllocAndWrite(short_value.data(), short_value.size());
+      const auto exact_handle = store.AllocAndWrite(exact_value.data(), exact_value.size());
+      const auto long_handle = store.AllocAndWrite(long_value.data(), long_value.size());
+      ASSERT_NE(short_handle, kValueHandleNone);
+      ASSERT_NE(exact_handle, kValueHandleNone);
+      ASSERT_NE(long_handle, kValueHandleNone);
+      const auto sentinel = ValueStore::DirectFixedRow{store.DirectPtr(exact_handle), 999, true};
+      for (size_t n : {0, 1, 7, 8, 9, 15, 16, 17}) {
+        std::vector<uint64_t> handles(std::max(n, size_t{1}), exact_handle);
+        for (size_t row = 0; row < n; ++row) {
+          if (row % 3 == 1) handles[row] = kValueHandleNone;
+          if (row % 3 == 2) handles[row] = long_handle;
+        }
+        std::vector<ValueStore::DirectFixedRow> rows(handles.size(), sentinel);
+        uint64_t missing = 777;
+        ASSERT_TRUE(store.GetDirectFixedRows(handles.data(), n, 512, rows.data(), &missing));
+        EXPECT_EQ(missing, (n + 1) / 3);
+        for (size_t row = 0; row < n; ++row) {
+          EXPECT_EQ(rows[row].size, 512);
+          EXPECT_EQ(rows[row].missing, row % 3 == 1);
+          if (row % 3 == 1) EXPECT_EQ(rows[row].data, nullptr);
+          else EXPECT_EQ(std::memcmp(rows[row].data, row % 3 == 2 ? long_value.data() : exact_value.data(), 512), 0);
+        }
+      }
+      for (size_t fail_at : {0, 7, 8, 15, 16}) {
+        std::vector<uint64_t> handles(18, exact_handle);
+        handles[fail_at] = short_handle;
+        // An invalid future handle must not be dereferenced before the short row rejects.
+        handles.back() = UINT64_MAX;
+        std::vector<ValueStore::DirectFixedRow> rows(handles.size(), sentinel);
+        uint64_t missing = 777;
+        EXPECT_FALSE(store.GetDirectFixedRows(handles.data(), handles.size(), 512, rows.data(), &missing));
+        EXPECT_EQ(missing, 777);
+        for (size_t row = 0; row < handles.size(); ++row) {
+          EXPECT_EQ(rows[row].data, sentinel.data);
+          EXPECT_EQ(rows[row].size, row < fail_at ? 512 : sentinel.size);
+          EXPECT_EQ(rows[row].missing, row < fail_at ? false : sentinel.missing);
+        }
+      }
+      EXPECT_EQ(store.SlotCapacity(short_handle), 128);
+      EXPECT_EQ(store.SlotCapacity(exact_handle), 512);
+      EXPECT_EQ(store.SlotCapacity(long_handle), 516);
+      store.Free(short_handle);
+      store.Free(exact_handle);
+      store.Free(long_handle);
+    }
+  }
 }

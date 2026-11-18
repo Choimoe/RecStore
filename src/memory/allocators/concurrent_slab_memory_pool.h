@@ -402,6 +402,16 @@ public:
     return GetMallocSize(GetMallocData(offset));
   }
 
+  void PrefetchMallocSize(int64 offset) const noexcept {
+    if constexpr (!PERFECT_FIT_MOD) {
+      // Speculative hints must not form an address outside the backing region.
+      if (offset >= kMetaDataSize &&
+          offset < nr_chunks_ * static_cast<int64>(kChunkSize)) {
+        __builtin_prefetch(shm_file_->Data() + offset - kMetaDataSize, 0, 3);
+      }
+    }
+  }
+
   int64 GetMallocOffset(const char* data) const override {
     const auto ret = data - shm_file_->Data();
     CHECK_EQ((ret >> 3) << 3, ret);

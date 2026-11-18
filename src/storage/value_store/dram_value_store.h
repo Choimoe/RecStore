@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -29,6 +30,15 @@ public:
     const std::string path           = value.at("path").get<std::string>();
     const auto& dram                 = value.at("dram_allocator");
     const std::string allocator_type = dram.value("type", "R2_SLAB");
+    const char* size_prefetch = std::getenv("RECSTORE_DRAM_SIZE_PREFETCH");
+    if (size_prefetch != nullptr && std::strcmp(size_prefetch, "0") != 0) {
+      if (std::strcmp(size_prefetch, "8") == 0)
+        size_prefetch_distance_ = 8;
+      else if (std::strcmp(size_prefetch, "16") == 0)
+        size_prefetch_distance_ = 16;
+      else
+        throw std::invalid_argument("RECSTORE_DRAM_SIZE_PREFETCH must be 0, 8 or 16");
+    }
     const uint64_t capacity_bytes = dram.at("capacity_bytes").get<uint64_t>();
     std::vector<int> size_classes;
     if (dram.contains("size_classes")) {
@@ -70,6 +80,11 @@ public:
       throw std::runtime_error("failed to create DramValueStore allocator");
     }
     allocator_->Initialize();
+    if (size_prefetch_distance_ != 0) {
+      size_prefetch_allocator_ = dynamic_cast<const base::ConcurrentSlabMemoryPool<false>*>(allocator_.get());
+      if (size_prefetch_allocator_ == nullptr)
+        size_prefetch_distance_ = 0;
+    }
     recycler_ = std::make_unique<base::ThreadSafeDelayedRecycle>(
         allocator_.get(), kRecycleDelayUs);
   }
@@ -227,8 +242,18 @@ public:
     if (handles == nullptr || rows == nullptr || row_bytes == 0) {
       return false;
     }
+    const auto prefetch_size = [&](size_t row) {
+      if (handles[row] != kValueHandleNone)
+        size_prefetch_allocator_->PrefetchMallocSize(DecodeOffset(handles[row]));
+    };
+    if (size_prefetch_allocator_ != nullptr) {
+      for (size_t row = 0; row < std::min(num_rows, size_prefetch_distance_); ++row)
+        prefetch_size(row);
+    }
     uint64_t local_missing = 0;
     for (size_t row = 0; row < num_rows; ++row) {
+      if (size_prefetch_allocator_ != nullptr && num_rows - row > size_prefetch_distance_)
+        prefetch_size(row + size_prefetch_distance_);
       if (handles[row] == kValueHandleNone) {
         rows[row] = DirectFixedRow{nullptr, row_bytes, true};
         ++local_missing;
@@ -332,6 +357,8 @@ private:
         __builtin_ctzll(static_cast<unsigned long long>(value)));
   }
 
+  size_t size_prefetch_distance_ = 0;
+  const base::ConcurrentSlabMemoryPool<false>* size_prefetch_allocator_ = nullptr;
   std::unique_ptr<base::MallocApi> allocator_;
   std::unique_ptr<base::ThreadSafeDelayedRecycle> recycler_;
   static constexpr int64 kRecycleDelayUs = 1000;
