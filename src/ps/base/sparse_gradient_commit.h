@@ -206,6 +206,83 @@ public:
   }
 };
 
+inline bool SparseCommitSortedPairEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("RECSTORE_SPARSE_COMMIT_SORTED_PAIR");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
+// The coordinator has validated every packet and passes empty output vectors.
+// Reject the entire fast path before writing outputs if either rank is not
+// strictly increasing across all chunks, including empty chunk boundaries.
+inline bool TryAggregateSortedPair(
+    const std::vector<std::vector<std::string>>& ranks,
+    const SparseGradientCommitHeader& h,
+    std::vector<uint64_t>& keys,
+    std::vector<float>& grads) {
+  if (h.version != 1 || h.world != 2 || ranks.size() != 2)
+    return false;
+  const size_t max_rows = std::min({keys.max_size(), grads.max_size() / h.dim,
+      std::unordered_map<uint64_t, size_t>().max_size()});
+  size_t input_rows = 0;
+  for (const auto& rank : ranks) {
+    bool have_previous = false;
+    uint64_t previous = 0;
+    for (const auto& packet : rank) {
+      const auto ch = DecodeSparseGradientCommit(packet);
+      if (ch.rows > max_rows - input_rows)
+        throw std::length_error("Sparse gradient aggregate exceeds capacity");
+      input_rows += ch.rows;
+      for (size_t row = 0; row < ch.rows; ++row) {
+        uint64_t key;
+        std::memcpy(&key, packet.data() + sizeof(ch) + row * 8, 8);
+        if (have_previous && key <= previous)
+          return false;
+        previous = key;
+        have_previous = true;
+      }
+    }
+  }
+  if (SparseCommitReserveEnabled()) {
+    keys.reserve(input_rows);
+    grads.reserve(input_rows * h.dim);
+  }
+  size_t rank0_rows = 0, cursor = 0;
+  for (size_t rank = 0; rank < 2; ++rank) {
+    for (const auto& packet : ranks[rank]) {
+      const auto ch = DecodeSparseGradientCommit(packet);
+      const char* key_data = packet.data() + sizeof(ch);
+      const char* grad_data = key_data + size_t(ch.rows) * 8;
+      for (size_t row = 0; row < ch.rows; ++row) {
+        uint64_t key;
+        std::memcpy(&key, key_data + row * 8, 8);
+        size_t position = keys.size();
+        if (rank == 1) {
+          while (cursor < rank0_rows && keys[cursor] < key)
+            ++cursor;
+          if (cursor < rank0_rows && keys[cursor] == key)
+            position = cursor;
+        }
+        if (position == keys.size()) {
+          keys.push_back(key);
+          grads.resize(keys.size() * h.dim, 0.0f);
+        }
+        float* dst = grads.data() + position * h.dim;
+        for (size_t col = 0; col < h.dim; ++col) {
+          float value;
+          std::memcpy(&value, grad_data + (row * h.dim + col) * 4, 4);
+          dst[col] += value;
+        }
+      }
+    }
+    if (rank == 0)
+      rank0_rows = keys.size();
+  }
+  return true;
+}
+
 // One in-flight step per table. Handlers never wait for another trainer.
 class SparseGradientCommitCoordinator {
 public:
@@ -377,42 +454,46 @@ public:
     std::vector<uint64_t> keys;
     std::vector<float> grads;
     std::unordered_map<uint64_t, size_t> positions;
-    if (SparseCommitReserveEnabled()) {
-      const size_t max_rows =
-          std::min({keys.max_size(), positions.max_size(),
-                    grads.max_size() / h.dim});
-      size_t input_rows = 0;
+    const bool sorted_pair = SparseCommitSortedPairEnabled() &&
+        TryAggregateSortedPair(state.ranks, h, keys, grads);
+    if (!sorted_pair) {
+      if (SparseCommitReserveEnabled()) {
+        const size_t max_rows =
+            std::min({keys.max_size(), positions.max_size(),
+                      grads.max_size() / h.dim});
+        size_t input_rows = 0;
+        for (const auto& rank : state.ranks) {
+          for (const auto& chunk : rank) {
+            const size_t rows = DecodeSparseGradientCommit(chunk).rows;
+            if (rows > max_rows - input_rows)
+              throw std::length_error("Sparse gradient aggregate exceeds capacity");
+            input_rows += rows;
+          }
+        }
+        keys.reserve(input_rows);
+        grads.reserve(input_rows * h.dim);
+        positions.reserve(input_rows);
+      }
+      // Fixed rank/chunk order makes network arrival order irrelevant.
       for (const auto& rank : state.ranks) {
         for (const auto& chunk : rank) {
-          const size_t rows = DecodeSparseGradientCommit(chunk).rows;
-          if (rows > max_rows - input_rows)
-            throw std::length_error("Sparse gradient aggregate exceeds capacity");
-          input_rows += rows;
-        }
-      }
-      keys.reserve(input_rows);
-      grads.reserve(input_rows * h.dim);
-      positions.reserve(input_rows);
-    }
-    // Fixed rank/chunk order makes network arrival order irrelevant.
-    for (const auto& rank : state.ranks) {
-      for (const auto& chunk : rank) {
-        const auto ch         = DecodeSparseGradientCommit(chunk);
-        const char* key_data  = chunk.data() + sizeof(ch);
-        const char* grad_data = key_data + size_t(ch.rows) * 8;
-        for (size_t row = 0; row < ch.rows; ++row) {
-          uint64_t key;
-          std::memcpy(&key, key_data + row * 8, 8);
-          auto entry = positions.emplace(key, keys.size());
-          if (entry.second) {
-            keys.push_back(key);
-            grads.resize(keys.size() * h.dim, 0.0f);
-          }
-          float* dst = grads.data() + entry.first->second * h.dim;
-          for (size_t col = 0; col < h.dim; ++col) {
-            float value;
-            std::memcpy(&value, grad_data + (row * h.dim + col) * 4, 4);
-            dst[col] += value;
+          const auto ch         = DecodeSparseGradientCommit(chunk);
+          const char* key_data  = chunk.data() + sizeof(ch);
+          const char* grad_data = key_data + size_t(ch.rows) * 8;
+          for (size_t row = 0; row < ch.rows; ++row) {
+            uint64_t key;
+            std::memcpy(&key, key_data + row * 8, 8);
+            auto entry = positions.emplace(key, keys.size());
+            if (entry.second) {
+              keys.push_back(key);
+              grads.resize(keys.size() * h.dim, 0.0f);
+            }
+            float* dst = grads.data() + entry.first->second * h.dim;
+            for (size_t col = 0; col < h.dim; ++col) {
+              float value;
+              std::memcpy(&value, grad_data + (row * h.dim + col) * 4, 4);
+              dst[col] += value;
+            }
           }
         }
       }
@@ -433,7 +514,7 @@ public:
       state.profile_apply_ns += applied - aggregated;
       state.profile_unique_rows += keys.size();
     }
-    FinishStep(state, h, profile, request_start, collected, applied);
+    FinishStep(state, h, profile, request_start, collected, applied, sorted_pair);
     return state.committed;
   }
 
@@ -554,7 +635,8 @@ private:
                   bool profile,
                   uint64_t request_start,
                   uint64_t collected,
-                  uint64_t applied) {
+                  uint64_t applied,
+                  bool sorted_pair = false) {
     state.committed = h.step;
     if (h.version == 4) {
       state.last_exact_packets = std::move(state.ranks);
@@ -575,7 +657,7 @@ private:
           "world=%u dim=%u chunks=%llu input_rows=%llu unique_rows=%zu "
           "payload_bytes=%llu arrival_span_ms=%.6f lock_wait_ms=%.6f "
           "collect_cpu_ms=%.6f aggregate_ms=%.6f apply_ms=%.6f "
-          "release_chunks_ms=%.6f last_request_ms=%.6f version=%u\n",
+          "release_chunks_ms=%.6f last_request_ms=%.6f version=%u sorted_pair=%d\n",
           static_cast<unsigned long long>(h.session),
           static_cast<long long>(h.step),
           h.world,
@@ -591,7 +673,8 @@ private:
           state.profile_apply_ns / 1e6,
           (released - applied) / 1e6,
           (released - request_start) / 1e6,
-          h.version);
+          h.version,
+          static_cast<int>(sorted_pair));
       state.profile_first_ns      = 0;
       state.profile_lock_ns       = 0;
       state.profile_collect_ns    = 0;

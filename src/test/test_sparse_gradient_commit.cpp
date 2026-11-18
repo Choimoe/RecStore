@@ -1038,3 +1038,187 @@ TEST(SparseGradientCommit, Pow2ScaleProtocolPreservesFixedRankChunkReduction) {
   }
 }
 #endif
+
+// Append to test_sparse_gradient_commit.cpp after applying the source patch.
+namespace {
+using PairPackets = std::vector<std::vector<std::string>>;
+
+PairPackets MakePairPackets(const std::vector<std::vector<uint64_t>>& ids,
+                            uint32_t dim) {
+  const uint32_t bits[] = {0, 0x80000000u, 1, 0x007fffffu, 0x00800000u,
+      0x3f800000u, 0xbf800000u, 0x60ad78ecu, 0xe0ad78ecu,
+      0x7f800000u, 0xff800000u, 0x7fc12345u, 0xffc54321u, 0x7f800001u};
+  PairPackets packets(ids.size());
+  for (uint32_t rank = 0; rank < ids.size(); ++rank) {
+    const size_t half = ids[rank].size() / 2;
+    const size_t starts[] = {0, half, half};
+    const size_t ends[] = {half, half, ids[rank].size()}; // Empty middle chunk.
+    for (uint32_t chunk = 0; chunk < 3; ++chunk) {
+      recstore::SparseGradientCommitHeader h;
+      h.session = 70009;
+      h.world = ids.size();
+      h.divisor = h.world;
+      h.rank = rank;
+      h.dim = dim;
+      h.chunk = chunk;
+      h.chunks = 3;
+      h.rows = ends[chunk] - starts[chunk];
+      std::vector<float> values(size_t(h.rows) * dim);
+      for (size_t row = 0; row < h.rows; ++row) {
+        for (size_t col = 0; col < dim; ++col) {
+          const auto word = bits[(starts[chunk] + row + rank * 3 + col) % 14];
+          std::memcpy(&values[row * dim + col], &word, sizeof(word));
+        }
+      }
+      const auto* keys = h.rows ? ids[rank].data() + starts[chunk] : nullptr;
+      packets[rank].push_back(recstore::PackSparseGradientCommit(h, keys, values.data()));
+    }
+  }
+  return packets;
+}
+
+// Independent legacy algorithm: first-seen hash positions and rank/chunk adds.
+std::pair<std::vector<uint64_t>, std::vector<float>> PairHashReference(
+    const PairPackets& ranks, uint32_t dim) {
+  std::vector<uint64_t> keys;
+  std::vector<float> grads;
+  std::unordered_map<uint64_t, size_t> positions;
+  for (const auto& rank : ranks) {
+    for (const auto& packet : rank) {
+      const auto h = recstore::DecodeSparseGradientCommit(packet);
+      const char* key_data = packet.data() + sizeof(h);
+      const char* grad_data = key_data + size_t(h.rows) * 8;
+      for (size_t row = 0; row < h.rows; ++row) {
+        uint64_t key;
+        std::memcpy(&key, key_data + row * 8, 8);
+        const auto entry = positions.emplace(key, keys.size());
+        if (entry.second) {
+          keys.push_back(key);
+          grads.resize(keys.size() * dim, 0.0f);
+        }
+        float* dst = grads.data() + entry.first->second * dim;
+        for (size_t col = 0; col < dim; ++col) {
+          float value;
+          std::memcpy(&value, grad_data + (row * dim + col) * 4, 4);
+          dst[col] += value;
+        }
+      }
+    }
+  }
+  return {std::move(keys), std::move(grads)};
+}
+
+void ExpectPairBits(const std::vector<float>& actual, const std::vector<float>& expected) {
+  ASSERT_EQ(actual.size(), expected.size());
+  if (!actual.empty())
+    EXPECT_EQ(std::memcmp(actual.data(), expected.data(), actual.size() * 4), 0);
+}
+} // namespace
+
+TEST(SparseGradientCommit, SortedPairPreservesFirstSeenOrderAndAllFloatBits) {
+  const std::vector<std::vector<std::vector<uint64_t>>> cases = {
+      {{2, 4}, {1, 2, 3, 5}}, {{}, {}}, {{}, {0, 8}}, {{0, 8}, {}},
+      {{0, 1, 8}, {0, 1, 8}}, {{1, 3}, {5, 7}},
+      {{1ull << 56, (1ull << 56) + 8}, {(1ull << 56) + 1, (1ull << 56) + 8}},
+      {{0, UINT64_MAX - 1}, {1, UINT64_MAX}}};
+  for (uint32_t dim : {1u, 2u, 7u, 128u, 129u}) {
+    for (const auto& ids : cases) {
+      const auto packets = MakePairPackets(ids, dim);
+      const auto h = recstore::DecodeSparseGradientCommit(packets[0][0]);
+      const auto expected = PairHashReference(packets, dim);
+      std::vector<uint64_t> actual_keys;
+      std::vector<float> actual_values;
+      ASSERT_TRUE(recstore::TryAggregateSortedPair(packets, h, actual_keys, actual_values));
+      EXPECT_EQ(actual_keys, expected.first);
+      ExpectPairBits(actual_values, expected.second);
+      if (ids == cases[0])
+        EXPECT_EQ(actual_keys, (std::vector<uint64_t>{2, 4, 1, 3, 5}));
+    }
+  }
+  // Generated ordered subsets cover all rank intersections without sorting in
+  // the implementation under test. Chunk boundaries and empty chunks vary.
+  uint32_t seed = 1709;
+  for (int trial = 0; trial < 64; ++trial) {
+    std::vector<std::vector<uint64_t>> ids(2);
+    for (uint64_t key = 0; key < 65; ++key) {
+      seed = seed * 1664525u + 1013904223u;
+      if ((seed >> 16) & 1) ids[0].push_back(key);
+      if ((seed >> 24) & 1) ids[1].push_back(key);
+    }
+    const uint32_t dim = trial % 2 ? 7 : 129;
+    const auto packets = MakePairPackets(ids, dim);
+    const auto h = recstore::DecodeSparseGradientCommit(packets[0][0]);
+    const auto expected = PairHashReference(packets, dim);
+    std::vector<uint64_t> actual_keys;
+    std::vector<float> actual_values;
+    ASSERT_TRUE(recstore::TryAggregateSortedPair(packets, h, actual_keys, actual_values));
+    EXPECT_EQ(actual_keys, expected.first);
+    ExpectPairBits(actual_values, expected.second);
+  }
+}
+
+TEST(SparseGradientCommit, SortedPairRejectsBeforeMutatingOutputs) {
+  for (const auto& ids : std::vector<std::vector<std::vector<uint64_t>>>{
+      {{1, 2, 2, 3}, {1, 4}}, {{1, 3, 2, 4}, {0, 5}},
+      {{1, 2}, {4, 3}}, {{1, 2}, {1, 2, 2, 3}}, {{1}, {2}, {3}}}) {
+    const auto packets = MakePairPackets(ids, 7);
+    const auto h = recstore::DecodeSparseGradientCommit(packets[0][0]);
+    std::vector<uint64_t> keys{999};
+    std::vector<float> grads{3.25f};
+    EXPECT_FALSE(recstore::TryAggregateSortedPair(packets, h, keys, grads));
+    EXPECT_EQ(keys, (std::vector<uint64_t>{999}));
+    EXPECT_EQ(grads, (std::vector<float>{3.25f}));
+  }
+}
+
+TEST(SparseGradientCommit, SortedPairCoordinatorAndFallbackKeepReverseArrivalBits) {
+  for (const auto& ids : std::vector<std::vector<std::vector<uint64_t>>>{
+      {{2, 4}, {1, 2, 3, 5}}, {{}, {}}, {{}, {0, 2}},
+      {{1, 3, 2, 4}, {1, 2}}, {{1, 2, 2, 4}, {2, 4}}, {{1}, {1}, {1}}}) {
+    const uint32_t dim = 129;
+    const auto packets = MakePairPackets(ids, dim);
+    const auto h = recstore::DecodeSparseGradientCommit(packets[0][0]);
+    auto expected = PairHashReference(packets, dim);
+    if (h.divisor != 1)
+      for (auto& value : expected.second) value /= h.divisor;
+    recstore::SparseGradientCommitCoordinator coordinator;
+    int calls = 0;
+    auto apply = [&](const auto& keys, const auto& values) {
+      ++calls;
+      EXPECT_EQ(keys, expected.first);
+      ExpectPairBits(values, expected.second);
+    };
+    for (auto rank = packets.rbegin(); rank != packets.rend(); ++rank)
+      for (auto chunk = rank->rbegin(); chunk != rank->rend(); ++chunk)
+        coordinator.Exchange("sorted_pair", *chunk, apply);
+    EXPECT_EQ(calls, expected.first.empty() ? 0 : 1);
+  }
+}
+
+TEST(SparseGradientCommit, SortedPairApplyFailureIsSticky) {
+  const auto packets = MakePairPackets({{2, 4}, {1, 2, 3, 5}}, 7);
+  recstore::SparseGradientCommitCoordinator coordinator;
+  int calls = 0;
+  auto fail = [&](const auto&, const auto&) {
+    ++calls;
+    throw std::runtime_error("sorted pair storage failure");
+  };
+  for (size_t rank = 0; rank < packets.size(); ++rank) {
+    for (size_t chunk = 0; chunk < packets[rank].size(); ++chunk) {
+      if (rank == 1 && chunk + 1 == packets[rank].size())
+        EXPECT_THROW(coordinator.Exchange("sorted_failure", packets[rank][chunk], fail),
+                     std::runtime_error);
+      else
+        EXPECT_EQ(coordinator.Exchange("sorted_failure", packets[rank][chunk], fail), -1);
+    }
+  }
+  EXPECT_EQ(calls, 1);
+  EXPECT_THROW(coordinator.Exchange("sorted_failure", packets[1].back(), fail),
+               std::runtime_error);
+  auto query = recstore::DecodeSparseGradientCommit(packets[0][0]);
+  query.kind = 1;
+  query.rows = 0;
+  EXPECT_THROW(coordinator.Exchange("sorted_failure",
+      recstore::PackSparseGradientCommit(query), fail), std::runtime_error);
+  EXPECT_EQ(calls, 1);
+}
