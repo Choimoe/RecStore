@@ -80,6 +80,22 @@ inline void ScaleSparseGradientSums(std::vector<float>& values,
   }
 }
 
+inline bool SparseCommitAggregateReuseEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("RECSTORE_SPARSE_COMMIT_REUSE_AGGREGATE");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  return enabled;
+}
+
+// Bound retained capacity per table/session, without rejecting larger batches.
+inline bool SparseCommitAggregateCapacityFits(size_t key_capacity,
+                                               size_t grad_capacity) {
+  constexpr size_t max_bytes = size_t{64} << 20;
+  return key_capacity <= max_bytes / sizeof(uint64_t) &&
+      grad_capacity <= (max_bytes - key_capacity * sizeof(uint64_t)) / sizeof(float);
+}
+
 inline uint64_t SparseCommitProfileNowNs() {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -383,8 +399,11 @@ public:
       throw std::runtime_error(
           "Sparse gradient session configuration mismatch");
     }
-    if (h.kind == 3)
+    if (h.kind == 3) {
       state.failed = true;
+      std::vector<uint64_t>().swap(state.aggregate_keys);
+      std::vector<float>().swap(state.aggregate_grads);
+    }
     if (state.failed)
       throw std::runtime_error(
           "Sparse gradient session aborted or commit failed");
@@ -486,6 +505,11 @@ public:
       return state.committed;
     std::vector<uint64_t> keys;
     std::vector<float> grads;
+    const bool reuse_aggregate = SparseCommitAggregateReuseEnabled();
+    if (reuse_aggregate) {
+      keys.swap(state.aggregate_keys);
+      grads.swap(state.aggregate_grads);
+    }
     std::unordered_map<uint64_t, size_t> positions;
     const bool sorted_pair = SparseCommitSortedPairEnabled() &&
         TryAggregateSortedPair(state.ranks, h, keys, grads);
@@ -548,6 +572,15 @@ public:
       state.profile_unique_rows += keys.size();
     }
     FinishStep(state, h, profile, request_start, collected, applied, sorted_pair);
+    if (reuse_aggregate &&
+        SparseCommitAggregateCapacityFits(keys.capacity(), grads.capacity())) {
+      // Retain only empty vectors after successful apply. Exceptions keep the
+      // original local destruction path and never cache partially filled data.
+      keys.clear();
+      grads.clear();
+      keys.swap(state.aggregate_keys);
+      grads.swap(state.aggregate_grads);
+    }
     return state.committed;
   }
 
@@ -557,6 +590,9 @@ private:
     int64_t committed = -1;
     bool failed       = false;
     std::vector<std::vector<std::string>> ranks;
+    // V1 scratch capacity is owned by this session and protected by mu_.
+    std::vector<uint64_t> aggregate_keys;
+    std::vector<float> aggregate_grads;
     // V4 retains only the last completed step for bit-identical ACK retries.
     std::vector<std::vector<std::string>> last_exact_packets;
     int exact_owner_rank = -1;

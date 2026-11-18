@@ -1309,3 +1309,125 @@ TEST(SparseGradientCommit, DirectGatherEmptyAndInvalidLeaveBoundsIntact) {
   invalid.kind = 1;
   reject(invalid, valid, 2, bytes);
 }
+
+// Run in separate processes with aggregate reuse 0/1, sorted pair 0/1,
+// reserve 0/1 and pow2 0/1; feature flags are cached at process startup.
+TEST(SparseGradientCommit, AggregateReuseRetainedCapacityLimitIsOverflowSafe) {
+  constexpr size_t limit = size_t{64} << 20;
+  EXPECT_TRUE(recstore::SparseCommitAggregateCapacityFits(0, 0));
+  EXPECT_TRUE(recstore::SparseCommitAggregateCapacityFits(1, (limit - 8) / 4));
+  EXPECT_FALSE(recstore::SparseCommitAggregateCapacityFits(1, (limit - 8) / 4 + 1));
+  EXPECT_FALSE(recstore::SparseCommitAggregateCapacityFits(limit / 8 + 1, 0));
+  EXPECT_FALSE(recstore::SparseCommitAggregateCapacityFits(SIZE_MAX, 0));
+  EXPECT_FALSE(recstore::SparseCommitAggregateCapacityFits(0, SIZE_MAX));
+}
+
+TEST(SparseGradientCommit, AggregateReuseKeepsAlternatingStepBitsAndClose) {
+  std::vector<std::vector<uint64_t>> large(2, std::vector<uint64_t>(96));
+  std::iota(large[0].begin(), large[0].end(), uint64_t{0});
+  std::iota(large[1].begin(), large[1].end(), uint64_t{48});
+  const std::vector<std::vector<std::vector<uint64_t>>> cases = {
+      large, {{2}, {2}}, {{}, {}}, {{}, {0, 8}},
+      {{1, 3, 2, 4}, {1, 2}}, {{1, 2, 2, 4}, {2, 4}}, large};
+  for (uint32_t dim : {1u, 7u, 128u, 129u}) {
+    recstore::SparseGradientCommitCoordinator coordinator;
+    int calls = 0;
+    const uint64_t* first_keys = nullptr;
+    const float* first_grads = nullptr;
+    size_t first_key_capacity = 0, first_grad_capacity = 0;
+    recstore::SparseGradientCommitHeader last;
+    for (size_t step = 0; step < cases.size(); ++step) {
+      auto packets = MakePairPackets(cases[step], dim);
+      for (auto& rank : packets) {
+        for (auto& packet : rank) {
+          auto h = recstore::DecodeSparseGradientCommit(packet);
+          h.step = step;
+          std::memcpy(packet.data(), &h, sizeof(h));
+          last = h;
+        }
+      }
+      auto expected = PairHashReference(packets, dim);
+      for (auto& value : expected.second) value /= 2;
+      const int before = calls;
+      auto apply = [&](const auto& keys, const auto& grads) {
+        ++calls;
+        EXPECT_EQ(keys, expected.first);
+        ExpectPairBits(grads, expected.second);
+        if (step == 0) {
+          first_keys = keys.data(); first_grads = grads.data();
+          first_key_capacity = keys.capacity(); first_grad_capacity = grads.capacity();
+        } else if (recstore::SparseCommitAggregateReuseEnabled()) {
+          // Smaller, empty and hash-fallback steps must not lose the cache.
+          EXPECT_EQ(keys.data(), first_keys);
+          EXPECT_EQ(grads.data(), first_grads);
+          EXPECT_EQ(keys.capacity(), first_key_capacity);
+          EXPECT_EQ(grads.capacity(), first_grad_capacity);
+        }
+      };
+      for (auto rank = packets.rbegin(); rank != packets.rend(); ++rank)
+        for (auto packet = rank->rbegin(); packet != rank->rend(); ++packet)
+          coordinator.Exchange("reuse", *packet, apply);
+      EXPECT_EQ(calls, before + (expected.first.empty() ? 0 : 1));
+      EXPECT_EQ(coordinator.Exchange("reuse", packets[0][0], apply), step);
+      EXPECT_EQ(calls, before + (expected.first.empty() ? 0 : 1));
+    }
+    last.kind = 2; last.rows = 0;
+    for (last.rank = 0; last.rank < 2; ++last.rank)
+      EXPECT_EQ(coordinator.Exchange("reuse", recstore::PackSparseGradientCommit(last),
+                                    [](const auto&, const auto&) { FAIL() << "close applied"; }),
+                cases.size() - 1);
+    auto restart = MakePairPackets({{9}, {9}}, dim);
+    for (auto& rank : restart)
+      for (auto& packet : rank) {
+        auto h = recstore::DecodeSparseGradientCommit(packet);
+        ++h.session;
+        std::memcpy(packet.data(), &h, sizeof(h));
+        coordinator.Exchange("reuse", packet, [](const auto&, const auto&) {});
+      }
+  }
+}
+
+TEST(SparseGradientCommit, AggregateReusePreservesFailureAndAbortAfterWarmStep) {
+  for (bool fail_apply : {false, true}) {
+    recstore::SparseGradientCommitCoordinator coordinator;
+    auto packets = MakePairPackets({{2, 4}, {1, 2, 3, 5}}, 7);
+    int calls = 0;
+    auto apply = [&](const auto&, const auto&) {
+      ++calls;
+      if (fail_apply && calls == 2)
+        throw std::runtime_error("reuse apply error");
+    };
+    for (const auto& rank : packets)
+      for (const auto& packet : rank)
+        coordinator.Exchange("failure", packet, apply);
+    for (auto& rank : packets)
+      for (auto& packet : rank) {
+        auto h = recstore::DecodeSparseGradientCommit(packet);
+        h.step = 1;
+        std::memcpy(packet.data(), &h, sizeof(h));
+      }
+    auto control = recstore::DecodeSparseGradientCommit(packets[0][0]);
+    control.rows = 0;
+    if (fail_apply) {
+      try {
+        for (const auto& rank : packets)
+          for (const auto& packet : rank)
+            coordinator.Exchange("failure", packet, apply);
+        FAIL() << "apply error was hidden";
+      } catch (const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(), "reuse apply error");
+      }
+    } else {
+      // Abort while one packet of the next step is present and cache is idle.
+      coordinator.Exchange("failure", packets[0][0], apply);
+      control.kind = 3;
+      EXPECT_THROW(coordinator.Exchange("failure", recstore::PackSparseGradientCommit(control), apply),
+                   std::runtime_error);
+    }
+    control.kind = 1;
+    EXPECT_THROW(coordinator.Exchange("failure", recstore::PackSparseGradientCommit(control), apply),
+                 std::runtime_error);
+    EXPECT_THROW(coordinator.Exchange("failure", packets[1].back(), apply), std::runtime_error);
+    EXPECT_EQ(calls, fail_apply ? 2 : 1);
+  }
+}
